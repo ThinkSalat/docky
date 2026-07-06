@@ -46,7 +46,7 @@ extension WidgetKind {
         switch self {
         case .weather, .calendar, .nowPlaying:
             true
-        case .calendarDate, .reminders, .batteries, .systemStatus, .search:
+        case .calendarDate, .reminders, .batteries, .systemStatus, .search, .photoFrame:
             false
         case .external(let identifier):
             !(ExternalWidgetRegistry.shared.metadata(for: identifier)?.settingsSchema.isEmpty ?? true)
