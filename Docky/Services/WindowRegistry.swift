@@ -760,6 +760,13 @@ final class WindowRegistry: ObservableObject {
         bumpWindowToTop(element: focusedElement, pid: pid)
     }
 
+    func liveWindows(for pid: pid_t) -> [AppWindow] {
+        guard pid > 0,
+              let app = NSRunningApplication(processIdentifier: pid),
+              app.activationPolicy == .regular else { return [] }
+        return enumerateWindows(for: app)
+    }
+
     private func enumerateWindows(for app: NSRunningApplication) -> [AppWindow] {
         let pid = app.processIdentifier
         guard pid > 0 else { return [] }
