@@ -1026,12 +1026,13 @@ final class MainWindow: NSPanel {
         let visibleFrame = screen.visibleFrame
         var fullscreenCandidate = false
         var foundMaximized = false
+        var fullscreenCandidatePIDs = Set<pid_t>()
 
         for info in windows {
             guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
 
-            if let pidNumber = info[kCGWindowOwnerPID as String] as? NSNumber,
-               pidNumber.int32Value == ownPID {
+            let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+            if ownerPID == ownPID {
                 continue
             }
 
@@ -1053,21 +1054,28 @@ final class MainWindow: NSPanel {
             // exactly, which is smaller than frame by the menubar.
             if Self.rect(nsBounds, matches: frame) {
                 fullscreenCandidate = true
+                if let ownerPID { fullscreenCandidatePIDs.insert(ownerPID) }
             } else if Self.rect(nsBounds, matches: visibleFrame) {
                 foundMaximized = true
             }
-
-            if fullscreenCandidate && foundMaximized { break }
         }
 
         let foundFullscreen = fullscreenCandidate
-            && registryReportsFullscreenWindow(matching: frame, primaryScreenHeight: primaryScreenHeight)
+            && registryReportsFullscreenWindow(
+                candidatePIDs: fullscreenCandidatePIDs,
+                matching: frame,
+                primaryScreenHeight: primaryScreenHeight
+            )
 
         return ContentOverlapObservation(isFullscreen: foundFullscreen, isMaximized: foundMaximized)
     }
 
-    private func registryReportsFullscreenWindow(matching frame: CGRect, primaryScreenHeight: CGFloat) -> Bool {
-        WindowRegistry.shared.windows.contains { window in
+    private func registryReportsFullscreenWindow(
+        candidatePIDs: Set<pid_t>,
+        matching frame: CGRect,
+        primaryScreenHeight: CGFloat
+    ) -> Bool {
+        func fills(_ window: AppWindow) -> Bool {
             guard !window.isMinimized, let axFrame = window.frame else { return false }
             let nsFrame = CGRect(
                 x: axFrame.minX,
@@ -1077,6 +1085,14 @@ final class MainWindow: NSPanel {
             )
             return Self.rect(nsFrame, matches: frame, tolerance: 2)
         }
+
+        for pid in candidatePIDs {
+            if WindowRegistry.shared.liveWindows(for: pid).contains(where: fills) {
+                return true
+            }
+        }
+
+        return WindowRegistry.shared.windows.contains(where: fills)
     }
 
     private static func rect(_ a: CGRect, matches b: CGRect, tolerance: CGFloat = 1) -> Bool {
