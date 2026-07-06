@@ -1773,6 +1773,27 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+    /// Duration of Docky's autohide slide (show/hide) window animation. A value
+    /// of 0 snaps the window into place instantly.
+    var autohideAnimationDuration: TimeInterval {
+        didSet {
+            let clampedValue = min(max(0, autohideAnimationDuration), 1)
+            guard clampedValue != oldValue else {
+                if autohideAnimationDuration != clampedValue {
+                    autohideAnimationDuration = clampedValue
+                }
+                return
+            }
+
+            if autohideAnimationDuration != clampedValue {
+                autohideAnimationDuration = clampedValue
+                return
+            }
+
+            defaults.set(clampedValue, forKey: Keys.autohideAnimationDuration)
+        }
+    }
+
     /// How Docky reacts to a maximized (visibleFrame-sized, non-fullscreen)
     /// window on its target screen.
     var maximizedWindowBehavior: MaximizedWindowBehavior {
@@ -3531,6 +3552,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let folderBadgePreviewStyle = "docky.folderBadgePreviewStyle"
         static let opensAtLogin = "docky.opensAtLogin"
         static let autohideWindowDelay = "docky.autohideWindowDelay"
+        static let autohideAnimationDuration = "docky.autohideAnimationDuration"
         static let fullscreenRevealDelay = "docky.fullscreenRevealDelay"
         static let windowPreviewHoverDelay = "docky.windowPreviewHoverDelay"
         static let windowPreviewLayout = "docky.windowPreviewLayout"
@@ -3639,6 +3661,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let folderBadgePreviewStyle: FolderBadgePreviewStyle = .dot
         static let opensAtLogin = true
         static let autohideWindowDelay: TimeInterval = 0.5
+        static let autohideAnimationDuration: TimeInterval = 0.22
         static let fullscreenRevealDelay: TimeInterval = 0.5
         static let windowPreviewHoverDelay: TimeInterval = 1.0
         static let windowPreviewLayout: WindowSwitcherLayout = .auto
@@ -3770,6 +3793,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         let storedFolderBadgePreviewStyle = defaults.string(forKey: Keys.folderBadgePreviewStyle)
         let storedOpensAtLogin = defaults.object(forKey: Keys.opensAtLogin) as? Bool
         let storedAutohideWindowDelay = defaults.object(forKey: Keys.autohideWindowDelay) as? Double
+        let storedAutohideAnimationDuration = defaults.object(forKey: Keys.autohideAnimationDuration) as? Double
         let storedFullscreenRevealDelay = defaults.object(forKey: Keys.fullscreenRevealDelay) as? Double
         let storedWindowPreviewHoverDelay = defaults.object(forKey: Keys.windowPreviewHoverDelay) as? Double
         let storedWindowPreviewLayout = defaults.string(forKey: Keys.windowPreviewLayout)
@@ -3899,6 +3923,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
             ?? DefaultValues.folderBadgePreviewStyle
         self.opensAtLogin = storedOpensAtLogin ?? LaunchAtLoginService.shared.isEnabled
         self.autohideWindowDelay = max(storedAutohideWindowDelay ?? DefaultValues.autohideWindowDelay, 0)
+        self.autohideAnimationDuration = min(max(storedAutohideAnimationDuration ?? DefaultValues.autohideAnimationDuration, 0), 1)
         self.fullscreenRevealDelay = max(storedFullscreenRevealDelay ?? DefaultValues.fullscreenRevealDelay, 0)
         self.windowPreviewHoverDelay = max(storedWindowPreviewHoverDelay ?? DefaultValues.windowPreviewHoverDelay, 0)
         self.windowPreviewLayout = storedWindowPreviewLayout.flatMap(WindowSwitcherLayout.init(rawValue:)) ?? DefaultValues.windowPreviewLayout
@@ -4166,6 +4191,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         folderBadgeMode = DefaultValues.folderBadgeMode
         folderBadgePreviewStyle = DefaultValues.folderBadgePreviewStyle
         autohideWindowDelay = DefaultValues.autohideWindowDelay
+        autohideAnimationDuration = DefaultValues.autohideAnimationDuration
         hidesDuringFullscreen = DefaultValues.hidesDuringFullscreen
         fullscreenRevealDelay = DefaultValues.fullscreenRevealDelay
         enablesShelveMode = DefaultValues.enablesShelveMode
@@ -4225,6 +4251,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         folderBadgePreviewStyle = DefaultValues.folderBadgePreviewStyle
         opensAtLogin = DefaultValues.opensAtLogin
         autohideWindowDelay = DefaultValues.autohideWindowDelay
+        autohideAnimationDuration = DefaultValues.autohideAnimationDuration
         fullscreenRevealDelay = DefaultValues.fullscreenRevealDelay
         windowPreviewHoverDelay = DefaultValues.windowPreviewHoverDelay
         windowPreviewLayout = DefaultValues.windowPreviewLayout

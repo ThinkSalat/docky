@@ -186,6 +186,28 @@ struct BehaviorSettingsView: View {
             .disabled(!preferences.autohidesWindow)
 
             VStack(alignment: .leading, spacing: 8) {
+                Text("Animation Duration")
+                    .font(.headline)
+
+                HStack {
+                    Slider(value: $preferences.autohideAnimationDuration, in: 0...1, step: 0.05) {
+                        Text("Animation Duration")
+                    }
+                    .labelsHidden()
+
+                    Text("\(String(format: "%.2f", preferences.autohideAnimationDuration)) s")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 56, alignment: .trailing)
+                }
+
+                Text("How long the slide takes when Docky shows or hides its window. Set to 0 to snap instantly.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 4)
+            .disabled(!preferences.autohidesWindow)
+
+            VStack(alignment: .leading, spacing: 8) {
                 Toggle("Hide in Fullscreen", isOn: $preferences.hidesDuringFullscreen)
                     .font(.headline)
 
