@@ -183,7 +183,6 @@ final class MainWindow: NSPanel {
 
     private let backgroundBlurRadius = 10
     private let hiddenRevealThickness: CGFloat = 2
-    private let baseAutohideAnimationDuration: TimeInterval = 0.22
     private let tileMutationAnimationDuration: TimeInterval = 0.18
     private let dockSettings = DockSettingsService.shared
     private let preferences = DockyPreferences.shared
@@ -851,7 +850,7 @@ final class MainWindow: NSPanel {
     }
 
     private var autohideAnimationDuration: TimeInterval {
-        max(0.16, min(0.5, baseAutohideAnimationDuration * max(dockSettings.autohideTimeModifier, 0.01)))
+        min(max(0, preferences.autohideAnimationDuration), 1)
     }
 
     private func overflowContentScale(
