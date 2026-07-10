@@ -380,6 +380,250 @@
           "requiresFrontmost": true,
           "holdOption": false,
           "when": { "bundleIdentifierEquals": "com.anthropic.claudefordesktop" }
+        },
+        {
+          "id": "safari.new-window",
+          "title": "New Window",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.apple.Safari",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.apple.Safari\"\n    make new document\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "com.apple.Safari" }
+        },
+        {
+          "id": "safari.new-private-window",
+          "title": "New Private Window",
+          "kind": "menuClick",
+          "tileTypes": ["app"],
+          "targetApp": "com.apple.Safari",
+          "permissions": ["accessibility"],
+          "inputs": [],
+          "path": ["File", "New Private Window"],
+          "destructive": false,
+          "requiresFrontmost": true,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "com.apple.Safari" }
+        },
+        {
+          "id": "safari.new-tab",
+          "title": "New Tab",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.apple.Safari",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.apple.Safari\"\n    tell front window to make new tab\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": {
+            "all": [
+              { "bundleIdentifierEquals": "com.apple.Safari" },
+              { "flag": "isRunning" }
+            ]
+          }
+        },
+        {
+          "id": "chrome.new-window",
+          "title": "New Window",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.google.Chrome",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.google.Chrome\"\n    make new window\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "com.google.Chrome" }
+        },
+        {
+          "id": "chrome.new-incognito-window",
+          "title": "New Incognito Window",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.google.Chrome",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.google.Chrome\"\n    make new window with properties {mode:\"incognito\"}\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "com.google.Chrome" }
+        },
+        {
+          "id": "chrome.new-tab",
+          "title": "New Tab",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.google.Chrome",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.google.Chrome\"\n    tell front window to make new tab\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": {
+            "all": [
+              { "bundleIdentifierEquals": "com.google.Chrome" },
+              { "flag": "isRunning" }
+            ]
+          }
+        },
+        {
+          "id": "brave.new-window",
+          "title": "New Window",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.brave.Browser",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.brave.Browser\"\n    make new window\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "com.brave.Browser" }
+        },
+        {
+          "id": "brave.new-private-window",
+          "title": "New Private Window",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.brave.Browser",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.brave.Browser\"\n    make new window with properties {mode:\"incognito\"}\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "com.brave.Browser" }
+        },
+        {
+          "id": "brave.new-tab",
+          "title": "New Tab",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.brave.Browser",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.brave.Browser\"\n    tell front window to make new tab\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": {
+            "all": [
+              { "bundleIdentifierEquals": "com.brave.Browser" },
+              { "flag": "isRunning" }
+            ]
+          }
+        },
+        {
+          "id": "edge.new-window",
+          "title": "New Window",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.microsoft.edgemac",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.microsoft.edgemac\"\n    make new window\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "com.microsoft.edgemac" }
+        },
+        {
+          "id": "edge.new-inprivate-window",
+          "title": "New InPrivate Window",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.microsoft.edgemac",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.microsoft.edgemac\"\n    make new window with properties {mode:\"incognito\"}\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "com.microsoft.edgemac" }
+        },
+        {
+          "id": "edge.new-tab",
+          "title": "New Tab",
+          "kind": "applescript",
+          "tileTypes": ["app"],
+          "targetApp": "com.microsoft.edgemac",
+          "permissions": [],
+          "inputs": [],
+          "script": "tell application id \"com.microsoft.edgemac\"\n    tell front window to make new tab\nend tell",
+          "destructive": false,
+          "requiresFrontmost": false,
+          "holdOption": false,
+          "when": {
+            "all": [
+              { "bundleIdentifierEquals": "com.microsoft.edgemac" },
+              { "flag": "isRunning" }
+            ]
+          }
+        },
+        {
+          "id": "firefox.new-window",
+          "title": "New Window",
+          "kind": "menuClick",
+          "tileTypes": ["app"],
+          "targetApp": "org.mozilla.firefox",
+          "permissions": ["accessibility"],
+          "inputs": [],
+          "path": ["File", "New Window"],
+          "destructive": false,
+          "requiresFrontmost": true,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "org.mozilla.firefox" }
+        },
+        {
+          "id": "firefox.new-private-window",
+          "title": "New Private Window",
+          "kind": "menuClick",
+          "tileTypes": ["app"],
+          "targetApp": "org.mozilla.firefox",
+          "permissions": ["accessibility"],
+          "inputs": [],
+          "path": ["File", "New Private Window"],
+          "destructive": false,
+          "requiresFrontmost": true,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "org.mozilla.firefox" }
+        },
+        {
+          "id": "vscode.new-window",
+          "title": "New Window",
+          "kind": "menuClick",
+          "tileTypes": ["app"],
+          "targetApp": "com.microsoft.VSCode",
+          "permissions": ["accessibility"],
+          "inputs": [],
+          "path": ["File", "New Window"],
+          "destructive": false,
+          "requiresFrontmost": true,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "com.microsoft.VSCode" }
+        },
+        {
+          "id": "cursor.new-window",
+          "title": "New Window",
+          "kind": "menuClick",
+          "tileTypes": ["app"],
+          "targetApp": "com.todesktop.230313mzl4w4u92",
+          "permissions": ["accessibility"],
+          "inputs": [],
+          "path": ["File", "New Window"],
+          "destructive": false,
+          "requiresFrontmost": true,
+          "holdOption": false,
+          "when": { "bundleIdentifierEquals": "com.todesktop.230313mzl4w4u92" }
         }
       ]
     }
