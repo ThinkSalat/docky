@@ -1024,6 +1024,7 @@ final class MainWindow: NSPanel {
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let frame = screen.frame
         let visibleFrame = screen.visibleFrame
+        let dockSide = preferences.windowPosition.resolved(systemOrientation: dockSettings.orientation)
         var fullscreenCandidate = false
         var foundMaximized = false
         var fullscreenCandidatePIDs = Set<pid_t>()
@@ -1050,12 +1051,16 @@ final class MainWindow: NSPanel {
             )
 
             // Fullscreen: window covers the entire NSScreen.frame (including
-            // the menubar area). Maximized: window matches visibleFrame
-            // exactly, which is smaller than frame by the menubar.
+            // the menubar area). Maximized: window fills a full axis of the
+            // visibleFrame flush against Docky's edge, so it falls behind
+            // Docky. This catches a true maximize (all four edges flush) as
+            // well as a half tile that spans the full axis touching Docky
+            // (e.g. tiled right with Docky on the right, or tiled top with
+            // Docky on either side), which a strict visibleFrame match misses.
             if Self.rect(nsBounds, matches: frame) {
                 fullscreenCandidate = true
                 if let ownerPID { fullscreenCandidatePIDs.insert(ownerPID) }
-            } else if Self.rect(nsBounds, matches: visibleFrame) {
+            } else if Self.fillsFullAxisBehindDock(nsBounds, visibleFrame: visibleFrame, dockSide: dockSide) {
                 foundMaximized = true
             }
         }
@@ -1100,5 +1105,32 @@ final class MainWindow: NSPanel {
             && abs(a.minY - b.minY) < tolerance
             && abs(a.width - b.width) < tolerance
             && abs(a.height - b.height) < tolerance
+    }
+
+    /// True when `rect` fills a full axis of `visibleFrame` (at least three
+    /// edges flush, i.e. a half tile or full maximize) AND is flush against
+    /// the edge Docky occupies, meaning it extends into Docky's strip. A
+    /// window with a non-flush edge on Docky's side (e.g. tiled to the
+    /// opposite half) stays clear and returns false.
+    private static func fillsFullAxisBehindDock(
+        _ rect: CGRect,
+        visibleFrame: CGRect,
+        dockSide: ResolvedDockWindowPosition,
+        tolerance: CGFloat = 2
+    ) -> Bool {
+        let flushLeft = abs(rect.minX - visibleFrame.minX) < tolerance
+        let flushRight = abs(rect.maxX - visibleFrame.maxX) < tolerance
+        let flushBottom = abs(rect.minY - visibleFrame.minY) < tolerance
+        let flushTop = abs(rect.maxY - visibleFrame.maxY) < tolerance
+
+        let flushCount = [flushLeft, flushRight, flushBottom, flushTop].filter { $0 }.count
+        guard flushCount >= 3 else { return false }
+
+        switch dockSide {
+        case .left: return flushLeft
+        case .right: return flushRight
+        case .bottom: return flushBottom
+        case .top: return flushTop
+        }
     }
 }
