@@ -104,6 +104,22 @@ struct ProcessSerialNumber {
 @_silgen_name("GetProcessForPID")
 func GetProcessForPID(_ pid: pid_t, _ psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
 
+@_silgen_name("ShowHideProcess")
+private func ShowHideProcess(
+    _ psn: UnsafePointer<ProcessSerialNumber>,
+    _ visible: UInt8
+) -> Int16
+
+/// Process Manager fallback for visibility changes. `NSRunningApplication`
+/// can refuse `hide()` for another process when Docky's Accessibility grant
+/// is stale, even though the classic process-level operation still succeeds.
+@discardableResult
+func setProcessVisible(pid: pid_t, visible: Bool) -> Bool {
+    var psn = ProcessSerialNumber()
+    guard GetProcessForPID(pid, &psn) == noErr else { return false }
+    return ShowHideProcess(&psn, visible ? 1 : 0) == noErr
+}
+
 enum SLPSMode: UInt32 {
     case allWindows = 0x100
     case userGenerated = 0x200

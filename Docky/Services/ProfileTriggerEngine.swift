@@ -20,6 +20,7 @@ final class ProfileTriggerEngine {
     private let profileService = ProfileService.shared
     private var cancellables: Set<AnyCancellable> = []
     private var minuteTimer: Timer?
+    private var spacePollTimer: Timer?
     private var currentFrontmostBundleID: String?
     private var currentSpaceApps: Set<String> = []
     private var currentExactSpaceID: UInt64 = 0
@@ -35,6 +36,7 @@ final class ProfileTriggerEngine {
         currentExactSpaceID = ProfileTriggerEngine.activeSpaceID()
         observeFrontmostApp()
         observeActiveSpace()
+        scheduleSpacePolling()
         scheduleMinuteTick()
         evaluate()
     }
@@ -43,6 +45,8 @@ final class ProfileTriggerEngine {
         cancellables.removeAll()
         minuteTimer?.invalidate()
         minuteTimer = nil
+        spacePollTimer?.invalidate()
+        spacePollTimer = nil
     }
 
     /// Bundle identifiers of every app that currently has a visible
@@ -104,6 +108,30 @@ final class ProfileTriggerEngine {
     /// deliberately matches no exact-space trigger.
     static func activeSpaceID() -> UInt64 {
         CGSGetActiveSpace(CGSMainConnectionID())
+    }
+
+    /// `NSWorkspace.activeSpaceDidChangeNotification` can arrive only after
+    /// the multi-second Space transition animation completes. Polling this
+    /// inexpensive SkyLight value lets exact-Space profiles change as soon
+    /// as the system commits the destination Space. The public notification
+    /// remains installed as a fallback and refreshes app-presence triggers.
+    private func scheduleSpacePolling() {
+        spacePollTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.pollActiveSpace()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        spacePollTimer = timer
+    }
+
+    private func pollActiveSpace() {
+        let nextSpaceID = ProfileTriggerEngine.activeSpaceID()
+        guard nextSpaceID != 0, nextSpaceID != currentExactSpaceID else { return }
+        currentExactSpaceID = nextSpaceID
+        currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
+        evaluate()
     }
 
     private func scheduleMinuteTick() {

@@ -113,7 +113,14 @@ final class WorkspaceService: ObservableObject {
     }
 
     func activateOrOpen(bundleIdentifier: String) {
-        guard let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else {
+        let frontmostApp = NSWorkspace.shared.frontmostApplication
+        let runningApp = if frontmostApp?.bundleIdentifier == bundleIdentifier {
+            frontmostApp
+        } else {
+            NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first
+        }
+
+        guard let runningApp else {
             // Not running: launch it.
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
                 openApplication(at: appURL)
@@ -121,11 +128,28 @@ final class WorkspaceService: ObservableObject {
             return
         }
 
+        let isFrontmost = frontmostApp?.bundleIdentifier == bundleIdentifier
+            && !runningApp.isHidden
+
+        // Hiding (or intentionally doing nothing) does not require window
+        // enumeration. Handle these choices before consulting Accessibility
+        // state so a stale/empty AX registry cannot turn a frontmost-app
+        // click into an ineffective open/activate request.
+        if isFrontmost {
+            switch DockyPreferences.shared.appTileFrontmostClickBehavior {
+            case .none:
+                return
+            case .hide:
+                hide(runningApp)
+                return
+            case .cycleWindows, .minimizeAll:
+                break
+            }
+        }
+
         let accessibilityGranted = PermissionsService.shared.accessibility == .granted
         let allWindows = accessibilityGranted ? appWindows(bundleIdentifier: bundleIdentifier) : []
         let visibleWindows = allWindows.filter { !$0.isMinimized }
-        let isFrontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleIdentifier
-            && !runningApp.isHidden
 
         // Running but no AX windows: spawn a new window.
         if accessibilityGranted, allWindows.isEmpty,
@@ -165,7 +189,7 @@ final class WorkspaceService: ObservableObject {
         case .none:
             return
         case .hide:
-            runningApp.hide()
+            hide(runningApp)
         case .cycleWindows:
             cycleFrontmostAppWindows(visibleWindows)
         case .minimizeAll:
@@ -565,7 +589,20 @@ final class WorkspaceService: ObservableObject {
             return
         }
 
-        runningApp.hide()
+        hide(runningApp)
+    }
+
+    @discardableResult
+    private func hide(_ runningApp: NSRunningApplication) -> Bool {
+        // `NSRunningApplication.hide()` can report success while the target
+        // remains visible. Always issue the process-level operation as well
+        // instead of short-circuiting when AppKit returns true.
+        let appKitResult = runningApp.hide()
+        let processManagerResult = setProcessVisible(
+            pid: runningApp.processIdentifier,
+            visible: false
+        )
+        return appKitResult || processManagerResult
     }
 
     func quit(bundleIdentifier: String, force: Bool = false) {
