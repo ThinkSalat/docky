@@ -18,12 +18,14 @@ enum ProfileTrigger: Codable, Equatable, Identifiable {
     case timeOfDay(TimeOfDayTrigger)
     case frontmostApp(FrontmostAppTrigger)
     case space(SpaceTrigger)
+    case exactSpace(ExactSpaceTrigger)
 
     var id: String {
         switch self {
         case .timeOfDay(let trigger): return trigger.id
         case .frontmostApp(let trigger): return trigger.id
         case .space(let trigger): return trigger.id
+        case .exactSpace(let trigger): return trigger.id
         }
     }
 
@@ -32,6 +34,7 @@ enum ProfileTrigger: Codable, Equatable, Identifiable {
     /// app (frontmost choice) which beats time-of-day (passive).
     var specificity: Int {
         switch self {
+        case .exactSpace: return 4
         case .space: return 3
         case .frontmostApp: return 2
         case .timeOfDay: return 1
@@ -105,5 +108,22 @@ struct SpaceTrigger: Codable, Equatable, Identifiable {
     init(id: String = UUID().uuidString, bundleIdentifier: String) {
         self.id = id
         self.bundleIdentifier = bundleIdentifier
+    }
+}
+
+/// Fires only while the focused display is showing the exact Mission
+/// Control space captured by `spaceID`. Unlike `SpaceTrigger`, this does
+/// not depend on a particular app having a visible window in that space.
+///
+/// Space IDs come from the private SkyLight `CGSGetActiveSpace` API.
+/// macOS exposes a public space-change notification but no public space
+/// identity, so exact per-space profiles require this SPI.
+struct ExactSpaceTrigger: Codable, Equatable, Identifiable {
+    let id: String
+    var spaceID: UInt64
+
+    init(id: String = UUID().uuidString, spaceID: UInt64) {
+        self.id = id
+        self.spaceID = spaceID
     }
 }

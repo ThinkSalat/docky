@@ -235,6 +235,16 @@ private struct ProfileTriggersSection: View {
                 } label: {
                     Label("Space with App…", systemImage: "rectangle.3.group")
                 }
+                Button {
+                    let spaceID = ProfileTriggerEngine.activeSpaceID()
+                    guard spaceID != 0 else { return }
+                    profileService.addTrigger(
+                        .exactSpace(ExactSpaceTrigger(spaceID: spaceID)),
+                        to: profile.id
+                    )
+                } label: {
+                    Label("Exact Current Space", systemImage: "rectangle.inset.filled")
+                }
             } label: {
                 Label("Add Trigger…", systemImage: "plus.circle")
                     .font(.caption)
@@ -277,6 +287,7 @@ private struct TriggerRow: View {
         case .timeOfDay: return "clock"
         case .frontmostApp: return "app.dashed"
         case .space: return "rectangle.3.group"
+        case .exactSpace: return "rectangle.inset.filled"
         }
     }
 
@@ -289,6 +300,8 @@ private struct TriggerRow: View {
             FrontmostAppTriggerEditor(profile: profile, triggerID: trigger.id, model: t)
         case .space(let t):
             SpaceTriggerEditor(profile: profile, triggerID: trigger.id, model: t)
+        case .exactSpace(let t):
+            ExactSpaceTriggerEditor(profile: profile, triggerID: trigger.id, model: t)
         }
     }
 }
@@ -529,5 +542,29 @@ private struct SpaceTriggerEditor: View {
 
     private func commit() {
         profileService.updateTrigger(.space(model), in: profile.id)
+    }
+}
+
+private struct ExactSpaceTriggerEditor: View {
+    let profile: DockProfile
+    let triggerID: String
+    @State var model: ExactSpaceTrigger
+    @Bindable private var profileService = ProfileService.shared
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("When on exact Space \(model.spaceID)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Use Current Space") {
+                let currentID = ProfileTriggerEngine.activeSpaceID()
+                guard currentID != 0 else { return }
+                model.spaceID = currentID
+                profileService.updateTrigger(.exactSpace(model), in: profile.id)
+            }
+            .buttonStyle(.link)
+            .font(.caption)
+        }
     }
 }

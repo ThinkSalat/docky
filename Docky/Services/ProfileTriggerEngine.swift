@@ -22,6 +22,7 @@ final class ProfileTriggerEngine {
     private var minuteTimer: Timer?
     private var currentFrontmostBundleID: String?
     private var currentSpaceApps: Set<String> = []
+    private var currentExactSpaceID: UInt64 = 0
     /// id of the profile we activated automatically. Lets the user
     /// override us (manual pick) without us immediately reverting.
     private var lastAutoActivatedProfileID: String?
@@ -31,6 +32,7 @@ final class ProfileTriggerEngine {
     func start() {
         currentFrontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
+        currentExactSpaceID = ProfileTriggerEngine.activeSpaceID()
         observeFrontmostApp()
         observeActiveSpace()
         scheduleMinuteTick()
@@ -91,9 +93,17 @@ final class ProfileTriggerEngine {
             .sink { [weak self] _ in
                 guard let self else { return }
                 self.currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
+                self.currentExactSpaceID = ProfileTriggerEngine.activeSpaceID()
                 self.evaluate()
             }
             .store(in: &cancellables)
+    }
+
+    /// Stable identifier for the Mission Control space on the focused
+    /// display. A zero result means SkyLight could not resolve a space and
+    /// deliberately matches no exact-space trigger.
+    static func activeSpaceID() -> UInt64 {
+        CGSGetActiveSpace(CGSMainConnectionID())
     }
 
     private func scheduleMinuteTick() {
@@ -151,6 +161,7 @@ final class ProfileTriggerEngine {
         let now = Date()
         let frontmost = currentFrontmostBundleID
         let spaceApps = currentSpaceApps
+        let exactSpaceID = currentExactSpaceID
 
         struct Match {
             let profile: DockProfile
@@ -161,7 +172,13 @@ final class ProfileTriggerEngine {
         for profile in profileService.profiles {
             var profileBest: Int?
             for trigger in profile.triggers {
-                guard ProfileTriggerEngine.trigger(trigger, matches: now, frontmost: frontmost, spaceApps: spaceApps) else { continue }
+                guard ProfileTriggerEngine.trigger(
+                    trigger,
+                    matches: now,
+                    frontmost: frontmost,
+                    spaceApps: spaceApps,
+                    exactSpaceID: exactSpaceID
+                ) else { continue }
                 if profileBest.map({ trigger.specificity > $0 }) ?? true {
                     profileBest = trigger.specificity
                 }
@@ -185,7 +202,8 @@ final class ProfileTriggerEngine {
         _ trigger: ProfileTrigger,
         matches now: Date,
         frontmost: String?,
-        spaceApps: Set<String>
+        spaceApps: Set<String>,
+        exactSpaceID: UInt64
     ) -> Bool {
         switch trigger {
         case .timeOfDay(let t):
@@ -194,6 +212,8 @@ final class ProfileTriggerEngine {
             return frontmost == t.bundleIdentifier
         case .space(let t):
             return spaceApps.contains(t.bundleIdentifier)
+        case .exactSpace(let t):
+            return exactSpaceID != 0 && exactSpaceID == t.spaceID
         }
     }
 }
