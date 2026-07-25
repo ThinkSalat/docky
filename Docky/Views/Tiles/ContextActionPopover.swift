@@ -235,15 +235,11 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
             beginAutohideInterruption(for: view)
             defer { endAutohideInterruption() }
 
-            let selector = NSSelectorFromString("_popUpMenuRelativeToRect:inView:preferredEdge:")
-            if menu.responds(to: selector) {
-                typealias Fn = @convention(c) (NSMenu, Selector, NSRect, NSView?, NSRectEdge) -> Void
-                let imp = menu.method(for: selector)
-                let fn = unsafeBitCast(imp, to: Fn.self)
-                fn(menu, selector, view.bounds, view, preferredEdge)
-                return
-            }
-
+            // Tahoe's private `_popUpMenuRelativeToRect:` implementation can
+            // create a 10-point-high cartouche after rapid Space transitions,
+            // leaving the entire menu rendered as a horizontal slit. The
+            // public API performs its own layout and screen-edge correction
+            // and remains stable across those transitions.
             menu.update()
             let anchor: NSPoint
             let anchorRect = view.bounds
