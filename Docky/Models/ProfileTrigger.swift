@@ -111,19 +111,24 @@ struct SpaceTrigger: Codable, Equatable, Identifiable {
     }
 }
 
-/// Fires only while the focused display is showing the exact Mission
-/// Control space captured by `spaceID`. Unlike `SpaceTrigger`, this does
-/// not depend on a particular app having a visible window in that space.
+/// Fires only while the display containing Docky's dock is showing the
+/// Mission Control space captured by `spaceUUID`. Unlike `SpaceTrigger`,
+/// this does not depend on a particular app having a visible window there.
 ///
-/// Space IDs come from the private SkyLight `CGSGetActiveSpace` API.
+/// Space UUIDs come from private SkyLight APIs.
 /// macOS exposes a public space-change notification but no public space
 /// identity, so exact per-space profiles require this SPI.
 struct ExactSpaceTrigger: Codable, Equatable, Identifiable {
     let id: String
-    var spaceID: UInt64
+    /// Retained only so triggers saved by development builds still decode.
+    /// Numeric Space IDs are session-local and must never be matched.
+    var spaceID: UInt64?
+    /// `nil` means unbound; the empty string is Desktop 1's valid identity.
+    var spaceUUID: String?
 
-    init(id: String = UUID().uuidString, spaceID: UInt64) {
+    init(id: String = UUID().uuidString, spaceUUID: String) {
         self.id = id
-        self.spaceID = spaceID
+        self.spaceID = nil
+        self.spaceUUID = spaceUUID
     }
 }

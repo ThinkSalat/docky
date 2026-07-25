@@ -236,14 +236,13 @@ private struct ProfileTriggersSection: View {
                     Label("Space with App…", systemImage: "rectangle.3.group")
                 }
                 Button {
-                    let spaceID = ProfileTriggerEngine.activeSpaceID()
-                    guard spaceID != 0 else { return }
+                    guard let spaceUUID = ProfileTriggerEngine.activeSpaceUUID() else { return }
                     profileService.addTrigger(
-                        .exactSpace(ExactSpaceTrigger(spaceID: spaceID)),
+                        .exactSpace(ExactSpaceTrigger(spaceUUID: spaceUUID)),
                         to: profile.id
                     )
                 } label: {
-                    Label("Exact Current Space", systemImage: "rectangle.inset.filled")
+                    Label("This Space", systemImage: "rectangle.inset.filled")
                 }
             } label: {
                 Label("Add Trigger…", systemImage: "plus.circle")
@@ -553,14 +552,14 @@ private struct ExactSpaceTriggerEditor: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text("When on exact Space \(model.spaceID)")
+            Text("When this Space is active on Docky's display")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Button("Use Current Space") {
-                let currentID = ProfileTriggerEngine.activeSpaceID()
-                guard currentID != 0 else { return }
-                model.spaceID = currentID
+            Button("Rebind") {
+                guard let currentUUID = ProfileTriggerEngine.activeSpaceUUID() else { return }
+                model.spaceID = nil
+                model.spaceUUID = currentUUID
                 profileService.updateTrigger(.exactSpace(model), in: profile.id)
             }
             .buttonStyle(.link)

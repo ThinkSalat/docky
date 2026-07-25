@@ -14,18 +14,9 @@ typealias CGSConnectionID = Int
 @_silgen_name("CGSMainConnectionID")
 func CGSMainConnectionID() -> CGSConnectionID
 
-// Returns the SkyLight space ID for the currently-active Mission Control
-// space on the focused display. Stable across logins (the same UUID-backed
-// id used by `com.apple.spaces`). Combined with
-// `NSWorkspace.activeSpaceDidChangeNotification` to drive profile-trigger
-// matching on space switches.
-@_silgen_name("CGSGetActiveSpace")
-func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
-
 // Returns the ordered list of spaces per managed display. Each element is
 // a dictionary with `Display Identifier` and `Spaces` keys; `Spaces` is
-// an ordered array of `{id64, uuid, type, …}` dicts. We use it to resolve
-// the active space's 1-based positional index.
+// an ordered array of `{id64, uuid, type, …}` dicts.
 @_silgen_name("CGSCopyManagedDisplaySpaces")
 func CGSCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> Unmanaged<CFArray>?
 

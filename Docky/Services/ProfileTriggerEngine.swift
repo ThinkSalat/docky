@@ -20,10 +20,9 @@ final class ProfileTriggerEngine {
     private let profileService = ProfileService.shared
     private var cancellables: Set<AnyCancellable> = []
     private var minuteTimer: Timer?
-    private var spacePollTimer: Timer?
     private var currentFrontmostBundleID: String?
     private var currentSpaceApps: Set<String> = []
-    private var currentExactSpaceID: UInt64 = 0
+    private var currentExactSpaceUUID: String?
     /// id of the profile we activated automatically. Lets the user
     /// override us (manual pick) without us immediately reverting.
     private var lastAutoActivatedProfileID: String?
@@ -33,10 +32,10 @@ final class ProfileTriggerEngine {
     func start() {
         currentFrontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
-        currentExactSpaceID = ProfileTriggerEngine.activeSpaceID()
+        currentExactSpaceUUID = ProfileTriggerEngine.activeSpaceUUID()
         observeFrontmostApp()
         observeActiveSpace()
-        scheduleSpacePolling()
+        observeDockScreen()
         scheduleMinuteTick()
         evaluate()
     }
@@ -45,8 +44,6 @@ final class ProfileTriggerEngine {
         cancellables.removeAll()
         minuteTimer?.invalidate()
         minuteTimer = nil
-        spacePollTimer?.invalidate()
-        spacePollTimer = nil
     }
 
     /// Bundle identifiers of every app that currently has a visible
@@ -97,41 +94,66 @@ final class ProfileTriggerEngine {
             .sink { [weak self] _ in
                 guard let self else { return }
                 self.currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
-                self.currentExactSpaceID = ProfileTriggerEngine.activeSpaceID()
+                self.currentExactSpaceUUID = ProfileTriggerEngine.activeSpaceUUID()
                 self.evaluate()
             }
             .store(in: &cancellables)
     }
 
-    /// Stable identifier for the Mission Control space on the focused
-    /// display. A zero result means SkyLight could not resolve a space and
-    /// deliberately matches no exact-space trigger.
-    static func activeSpaceID() -> UInt64 {
-        CGSGetActiveSpace(CGSMainConnectionID())
-    }
-
-    /// `NSWorkspace.activeSpaceDidChangeNotification` can arrive only after
-    /// the multi-second Space transition animation completes. Polling this
-    /// inexpensive SkyLight value lets exact-Space profiles change as soon
-    /// as the system commits the destination Space. The public notification
-    /// remains installed as a fallback and refreshes app-presence triggers.
-    private func scheduleSpacePolling() {
-        spacePollTimer?.invalidate()
-        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.pollActiveSpace()
+    private func observeDockScreen() {
+        NotificationCenter.default
+            .publisher(for: NSWindow.didChangeScreenNotification)
+            .compactMap { $0.object as? MainWindow }
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.currentExactSpaceUUID = ProfileTriggerEngine.activeSpaceUUID()
+                self.evaluate()
             }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        spacePollTimer = timer
+            .store(in: &cancellables)
     }
 
-    private func pollActiveSpace() {
-        let nextSpaceID = ProfileTriggerEngine.activeSpaceID()
-        guard nextSpaceID != 0, nextSpaceID != currentExactSpaceID else { return }
-        currentExactSpaceID = nextSpaceID
-        currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
-        evaluate()
+    /// Persistent identity of the active user Space on the display containing
+    /// Docky's dock. `nil` means SkyLight could not resolve one; `""` is the
+    /// valid identity of macOS's root desktop.
+    static func activeSpaceUUID() -> String? {
+        let dockScreen = NSApp.windows.lazy
+            .compactMap { $0 as? MainWindow }
+            .first?.screen ?? NSScreen.screens.first ?? NSScreen.main
+        guard let screenNumber = dockScreen?
+            .deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+              let displayUUID = CGDisplayCreateUUIDFromDisplayID(
+                  CGDirectDisplayID(screenNumber.uint32Value)
+              )?.takeRetainedValue(),
+              let rawDisplays = CGSCopyManagedDisplaySpaces(
+                  CGSMainConnectionID()
+              )?.takeRetainedValue(),
+              let displays = rawDisplays as? [[String: Any]]
+        else { return nil }
+
+        let directDisplayID = CGDirectDisplayID(screenNumber.uint32Value)
+        let displayIdentifier = CFUUIDCreateString(nil, displayUUID) as String
+        guard let display = displays.first(where: {
+            guard let identifier = $0["Display Identifier"] as? String else { return false }
+            return identifier == displayIdentifier
+                || (identifier == "Main" && directDisplayID == CGMainDisplayID())
+        }),
+              let current = display["Current Space"] as? [String: Any],
+              (current["type"] as? NSNumber)?.intValue == 0,
+              let uuid = current["uuid"] as? String
+        else { return nil }
+
+        if uuid.isEmpty {
+            var emptyUserSpaceCount = 0
+            for display in displays {
+                for space in display["Spaces"] as? [[String: Any]] ?? []
+                where (space["type"] as? NSNumber)?.intValue == 0
+                    && (space["uuid"] as? String) == "" {
+                    emptyUserSpaceCount += 1
+                }
+            }
+            guard emptyUserSpaceCount == 1 else { return nil }
+        }
+        return uuid
     }
 
     private func scheduleMinuteTick() {
@@ -189,7 +211,7 @@ final class ProfileTriggerEngine {
         let now = Date()
         let frontmost = currentFrontmostBundleID
         let spaceApps = currentSpaceApps
-        let exactSpaceID = currentExactSpaceID
+        let exactSpaceUUID = currentExactSpaceUUID
 
         struct Match {
             let profile: DockProfile
@@ -205,7 +227,7 @@ final class ProfileTriggerEngine {
                     matches: now,
                     frontmost: frontmost,
                     spaceApps: spaceApps,
-                    exactSpaceID: exactSpaceID
+                    exactSpaceUUID: exactSpaceUUID
                 ) else { continue }
                 if profileBest.map({ trigger.specificity > $0 }) ?? true {
                     profileBest = trigger.specificity
@@ -231,7 +253,7 @@ final class ProfileTriggerEngine {
         matches now: Date,
         frontmost: String?,
         spaceApps: Set<String>,
-        exactSpaceID: UInt64
+        exactSpaceUUID: String?
     ) -> Bool {
         switch trigger {
         case .timeOfDay(let t):
@@ -241,7 +263,10 @@ final class ProfileTriggerEngine {
         case .space(let t):
             return spaceApps.contains(t.bundleIdentifier)
         case .exactSpace(let t):
-            return exactSpaceID != 0 && exactSpaceID == t.spaceID
+            guard let expected = t.spaceUUID, let current = exactSpaceUUID else {
+                return false
+            }
+            return expected == current
         }
     }
 }
