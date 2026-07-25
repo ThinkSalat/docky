@@ -16,11 +16,13 @@ struct TileContainerView: View {
     private let dockSettings = DockSettingsService.shared
     @ObservedObject private var layout = DockLayoutService.shared
     @Bindable private var preferences = DockyPreferences.shared
+    @Bindable private var profileService = ProfileService.shared
     @ObservedObject private var editMode = DockEditModeService.shared
     @ObservedObject private var dockDrag = DockDragService.shared
     private let magnification = DockMagnificationService.shared
 
     @State private var draggedTileID: String?
+    @State private var draggedProfileID: String?
     @State private var draggedTileOffset: CGFloat = 0
     @State private var draggedTileInitialFrame: CGRect?
     @State private var draggedPinnedTileDestinationIndex: Int?
@@ -60,6 +62,9 @@ struct TileContainerView: View {
                 } else {
                     updatePaletteDropDestinationFromCursor(at: dockDrag.cursorLocation)
                 }
+            }
+            .onChange(of: profileService.activeProfileID) { _ in
+                invalidateDragForProfileChange()
             }
             .animation(tileMutationAnimation, value: displayTiles)
         }
@@ -1348,6 +1353,7 @@ struct TileContainerView: View {
 
         if draggedTileID == nil {
             draggedTileID = tile.id
+            draggedProfileID = profileService.activeProfileID
             draggedAdditionalTileIDs = []
             draggedTileInitialFrame = tileFrames[tile.id]
             draggedPinnedTileDestinationIndex = isPinnedReorderable(tileID: tile.id) ? pinnedTileIDs.firstIndex(of: tile.id) : nil
@@ -1362,6 +1368,9 @@ struct TileContainerView: View {
         }
 
         guard draggedTileID == tile.id else {
+            return
+        }
+        guard draggedProfileID == profileService.activeProfileID else {
             return
         }
 
@@ -1424,6 +1433,15 @@ struct TileContainerView: View {
         Self.logger.info(
             "endDrag tile=\(tileLogDescription(tile), privacy: .public) translation=(\(value.translation.width, privacy: .public),\(value.translation.height, privacy: .public)) magnitude=\(translationMagnitude, privacy: .public) draggedTileID=\(self.draggedTileID ?? "nil", privacy: .public)"
         )
+
+        guard draggedProfileID == profileService.activeProfileID else {
+            Self.logger.info(
+                "Drag cancelled after profile change tile=\(tileLogDescription(tile), privacy: .public) sourceProfile=\(self.draggedProfileID ?? "nil", privacy: .public) activeProfile=\(self.profileService.activeProfileID, privacy: .public)"
+            )
+            clearDragState()
+            return
+        }
+
         updateDrag(for: tile, value: value)
 
         guard draggedTileID == tile.id else {
@@ -1545,6 +1563,19 @@ struct TileContainerView: View {
         draggedPinnedTileDestinationIndex = nil
         draggedTrailingTileDestinationIndex = nil
         editMode.paletteDropDestination = nil
+    }
+
+    private func invalidateDragForProfileChange() {
+        guard draggedTileID != nil,
+              draggedProfileID != profileService.activeProfileID else {
+            return
+        }
+        Self.logger.info(
+            "Invalidating drag after profile change tileID=\(self.draggedTileID ?? "nil", privacy: .public) sourceProfile=\(self.draggedProfileID ?? "nil", privacy: .public) activeProfile=\(self.profileService.activeProfileID, privacy: .public)"
+        )
+        draggedTileOffset = 0
+        draggedPickupCandidateTileID = nil
+        clearDragPreviewDestinations()
     }
 
     private func updatePreviewDestination(
@@ -1848,6 +1879,7 @@ struct TileContainerView: View {
             )
         }
         draggedTileID = nil
+        draggedProfileID = nil
         draggedTileOffset = 0
         draggedTileInitialFrame = nil
         draggedPinnedTileDestinationIndex = nil

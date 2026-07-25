@@ -53,8 +53,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         DockyPreferences.shared.applySystemDockVisibilityPreference()
         DockyPreferences.shared.applyOpenAtLoginPreference()
-        TileStore.shared.syncPreferencesFromSystemDockIfNeeded()
+
+        // Profiles are authoritative for their tile-store fields. Reapply
+        // the persisted active profile before any import can mirror a stale
+        // top-level snapshot back into it, then resolve the current Space.
+        ProfileService.shared.reapplyActiveProfile()
         ProfileTriggerEngine.shared.start()
+        TileStore.shared.syncPreferencesFromSystemDockIfNeeded()
 
         PermissionsService.shared.refresh()
 

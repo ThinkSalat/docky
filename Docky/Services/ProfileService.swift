@@ -80,6 +80,14 @@ final class ProfileService {
         DockyPreferences.shared.applyProfile(profile)
     }
 
+    /// Reconciles the legacy top-level tile snapshot with the profile that
+    /// owns it. This is required at launch because an interrupted profile
+    /// switch can persist the active ID before every snapshot field lands.
+    func reapplyActiveProfile() {
+        guard let profile = activeProfile else { return }
+        DockyPreferences.shared.applyProfile(profile)
+    }
+
     /// Apply a mutation to the active profile and persist. Used by
     /// `DockyPreferences` to mirror tile-store edits into the profile.
     func updateActiveProfile(_ mutate: (inout DockProfile) -> Void) {
