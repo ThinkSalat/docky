@@ -25,6 +25,12 @@ jobs:
       - name: Verify security invariants
         run: bash scripts/check_security_invariants.sh
 
+      - name: Verify release metadata
+        run: bash scripts/check_release_metadata.sh
+
+      - name: Test release workflow guards
+        run: bash scripts/tests/release_workflow_test.sh
+
       - name: Compile Docky
         run: |
           set -o pipefail

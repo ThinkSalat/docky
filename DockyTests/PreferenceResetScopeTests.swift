@@ -217,7 +217,11 @@ final class PreferenceResetScopeTests: XCTestCase {
 
     private func assignmentProperties(in body: String) -> Set<String> {
         captures(
-            pattern: #"(?m)^        ([A-Za-z_][A-Za-z0-9_]*)\s*="#,
+            // Asset resets run inside clearUserAsset(s) closures so the
+            // generation invalidation and preference mutation are atomic.
+            // Count assignments at the function level and in those nested
+            // closures; `let`/`var` locals do not match this pattern.
+            pattern: #"(?m)^ {8,}([A-Za-z_][A-Za-z0-9_]*)\s*="#,
             in: body
         )
     }

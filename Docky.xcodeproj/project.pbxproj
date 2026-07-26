@@ -15,6 +15,41 @@
 		D0C2A0032FB0000000000003 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D0C2A0072FB0000000000007 /* XCTest.framework */; };
 		D0C2A0102FB0000000000010 /* ExternalWidgetRuntimePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0122FB0000000000012 /* ExternalWidgetRuntimePolicyTests.swift */; };
 		D0C2A0112FB0000000000011 /* ExternalWidgetRuntimePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0132FB0000000000013 /* ExternalWidgetRuntimePolicy.swift */; };
+		D0C2A0202FB0000000000020 /* AtomicJSONFileStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0222FB0000000000022 /* AtomicJSONFileStoreTests.swift */; };
+		D0C2A0212FB0000000000021 /* AtomicJSONFileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0232FB0000000000023 /* AtomicJSONFileStore.swift */; };
+		D0C2A0302FB0000000000030 /* DisplaySpaceSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0322FB0000000000032 /* DisplaySpaceSnapshotTests.swift */; };
+		D0C2A0312FB0000000000031 /* DisplaySpaceSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0332FB0000000000033 /* DisplaySpaceSnapshot.swift */; };
+		D0C2A0402FB0000000000040 /* DockVisibilityReducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0432FB0000000000043 /* DockVisibilityReducerTests.swift */; };
+		D0C2A0412FB0000000000041 /* MainWindowInteractionLeaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0442FB0000000000044 /* MainWindowInteractionLeaseTests.swift */; };
+		D0C2A0422FB0000000000042 /* DockVisibilityReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0452FB0000000000045 /* DockVisibilityReducer.swift */; };
+		D0C2A0502FB0000000000050 /* AXRequestGenerationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0522FB0000000000052 /* AXRequestGenerationTests.swift */; };
+		D0C2A0512FB0000000000051 /* AXRequestGeneration.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0532FB0000000000053 /* AXRequestGeneration.swift */; };
+		D0C2A0602FB0000000000060 /* PresentationGenerationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0622FB0000000000062 /* PresentationGenerationTests.swift */; };
+		D0C2A0612FB0000000000061 /* PresentationGeneration.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0632FB0000000000063 /* PresentationGeneration.swift */; };
+		D0C2A0702FB0000000000070 /* PreferenceResetScopeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0722FB0000000000072 /* PreferenceResetScopeTests.swift */; };
+		D0C2A0712FB0000000000071 /* PreferenceResetScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0732FB0000000000073 /* PreferenceResetScope.swift */; };
+		D0C2A0802FB0000000000080 /* FolderRenderAccessSourceContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0822FB0000000000082 /* FolderRenderAccessSourceContractTests.swift */; };
+		D0C2A0902FB0000000000090 /* ProfileStoreEnvelopeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0922FB0000000000092 /* ProfileStoreEnvelopeTests.swift */; };
+		D0C2A0912FB0000000000091 /* ProfileStoreEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0932FB0000000000093 /* ProfileStoreEnvelope.swift */; };
+		D0C2A0A02FB00000000000A0 /* ManagedUserAssetStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0A22FB00000000000A2 /* ManagedUserAssetStoreTests.swift */; };
+		D0C2A0A12FB00000000000A1 /* ManagedUserAssetStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0A32FB00000000000A3 /* ManagedUserAssetStore.swift */; };
+		D0C2A0B02FB00000000000B0 /* CoalescingPersistenceCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0B22FB00000000000B2 /* CoalescingPersistenceCoordinatorTests.swift */; };
+		D0C2A0B12FB00000000000B1 /* CoalescingPersistenceCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0B32FB00000000000B3 /* CoalescingPersistenceCoordinator.swift */; };
+		D0C2A0C02FB00000000000C0 /* LegacyUserAssetRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0C22FB00000000000C2 /* LegacyUserAssetRecoveryTests.swift */; };
+		D0C2A0C12FB00000000000C1 /* LegacyUserAssetRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0C32FB00000000000C3 /* LegacyUserAssetRecovery.swift */; };
+		D0C2A0D02FB00000000000D0 /* LocalImageDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0D22FB00000000000D2 /* LocalImageDecoderTests.swift */; };
+		D0C2A0D12FB00000000000D1 /* LocalImageDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0D32FB00000000000D3 /* LocalImageDecoder.swift */; };
+		D0C2A0E02FB00000000000E0 /* ThemeArchivePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0E22FB00000000000E2 /* ThemeArchivePolicyTests.swift */; };
+		D0C2A0E12FB00000000000E1 /* ThemeArchivePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0E32FB00000000000E3 /* ThemeArchivePolicy.swift */; };
+		D0C2A0F12FB00000000000F1 /* BoundedProcessRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0F32FB00000000000F3 /* BoundedProcessRunner.swift */; };
+		D0C2A1002FB0000000000100 /* FeedbackBundlePreparationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1022FB0000000000102 /* FeedbackBundlePreparationTests.swift */; };
+		D0C2A1012FB0000000000101 /* FeedbackBundleWorker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1032FB0000000000103 /* FeedbackBundleWorker.swift */; };
+		D0C2A1042FB0000000000104 /* FeedbackBoundedProcessRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1052FB0000000000105 /* FeedbackBoundedProcessRunner.swift */; };
+		D0C2A1102FB0000000000110 /* ThemeManifestPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1152FB0000000000115 /* ThemeManifestPolicyTests.swift */; };
+		D0C2A1112FB0000000000111 /* ThemeManifestPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1162FB0000000000116 /* ThemeManifestPolicy.swift */; };
+		D0C2A1122FB0000000000112 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1172FB0000000000117 /* Theme.swift */; };
+		D0C2A1132FB0000000000113 /* DiagnosticPrivacyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1182FB0000000000118 /* DiagnosticPrivacyTests.swift */; };
+		D0C2A1142FB0000000000114 /* DiagnosticPrivacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1192FB0000000000119 /* DiagnosticPrivacy.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -62,6 +97,41 @@
 		D0C2A0072FB0000000000007 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
 		D0C2A0122FB0000000000012 /* ExternalWidgetRuntimePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExternalWidgetRuntimePolicyTests.swift; sourceTree = "<group>"; };
 		D0C2A0132FB0000000000013 /* ExternalWidgetRuntimePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ExternalWidgetRuntimePolicy.swift; path = Docky/Models/ExternalWidgetRuntimePolicy.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0222FB0000000000022 /* AtomicJSONFileStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AtomicJSONFileStoreTests.swift; sourceTree = "<group>"; };
+		D0C2A0232FB0000000000023 /* AtomicJSONFileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AtomicJSONFileStore.swift; path = Docky/Services/AtomicJSONFileStore.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0322FB0000000000032 /* DisplaySpaceSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplaySpaceSnapshotTests.swift; sourceTree = "<group>"; };
+		D0C2A0332FB0000000000033 /* DisplaySpaceSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DisplaySpaceSnapshot.swift; path = Docky/Models/DisplaySpaceSnapshot.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0432FB0000000000043 /* DockVisibilityReducerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DockVisibilityReducerTests.swift; sourceTree = "<group>"; };
+		D0C2A0442FB0000000000044 /* MainWindowInteractionLeaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowInteractionLeaseTests.swift; sourceTree = "<group>"; };
+		D0C2A0452FB0000000000045 /* DockVisibilityReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DockVisibilityReducer.swift; path = Docky/Views/MainWindow/DockVisibilityReducer.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0522FB0000000000052 /* AXRequestGenerationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AXRequestGenerationTests.swift; sourceTree = "<group>"; };
+		D0C2A0532FB0000000000053 /* AXRequestGeneration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AXRequestGeneration.swift; path = Docky/Models/AXRequestGeneration.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0622FB0000000000062 /* PresentationGenerationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresentationGenerationTests.swift; sourceTree = "<group>"; };
+		D0C2A0632FB0000000000063 /* PresentationGeneration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PresentationGeneration.swift; path = Docky/Models/PresentationGeneration.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0722FB0000000000072 /* PreferenceResetScopeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferenceResetScopeTests.swift; sourceTree = "<group>"; };
+		D0C2A0732FB0000000000073 /* PreferenceResetScope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PreferenceResetScope.swift; path = Docky/Models/PreferenceResetScope.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0822FB0000000000082 /* FolderRenderAccessSourceContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderRenderAccessSourceContractTests.swift; sourceTree = "<group>"; };
+		D0C2A0922FB0000000000092 /* ProfileStoreEnvelopeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileStoreEnvelopeTests.swift; sourceTree = "<group>"; };
+		D0C2A0932FB0000000000093 /* ProfileStoreEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ProfileStoreEnvelope.swift; path = Docky/Models/ProfileStoreEnvelope.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0A22FB00000000000A2 /* ManagedUserAssetStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagedUserAssetStoreTests.swift; sourceTree = "<group>"; };
+		D0C2A0A32FB00000000000A3 /* ManagedUserAssetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ManagedUserAssetStore.swift; path = Docky/Models/ManagedUserAssetStore.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0B22FB00000000000B2 /* CoalescingPersistenceCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoalescingPersistenceCoordinatorTests.swift; sourceTree = "<group>"; };
+		D0C2A0B32FB00000000000B3 /* CoalescingPersistenceCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = CoalescingPersistenceCoordinator.swift; path = Docky/Models/CoalescingPersistenceCoordinator.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0C22FB00000000000C2 /* LegacyUserAssetRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyUserAssetRecoveryTests.swift; sourceTree = "<group>"; };
+		D0C2A0C32FB00000000000C3 /* LegacyUserAssetRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = LegacyUserAssetRecovery.swift; path = Docky/Models/LegacyUserAssetRecovery.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0D22FB00000000000D2 /* LocalImageDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalImageDecoderTests.swift; sourceTree = "<group>"; };
+		D0C2A0D32FB00000000000D3 /* LocalImageDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = LocalImageDecoder.swift; path = Docky/Models/LocalImageDecoder.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0E22FB00000000000E2 /* ThemeArchivePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeArchivePolicyTests.swift; sourceTree = "<group>"; };
+		D0C2A0E32FB00000000000E3 /* ThemeArchivePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ThemeArchivePolicy.swift; path = Docky/Models/ThemeArchivePolicy.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0F32FB00000000000F3 /* BoundedProcessRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = BoundedProcessRunner.swift; path = Docky/Models/BoundedProcessRunner.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1022FB0000000000102 /* FeedbackBundlePreparationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackBundlePreparationTests.swift; sourceTree = "<group>"; };
+		D0C2A1032FB0000000000103 /* FeedbackBundleWorker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = FeedbackBundleWorker.swift; path = Docky/Services/FeedbackBundleWorker.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1052FB0000000000105 /* FeedbackBoundedProcessRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = FeedbackBoundedProcessRunner.swift; path = Docky/Services/FeedbackBoundedProcessRunner.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1152FB0000000000115 /* ThemeManifestPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManifestPolicyTests.swift; sourceTree = "<group>"; };
+		D0C2A1162FB0000000000116 /* ThemeManifestPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ThemeManifestPolicy.swift; path = Docky/Models/ThemeManifestPolicy.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1172FB0000000000117 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = Theme.swift; path = Docky/Models/Theme.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1182FB0000000000118 /* DiagnosticPrivacyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticPrivacyTests.swift; sourceTree = "<group>"; };
+		D0C2A1192FB0000000000119 /* DiagnosticPrivacy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DiagnosticPrivacy.swift; path = Docky/Models/DiagnosticPrivacy.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -141,6 +211,41 @@
 				D0C2A0052FB0000000000005 /* ProfileTrigger.swift */,
 				D0C2A0122FB0000000000012 /* ExternalWidgetRuntimePolicyTests.swift */,
 				D0C2A0132FB0000000000013 /* ExternalWidgetRuntimePolicy.swift */,
+				D0C2A0222FB0000000000022 /* AtomicJSONFileStoreTests.swift */,
+				D0C2A0232FB0000000000023 /* AtomicJSONFileStore.swift */,
+				D0C2A0322FB0000000000032 /* DisplaySpaceSnapshotTests.swift */,
+				D0C2A0332FB0000000000033 /* DisplaySpaceSnapshot.swift */,
+				D0C2A0432FB0000000000043 /* DockVisibilityReducerTests.swift */,
+				D0C2A0442FB0000000000044 /* MainWindowInteractionLeaseTests.swift */,
+				D0C2A0452FB0000000000045 /* DockVisibilityReducer.swift */,
+				D0C2A0522FB0000000000052 /* AXRequestGenerationTests.swift */,
+				D0C2A0532FB0000000000053 /* AXRequestGeneration.swift */,
+				D0C2A0622FB0000000000062 /* PresentationGenerationTests.swift */,
+				D0C2A0632FB0000000000063 /* PresentationGeneration.swift */,
+				D0C2A0722FB0000000000072 /* PreferenceResetScopeTests.swift */,
+				D0C2A0732FB0000000000073 /* PreferenceResetScope.swift */,
+				D0C2A0822FB0000000000082 /* FolderRenderAccessSourceContractTests.swift */,
+				D0C2A0922FB0000000000092 /* ProfileStoreEnvelopeTests.swift */,
+				D0C2A0932FB0000000000093 /* ProfileStoreEnvelope.swift */,
+				D0C2A0A22FB00000000000A2 /* ManagedUserAssetStoreTests.swift */,
+				D0C2A0A32FB00000000000A3 /* ManagedUserAssetStore.swift */,
+				D0C2A0B22FB00000000000B2 /* CoalescingPersistenceCoordinatorTests.swift */,
+				D0C2A0B32FB00000000000B3 /* CoalescingPersistenceCoordinator.swift */,
+				D0C2A0C22FB00000000000C2 /* LegacyUserAssetRecoveryTests.swift */,
+				D0C2A0C32FB00000000000C3 /* LegacyUserAssetRecovery.swift */,
+				D0C2A0D22FB00000000000D2 /* LocalImageDecoderTests.swift */,
+				D0C2A0D32FB00000000000D3 /* LocalImageDecoder.swift */,
+				D0C2A0E22FB00000000000E2 /* ThemeArchivePolicyTests.swift */,
+				D0C2A0E32FB00000000000E3 /* ThemeArchivePolicy.swift */,
+				D0C2A0F32FB00000000000F3 /* BoundedProcessRunner.swift */,
+				D0C2A1022FB0000000000102 /* FeedbackBundlePreparationTests.swift */,
+				D0C2A1032FB0000000000103 /* FeedbackBundleWorker.swift */,
+				D0C2A1052FB0000000000105 /* FeedbackBoundedProcessRunner.swift */,
+				D0C2A1152FB0000000000115 /* ThemeManifestPolicyTests.swift */,
+				D0C2A1162FB0000000000116 /* ThemeManifestPolicy.swift */,
+				D0C2A1172FB0000000000117 /* Theme.swift */,
+				D0C2A1182FB0000000000118 /* DiagnosticPrivacyTests.swift */,
+				D0C2A1192FB0000000000119 /* DiagnosticPrivacy.swift */,
 			);
 			path = DockyTests;
 			sourceTree = "<group>";
@@ -327,6 +432,41 @@
 				D0C2A0012FB0000000000001 /* ProfileTriggerTests.swift in Sources */,
 				D0C2A0112FB0000000000011 /* ExternalWidgetRuntimePolicy.swift in Sources */,
 				D0C2A0102FB0000000000010 /* ExternalWidgetRuntimePolicyTests.swift in Sources */,
+				D0C2A0212FB0000000000021 /* AtomicJSONFileStore.swift in Sources */,
+				D0C2A0202FB0000000000020 /* AtomicJSONFileStoreTests.swift in Sources */,
+				D0C2A0312FB0000000000031 /* DisplaySpaceSnapshot.swift in Sources */,
+				D0C2A0302FB0000000000030 /* DisplaySpaceSnapshotTests.swift in Sources */,
+				D0C2A0422FB0000000000042 /* DockVisibilityReducer.swift in Sources */,
+				D0C2A0402FB0000000000040 /* DockVisibilityReducerTests.swift in Sources */,
+				D0C2A0412FB0000000000041 /* MainWindowInteractionLeaseTests.swift in Sources */,
+				D0C2A0512FB0000000000051 /* AXRequestGeneration.swift in Sources */,
+				D0C2A0502FB0000000000050 /* AXRequestGenerationTests.swift in Sources */,
+				D0C2A0612FB0000000000061 /* PresentationGeneration.swift in Sources */,
+				D0C2A0602FB0000000000060 /* PresentationGenerationTests.swift in Sources */,
+				D0C2A0712FB0000000000071 /* PreferenceResetScope.swift in Sources */,
+				D0C2A0702FB0000000000070 /* PreferenceResetScopeTests.swift in Sources */,
+				D0C2A0802FB0000000000080 /* FolderRenderAccessSourceContractTests.swift in Sources */,
+				D0C2A0912FB0000000000091 /* ProfileStoreEnvelope.swift in Sources */,
+				D0C2A0902FB0000000000090 /* ProfileStoreEnvelopeTests.swift in Sources */,
+				D0C2A0A12FB00000000000A1 /* ManagedUserAssetStore.swift in Sources */,
+				D0C2A0A02FB00000000000A0 /* ManagedUserAssetStoreTests.swift in Sources */,
+				D0C2A0B12FB00000000000B1 /* CoalescingPersistenceCoordinator.swift in Sources */,
+				D0C2A0B02FB00000000000B0 /* CoalescingPersistenceCoordinatorTests.swift in Sources */,
+				D0C2A0C12FB00000000000C1 /* LegacyUserAssetRecovery.swift in Sources */,
+				D0C2A0C02FB00000000000C0 /* LegacyUserAssetRecoveryTests.swift in Sources */,
+				D0C2A0D12FB00000000000D1 /* LocalImageDecoder.swift in Sources */,
+				D0C2A0D02FB00000000000D0 /* LocalImageDecoderTests.swift in Sources */,
+				D0C2A0E12FB00000000000E1 /* ThemeArchivePolicy.swift in Sources */,
+				D0C2A0E02FB00000000000E0 /* ThemeArchivePolicyTests.swift in Sources */,
+				D0C2A0F12FB00000000000F1 /* BoundedProcessRunner.swift in Sources */,
+				D0C2A1012FB0000000000101 /* FeedbackBundleWorker.swift in Sources */,
+				D0C2A1042FB0000000000104 /* FeedbackBoundedProcessRunner.swift in Sources */,
+				D0C2A1002FB0000000000100 /* FeedbackBundlePreparationTests.swift in Sources */,
+				D0C2A1102FB0000000000110 /* ThemeManifestPolicyTests.swift in Sources */,
+				D0C2A1112FB0000000000111 /* ThemeManifestPolicy.swift in Sources */,
+				D0C2A1122FB0000000000112 /* Theme.swift in Sources */,
+				D0C2A1132FB0000000000113 /* DiagnosticPrivacyTests.swift in Sources */,
+				D0C2A1142FB0000000000114 /* DiagnosticPrivacy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -488,10 +628,7 @@
 				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/Docky/Frameworks",
-				);
+				FRAMEWORK_SEARCH_PATHS = "$(inherited)";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Docky;
@@ -510,7 +647,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.8.0;
+				MARKETING_VERSION = 0.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = gt.quintero.Docky;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -557,10 +694,7 @@
 				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
 				ENABLE_RESOURCE_ACCESS_USB = NO;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/Docky/Frameworks",
-				);
+				FRAMEWORK_SEARCH_PATHS = "$(inherited)";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Docky;
@@ -579,7 +713,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.8.0;
+				MARKETING_VERSION = 0.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = gt.quintero.Docky;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -615,7 +749,7 @@
 				INFOPLIST_KEY_LSBackgroundOnly = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.8.0;
+				MARKETING_VERSION = 0.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = gt.quintero.Docky.DockWatchdog;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -644,7 +778,7 @@
 				INFOPLIST_KEY_LSBackgroundOnly = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.8.0;
+				MARKETING_VERSION = 0.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = gt.quintero.Docky.DockWatchdog;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
