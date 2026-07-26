@@ -38,7 +38,9 @@ final class RecentAppsService: ObservableObject {
         ) { [weak self] notification in
             guard let bundleID = (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
             else { return }
-            Task { @MainActor in self?.record(bundleID) }
+            Task { @MainActor [weak self] in
+                self?.record(bundleID)
+            }
         }
     }
 

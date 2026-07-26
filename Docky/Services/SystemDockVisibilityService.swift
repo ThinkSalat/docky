@@ -61,6 +61,14 @@ final class SystemDockVisibilityService {
         let state = readVisibilityState()
         let hasStaleActiveState = state?.active == true && !isProcessRunning(state?.ownerPID ?? 0)
         let hasLegacySnapshot = state?.active != true && hasSnapshot
+        DiagnosticsTrace.shared.record(.systemDock, "staleSnapshotEvaluated", fields: [
+            "statePresent": state != nil,
+            "stateActive": state?.active ?? false,
+            "ownerProcessRunning": isProcessRunning(state?.ownerPID ?? 0),
+            "hasPreferenceSnapshot": hasSnapshot,
+            "hasStaleActiveState": hasStaleActiveState,
+            "hasLegacySnapshot": hasLegacySnapshot,
+        ])
 
         guard hasStaleActiveState || hasLegacySnapshot else {
             return
@@ -71,6 +79,9 @@ final class SystemDockVisibilityService {
     }
 
     func hide() {
+        DiagnosticsTrace.shared.record(.systemDock, "hideRequested", fields: [
+            "hadSnapshot": hasSnapshot,
+        ])
         let snapshot = defaults.dictionary(forKey: Self.snapshotKey) ?? captureSnapshot()
         writeActiveState(snapshot: snapshot)
         startWatchdogIfNeeded()
@@ -79,26 +90,39 @@ final class SystemDockVisibilityService {
     }
 
     func setOrientation(_ orientation: DockSettingsService.Orientation) {
+        DiagnosticsTrace.shared.record(.systemDock, "orientationWriteRequested", fields: [
+            "orientation": orientation.rawValue,
+        ])
         CFPreferencesSetAppValue("orientation" as CFString, orientation.rawValue as CFString, Self.dockDomain)
         CFPreferencesAppSynchronize(Self.dockDomain)
         restartDock()
     }
 
     func restore() {
+        DiagnosticsTrace.shared.record(.systemDock, "restoreRequested", fields: [
+            "hasSnapshot": hasSnapshot,
+        ])
         restore(using: defaults.dictionary(forKey: Self.snapshotKey))
     }
 
     private func restore(using snapshot: [String: Any]?) {
         guard let snapshot else {
+            DiagnosticsTrace.shared.record(.systemDock, "restoreSkipped", fields: [
+                "reason": "snapshotUnavailable",
+            ])
             clearActiveState()
             return
         }
 
+        DiagnosticsTrace.shared.record(.systemDock, "restoreApplyingSnapshot", fields: [
+            "managedKeyCount": snapshot.count,
+        ])
         applySnapshot(snapshot)
         defaults.removeObject(forKey: Self.snapshotKey)
         defaults.synchronize()
         restartDock()
         clearActiveState()
+        DiagnosticsTrace.shared.record(.systemDock, "restoreCompleted")
     }
 
     @discardableResult
@@ -113,6 +137,9 @@ final class SystemDockVisibilityService {
         }
         defaults.set(snapshot, forKey: Self.snapshotKey)
         defaults.synchronize()
+        DiagnosticsTrace.shared.record(.systemDock, "snapshotCaptured", fields: [
+            "managedKeyCount": snapshot.count,
+        ])
         return snapshot
     }
 
@@ -121,6 +148,9 @@ final class SystemDockVisibilityService {
             CFPreferencesSetAppValue(key as CFString, value, Self.dockDomain)
         }
         CFPreferencesAppSynchronize(Self.dockDomain)
+        DiagnosticsTrace.shared.record(.systemDock, "hiddenValuesApplied", fields: [
+            "managedKeyCount": Self.hiddenValues.count,
+        ])
     }
 
     private func applySnapshot(_ snapshot: [String: Any]) {
@@ -135,12 +165,24 @@ final class SystemDockVisibilityService {
             }
         }
         CFPreferencesAppSynchronize(Self.dockDomain)
+        DiagnosticsTrace.shared.record(.systemDock, "snapshotApplied", fields: [
+            "managedKeyCount": snapshot.count,
+        ])
     }
 
     private func restartDock() {
-        NSRunningApplication
+        let dockApplications = NSRunningApplication
             .runningApplications(withBundleIdentifier: "com.apple.dock")
-            .forEach { $0.forceTerminate() }
+        var terminationRequestCount = 0
+        dockApplications.forEach {
+            if $0.forceTerminate() {
+                terminationRequestCount += 1
+            }
+        }
+        DiagnosticsTrace.shared.record(.systemDock, "restartRequested", fields: [
+            "runningDockProcessCount": dockApplications.count,
+            "acceptedTerminationCount": terminationRequestCount,
+        ])
     }
 
     private var stateFileURL: URL? {
@@ -176,8 +218,15 @@ final class SystemDockVisibilityService {
                 options: 0
             )
             try data.write(to: stateFileURL, options: .atomic)
+            DiagnosticsTrace.shared.record(.systemDock, "watchdogStateWritten", fields: [
+                "snapshotKeyCount": snapshot.count,
+                "encodedBytes": data.count,
+            ])
         } catch {
             NSLog("[Docky] Failed to write system Dock visibility watchdog state: \(error.localizedDescription)")
+            DiagnosticsTrace.shared.record(.systemDock, "watchdogStateWriteFailed", fields: [
+                "errorType": String(describing: type(of: error)),
+            ])
         }
     }
 
@@ -189,8 +238,12 @@ final class SystemDockVisibilityService {
         do {
             try FileManager.default.removeItem(at: stateFileURL)
             isWatchdogLaunchPendingOrRunning = false
+            DiagnosticsTrace.shared.record(.systemDock, "watchdogStateCleared")
         } catch {
             NSLog("[Docky] Failed to clear system Dock visibility watchdog state: \(error.localizedDescription)")
+            DiagnosticsTrace.shared.record(.systemDock, "watchdogStateClearFailed", fields: [
+                "errorType": String(describing: type(of: error)),
+            ])
         }
     }
 
@@ -216,6 +269,9 @@ final class SystemDockVisibilityService {
 
     private func startWatchdogIfNeeded() {
         guard !isWatchdogLaunchPendingOrRunning else {
+            DiagnosticsTrace.shared.record(.systemDock, "watchdogLaunchSkipped", fields: [
+                "reason": "alreadyPendingOrRunning",
+            ])
             return
         }
 
@@ -244,11 +300,20 @@ final class SystemDockVisibilityService {
         ]
 
         isWatchdogLaunchPendingOrRunning = true
+        DiagnosticsTrace.shared.record(.systemDock, "watchdogLaunchRequested")
         NSWorkspace.shared.openApplication(at: helperURL, configuration: configuration) { [weak self] _, error in
-            if let error {
-                NSLog("[Docky] Failed to launch system Dock visibility watchdog: \(error.localizedDescription)")
-                DispatchQueue.main.async {
+            let errorType = error.map {
+                String(describing: type(of: $0))
+            }
+            Task { @MainActor [weak self] in
+                if let errorType {
+                    NSLog("[Docky] Failed to launch system Dock visibility watchdog: \(errorType)")
+                    DiagnosticsTrace.shared.record(.systemDock, "watchdogLaunchFailed", fields: [
+                        "errorType": errorType,
+                    ])
                     self?.isWatchdogLaunchPendingOrRunning = false
+                } else {
+                    DiagnosticsTrace.shared.record(.systemDock, "watchdogLaunchCompleted")
                 }
             }
         }

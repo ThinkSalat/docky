@@ -5,7 +5,11 @@
 
 import Foundation
 
-enum WidgetSettingValue: Codable, Equatable, Hashable {
+nonisolated enum WidgetSettingValue:
+    Codable,
+    Equatable,
+    Hashable,
+    Sendable {
     case string(String)
     case number(Double)
     case bool(Bool)

@@ -3,6 +3,7 @@
 //  Docky
 //
 
+import AppKit
 import SwiftUI
 
 struct BehaviorSettingsView: View {
@@ -20,6 +21,7 @@ struct BehaviorSettingsView: View {
     let subsection: Subsection
 
     @Bindable private var preferences = DockyPreferences.shared
+    @ObservedObject private var permissions = PermissionsService.shared
     @State private var isShowingResetConfirmation = false
 
     var body: some View {
@@ -53,7 +55,7 @@ struct BehaviorSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Placement, visibility, app-tile click, app folders, widgets, launch, and system-dock settings will return to their defaults. Appearance, app icons, and other settings are unaffected. This cannot be undone.")
+            Text("Stored placement, visibility, app-tile click, app-folder, widget-preview, launch, and system-dock values will return to their built-in defaults, and their behavior theme overrides will be cleared. An active theme can still supply supported behavior values. Appearance, app icons, and other settings are unaffected. This cannot be undone.")
         }
     }
 
@@ -71,7 +73,7 @@ struct BehaviorSettingsView: View {
                     Spacer()
                 }
 
-                Text("Reverts every behavior setting (placement, visibility, app-tile click, app folders, widgets, launch, system-dock) to its built-in default. Use this when a theme has nudged behavior in a direction you want to undo.")
+                Text("Reverts behavior settings (placement, visibility, app-tile click, app folders, widget previews, launch, system Dock) to their built-in defaults and clears only their behavior theme overrides.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -258,6 +260,50 @@ struct BehaviorSettingsView: View {
                 Text(preferences.maximizedWindowBehavior.detail)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                if preferences.maximizedWindowBehavior == .resizeWindow,
+                   permissions.accessibility != .granted {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(
+                            "Accessibility access is missing, so Resize Windows is currently inactive.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        Text("If Docky is already listed in System Settings after installing a different build, remove that entry and add the current Docky.app again.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("1. Remove the old Docky row. 2. Add the current Docky.app shown below. 3. Enable it. 4. Return here and Re-check.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        HStack(spacing: 12) {
+                            Button("Open Accessibility Settings") {
+                                permissions.openSystemSettings(
+                                    for: .accessibility
+                                )
+                            }
+
+                            Button("Show Current Docky.app") {
+                                NSWorkspace.shared
+                                    .activateFileViewerSelecting([
+                                        Bundle.main.bundleURL
+                                    ])
+                            }
+
+                            Button("Re-check") {
+                                _ =
+                                    permissions
+                                    .refreshAccessibilityStatus()
+                            }
+                        }
+                    }
+                    .padding(.top, 4)
+                }
             }
             .padding(.vertical, 4)
 

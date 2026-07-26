@@ -22,6 +22,17 @@ struct ProfilesSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if let persistenceError = profileService.lastPersistenceError {
+                Section {
+                    Label("Profile changes could not be saved", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(persistenceError)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             Section("Switcher") {
                 Toggle(isOn: $preferences.hidesProfileStrip) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -59,7 +70,9 @@ struct ProfilesSettingsView: View {
             counter += 1
             name = "\(baseName) \(counter)"
         }
-        let created = profileService.createProfile(name: name)
+        guard let created = profileService.createProfile(name: name) else {
+            return
+        }
         profileService.setActiveProfile(id: created.id)
     }
 }
@@ -235,6 +248,16 @@ private struct ProfileTriggersSection: View {
                 } label: {
                     Label("Space with App…", systemImage: "rectangle.3.group")
                 }
+                Button {
+                    let spaceID = ProfileTriggerEngine.activeSpaceID()
+                    guard spaceID != 0 else { return }
+                    profileService.addTrigger(
+                        .exactSpace(ExactSpaceTrigger(spaceID: spaceID)),
+                        to: profile.id
+                    )
+                } label: {
+                    Label("Exact Current Space", systemImage: "rectangle.inset.filled")
+                }
             } label: {
                 Label("Add Trigger…", systemImage: "plus.circle")
                     .font(.caption)
@@ -277,6 +300,7 @@ private struct TriggerRow: View {
         case .timeOfDay: return "clock"
         case .frontmostApp: return "app.dashed"
         case .space: return "rectangle.3.group"
+        case .exactSpace: return "rectangle.inset.filled"
         }
     }
 
@@ -289,6 +313,8 @@ private struct TriggerRow: View {
             FrontmostAppTriggerEditor(profile: profile, triggerID: trigger.id, model: t)
         case .space(let t):
             SpaceTriggerEditor(profile: profile, triggerID: trigger.id, model: t)
+        case .exactSpace(let t):
+            ExactSpaceTriggerEditor(profile: profile, triggerID: trigger.id, model: t)
         }
     }
 }
@@ -400,7 +426,9 @@ private struct FrontmostAppTriggerEditor: View {
     let profile: DockProfile
     let triggerID: String
     @State var model: FrontmostAppTrigger
+    @State private var resolvedDisplayName: String?
     @Bindable private var profileService = ProfileService.shared
+    @ObservedObject private var workspace = WorkspaceService.shared
 
     var body: some View {
         HStack(spacing: 8) {
@@ -409,12 +437,12 @@ private struct FrontmostAppTriggerEditor: View {
                 .foregroundStyle(.secondary)
 
             Menu {
-                ForEach(runningApps(), id: \.bundleIdentifier) { app in
+                ForEach(availableApps, id: \.bundleIdentifier) { app in
                     Button {
                         model.bundleIdentifier = app.bundleIdentifier
                         commit()
                     } label: {
-                        Text(app.displayName)
+                        Text(app.localizedName)
                     }
                 }
             } label: {
@@ -434,31 +462,25 @@ private struct FrontmostAppTriggerEditor: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        .task(id: model.bundleIdentifier) {
+            resolvedDisplayName = nil
+            resolvedDisplayName = await ProfileApplicationMetadataLoader
+                .displayName(for: model.bundleIdentifier)
+        }
     }
 
     private var displayLabel: String {
         if model.bundleIdentifier.isEmpty { return "Pick app…" }
-        if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: model.bundleIdentifier) {
-            return FileManager.default.displayName(atPath: app.path)
+        if let running = workspace.runningApps.first(where: {
+            $0.bundleIdentifier == model.bundleIdentifier
+        }) {
+            return running.localizedName
         }
-        return model.bundleIdentifier
+        return resolvedDisplayName ?? model.bundleIdentifier
     }
 
-    private struct AppEntry {
-        let bundleIdentifier: String
-        let displayName: String
-    }
-
-    private func runningApps() -> [AppEntry] {
-        NSWorkspace.shared.runningApplications
-            .compactMap { app -> AppEntry? in
-                guard let bundleID = app.bundleIdentifier,
-                      app.activationPolicy == .regular
-                else { return nil }
-                let name = app.localizedName ?? bundleID
-                return AppEntry(bundleIdentifier: bundleID, displayName: name)
-            }
-            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    private var availableApps: [RunningApp] {
+        workspace.runningApps.sorted(by: ProfileApplicationMetadataLoader.sort)
     }
 
     private func commit() {
@@ -470,7 +492,9 @@ private struct SpaceTriggerEditor: View {
     let profile: DockProfile
     let triggerID: String
     @State var model: SpaceTrigger
+    @State private var resolvedDisplayName: String?
     @Bindable private var profileService = ProfileService.shared
+    @ObservedObject private var workspace = WorkspaceService.shared
 
     var body: some View {
         HStack(spacing: 8) {
@@ -479,12 +503,12 @@ private struct SpaceTriggerEditor: View {
                 .foregroundStyle(.secondary)
 
             Menu {
-                ForEach(runningApps(), id: \.bundleIdentifier) { app in
+                ForEach(availableApps, id: \.bundleIdentifier) { app in
                     Button {
                         model.bundleIdentifier = app.bundleIdentifier
                         commit()
                     } label: {
-                        Text(app.displayName)
+                        Text(app.localizedName)
                     }
                 }
             } label: {
@@ -500,34 +524,86 @@ private struct SpaceTriggerEditor: View {
             .menuIndicator(.hidden)
             .fixedSize()
         }
+        .task(id: model.bundleIdentifier) {
+            resolvedDisplayName = nil
+            resolvedDisplayName = await ProfileApplicationMetadataLoader
+                .displayName(for: model.bundleIdentifier)
+        }
     }
 
     private var displayLabel: String {
         if model.bundleIdentifier.isEmpty { return "Pick app…" }
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: model.bundleIdentifier) {
-            return FileManager.default.displayName(atPath: url.path)
+        if let running = workspace.runningApps.first(where: {
+            $0.bundleIdentifier == model.bundleIdentifier
+        }) {
+            return running.localizedName
         }
-        return model.bundleIdentifier
+        return resolvedDisplayName ?? model.bundleIdentifier
     }
 
-    private struct AppEntry {
-        let bundleIdentifier: String
-        let displayName: String
-    }
-
-    private func runningApps() -> [AppEntry] {
-        NSWorkspace.shared.runningApplications
-            .compactMap { app -> AppEntry? in
-                guard let bundleID = app.bundleIdentifier,
-                      app.activationPolicy == .regular
-                else { return nil }
-                let name = app.localizedName ?? bundleID
-                return AppEntry(bundleIdentifier: bundleID, displayName: name)
-            }
-            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    private var availableApps: [RunningApp] {
+        workspace.runningApps.sorted(by: ProfileApplicationMetadataLoader.sort)
     }
 
     private func commit() {
         profileService.updateTrigger(.space(model), in: profile.id)
+    }
+}
+
+private enum ProfileApplicationMetadataLoader {
+    nonisolated static func displayName(
+        for bundleIdentifier: String
+    ) async -> String? {
+        guard !bundleIdentifier.isEmpty,
+              let url = await ApplicationURLResolver.shared.applicationURL(
+                for: bundleIdentifier
+              ),
+              !Task.isCancelled else {
+            return nil
+        }
+
+        let displayName = await Task.detached(priority: .utility) {
+            FileManager.default.displayName(atPath: url.path)
+        }.value
+        return Task.isCancelled ? nil : displayName
+    }
+
+    nonisolated static func sort(
+        _ lhs: RunningApp,
+        _ rhs: RunningApp
+    ) -> Bool {
+        let nameComparison = lhs.localizedName.localizedCaseInsensitiveCompare(
+            rhs.localizedName
+        )
+        if nameComparison == .orderedSame {
+            return lhs.bundleIdentifier.localizedCaseInsensitiveCompare(
+                rhs.bundleIdentifier
+            ) == .orderedAscending
+        }
+        return nameComparison == .orderedAscending
+    }
+}
+
+private struct ExactSpaceTriggerEditor: View {
+    let profile: DockProfile
+    let triggerID: String
+    @State var model: ExactSpaceTrigger
+    @Bindable private var profileService = ProfileService.shared
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("When on exact Space \(model.spaceID)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Use Current Space") {
+                let currentID = ProfileTriggerEngine.activeSpaceID()
+                guard currentID != 0 else { return }
+                model.spaceID = currentID
+                profileService.updateTrigger(.exactSpace(model), in: profile.id)
+            }
+            .buttonStyle(.link)
+            .font(.caption)
+        }
     }
 }

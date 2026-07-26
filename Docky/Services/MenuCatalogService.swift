@@ -7,6 +7,145 @@ import AppKit
 import Combine
 import Foundation
 
+private nonisolated struct MenuCatalogLoadResult: Sendable {
+    let actionsDocument: MenuCatalogActionsDocumentDTO?
+    let menusDocument: MenuCatalogMenusDocumentDTO?
+    let errorDescription: String?
+}
+
+private nonisolated struct MenuCatalogActionsDocumentDTO:
+    Decodable,
+    Sendable {
+    let version: Int
+    let packages: [MenuCatalogActionPackageDTO]
+}
+
+private nonisolated struct MenuCatalogMenusDocumentDTO:
+    Decodable,
+    Sendable {
+    let version: Int
+    let menus: [MenuCatalogMenuDefinitionDTO]
+}
+
+private nonisolated struct MenuCatalogActionPackageDTO:
+    Decodable,
+    Sendable {
+    let id: String
+    let title: String
+    let author: String
+    let version: String
+    let reviewStatus: String
+    let description: String?
+    let actions: [MenuCatalogActionDefinitionDTO]
+}
+
+private nonisolated struct MenuCatalogActionDefinitionDTO:
+    Decodable,
+    Sendable {
+    let id: String
+    let title: String
+    let alternateTitle: String?
+    let alternateTitleWhen: MenuCatalogConditionDTO?
+    let kind: String
+    let tileTypes: [String]
+    let destructive: Bool
+    let destructiveWhen: MenuCatalogConditionDTO?
+    let toggleFlag: String?
+    let when: MenuCatalogConditionDTO?
+    let permissions: [String]
+    let builtinIdentifier: String?
+    let targetApp: String?
+    let inputs: [String]
+    let script: String?
+    let path: [String]?
+    let requiresFrontmost: Bool
+    let holdOption: Bool
+    let symbol: String?
+}
+
+private nonisolated struct MenuCatalogMenuDefinitionDTO:
+    Decodable,
+    Sendable {
+    let tileType: String
+    let items: [MenuCatalogMenuItemDefinitionDTO]
+}
+
+private nonisolated struct MenuCatalogMenuItemDefinitionDTO:
+    Decodable,
+    Sendable {
+    let type: String
+    let title: String?
+    let action: String?
+    let alternateAction: String?
+    let alternateActionWhen: MenuCatalogConditionDTO?
+    let when: MenuCatalogConditionDTO?
+    let children: [MenuCatalogMenuItemDefinitionDTO]?
+}
+
+private nonisolated indirect enum MenuCatalogConditionDTO:
+    Decodable,
+    Sendable {
+    case flag(String)
+    case bundleIdentifierEquals(String)
+    case all([MenuCatalogConditionDTO])
+    case any([MenuCatalogConditionDTO])
+    case not(MenuCatalogConditionDTO)
+
+    private enum CodingKeys: String, CodingKey {
+        case flag
+        case bundleIdentifierEquals
+        case all
+        case any
+        case not
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        if let flag = try container.decodeIfPresent(
+            String.self,
+            forKey: .flag
+        ) {
+            self = .flag(flag)
+            return
+        }
+        if let bundleIdentifier = try container.decodeIfPresent(
+            String.self,
+            forKey: .bundleIdentifierEquals
+        ) {
+            self = .bundleIdentifierEquals(bundleIdentifier)
+            return
+        }
+        if let conditions = try container.decodeIfPresent(
+            [MenuCatalogConditionDTO].self,
+            forKey: .all
+        ) {
+            self = .all(conditions)
+            return
+        }
+        if let conditions = try container.decodeIfPresent(
+            [MenuCatalogConditionDTO].self,
+            forKey: .any
+        ) {
+            self = .any(conditions)
+            return
+        }
+        if let condition = try container.decodeIfPresent(
+            MenuCatalogConditionDTO.self,
+            forKey: .not
+        ) {
+            self = .not(condition)
+            return
+        }
+
+        throw DecodingError.dataCorrupted(.init(
+            codingPath: decoder.codingPath,
+            debugDescription:
+                "Catalog condition must define a supported condition key."
+        ))
+    }
+}
+
 final class MenuCatalogService: ObservableObject {
     static let shared = MenuCatalogService()
 
@@ -15,7 +154,8 @@ final class MenuCatalogService: ObservableObject {
 
     private var actionsByID: [String: CatalogActionDefinition] = [:]
     private var menusByTileType: [MenuTileType: CatalogMenuDefinition] = [:]
-    private let decoder = JSONDecoder()
+    private var reloadGeneration: UInt64 = 0
+    private var reloadTask: Task<Void, Never>?
 
     private init() {
         reload()
@@ -26,14 +166,48 @@ final class MenuCatalogService: ObservableObject {
         packageSummaries = []
         actionsByID = [:]
         menusByTileType = [:]
+        reloadGeneration &+= 1
+        let generation = reloadGeneration
+        reloadTask?.cancel()
 
-        do {
-            let actionsDocument: CatalogActionsDocument = try loadJSON(named: "actions", subdirectory: "MenuCatalog")
-            let menusDocument: CatalogMenusDocument = try loadJSON(named: "menus", subdirectory: "MenuCatalog")
-            apply(actionsDocument: actionsDocument, menusDocument: menusDocument)
-        } catch {
-            diagnostics = ["Failed to load menu catalog: \(error.localizedDescription)"]
-            logDiagnostics()
+        let worker = Task.detached(
+            priority: .utility
+        ) {
+            Self.loadCatalogDocuments()
+        }
+        reloadTask = Task { [weak self] in
+            let result = await worker.value
+            guard let self,
+                  !Task.isCancelled,
+                  self.reloadGeneration == generation else {
+                return
+            }
+
+            guard let actionsDTO = result.actionsDocument,
+                  let menusDTO = result.menusDocument else {
+                self.diagnostics = [
+                    "Failed to load menu catalog: " +
+                    (result.errorDescription ?? "Unknown error")
+                ]
+                self.logDiagnostics()
+                return
+            }
+            do {
+                self.apply(
+                    actionsDocument: try self.materialize(
+                        actionsDocument: actionsDTO
+                    ),
+                    menusDocument: try self.materialize(
+                        menusDocument: menusDTO
+                    )
+                )
+            } catch {
+                self.diagnostics = [
+                    "Failed to load menu catalog: " +
+                    error.localizedDescription
+                ]
+                self.logDiagnostics()
+            }
         }
     }
 
@@ -106,14 +280,199 @@ final class MenuCatalogService: ObservableObject {
         logDiagnostics()
     }
 
-    private func loadJSON<T: Decodable>(named name: String, subdirectory: String) throws -> T {
+    private nonisolated static func loadCatalogDocuments()
+        -> MenuCatalogLoadResult {
+        do {
+            let actions: MenuCatalogActionsDocumentDTO = try loadJSON(
+                named: "actions",
+                subdirectory: "MenuCatalog"
+            )
+            let menus: MenuCatalogMenusDocumentDTO = try loadJSON(
+                named: "menus",
+                subdirectory: "MenuCatalog"
+            )
+            return MenuCatalogLoadResult(
+                actionsDocument: actions,
+                menusDocument: menus,
+                errorDescription: nil
+            )
+        } catch {
+            return MenuCatalogLoadResult(
+                actionsDocument: nil,
+                menusDocument: nil,
+                errorDescription: error.localizedDescription
+            )
+        }
+    }
+
+    private nonisolated static func loadJSON<T: Decodable>(
+        named name: String,
+        subdirectory: String
+    ) throws -> T {
         let url = Bundle.main.url(forResource: name, withExtension: "json", subdirectory: subdirectory)
             ?? Bundle.main.url(forResource: name, withExtension: "json")
         guard let url else {
             throw NSError(domain: "MenuCatalogService", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing resource \(subdirectory)/\(name).json"])
         }
         let data = try Data(contentsOf: url)
-        return try decoder.decode(T.self, from: data)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    private func materialize(
+        actionsDocument document: MenuCatalogActionsDocumentDTO
+    ) throws -> CatalogActionsDocument {
+        CatalogActionsDocument(
+            version: document.version,
+            packages: try document.packages.map { package in
+                CatalogActionPackage(
+                    id: package.id,
+                    title: package.title,
+                    author: package.author,
+                    version: package.version,
+                    reviewStatus: package.reviewStatus,
+                    description: package.description,
+                    actions: try package.actions.map(materialize)
+                )
+            }
+        )
+    }
+
+    private func materialize(
+        action: MenuCatalogActionDefinitionDTO
+    ) throws -> CatalogActionDefinition {
+        CatalogActionDefinition(
+            id: action.id,
+            title: action.title,
+            alternateTitle: action.alternateTitle,
+            alternateTitleWhen: try action.alternateTitleWhen.map(
+                materialize
+            ),
+            kind: try catalogValue(
+                action.kind,
+                as: CatalogActionKind.self,
+                field: "action kind"
+            ),
+            tileTypes: try action.tileTypes.map {
+                try catalogValue(
+                    $0,
+                    as: MenuTileType.self,
+                    field: "tile type"
+                )
+            },
+            destructive: action.destructive,
+            destructiveWhen: try action.destructiveWhen.map(
+                materialize
+            ),
+            toggleFlag: try action.toggleFlag.map {
+                try catalogValue(
+                    $0,
+                    as: CatalogContextFlag.self,
+                    field: "toggle flag"
+                )
+            },
+            when: try action.when.map(materialize),
+            permissions: try action.permissions.map {
+                try catalogValue(
+                    $0,
+                    as: CatalogPermissionRequirement.self,
+                    field: "permission"
+                )
+            },
+            builtinIdentifier: action.builtinIdentifier,
+            targetApp: action.targetApp,
+            inputs: try action.inputs.map {
+                try catalogValue(
+                    $0,
+                    as: CatalogInputKey.self,
+                    field: "input"
+                )
+            },
+            script: action.script,
+            path: action.path,
+            requiresFrontmost: action.requiresFrontmost,
+            holdOption: action.holdOption,
+            symbol: action.symbol
+        )
+    }
+
+    private func materialize(
+        menusDocument document: MenuCatalogMenusDocumentDTO
+    ) throws -> CatalogMenusDocument {
+        CatalogMenusDocument(
+            version: document.version,
+            menus: try document.menus.map { menu in
+                CatalogMenuDefinition(
+                    tileType: try catalogValue(
+                        menu.tileType,
+                        as: MenuTileType.self,
+                        field: "menu tile type"
+                    ),
+                    items: try menu.items.map(materialize)
+                )
+            }
+        )
+    }
+
+    private func materialize(
+        menuItem item: MenuCatalogMenuItemDefinitionDTO
+    ) throws -> CatalogMenuItemDefinition {
+        CatalogMenuItemDefinition(
+            type: try catalogValue(
+                item.type,
+                as: CatalogMenuItemType.self,
+                field: "menu item type"
+            ),
+            title: item.title,
+            action: item.action,
+            alternateAction: item.alternateAction,
+            alternateActionWhen: try item.alternateActionWhen.map(
+                materialize
+            ),
+            when: try item.when.map(materialize),
+            children: try item.children?.map(materialize)
+        )
+    }
+
+    private func materialize(
+        condition: MenuCatalogConditionDTO
+    ) throws -> CatalogCondition {
+        let kind: CatalogCondition.Kind
+        switch condition {
+        case .flag(let rawValue):
+            kind = .flag(try catalogValue(
+                rawValue,
+                as: CatalogContextFlag.self,
+                field: "condition flag"
+            ))
+        case .bundleIdentifierEquals(let bundleIdentifier):
+            kind = .bundleIdentifierEquals(bundleIdentifier)
+        case .all(let conditions):
+            kind = .all(try conditions.map(materialize))
+        case .any(let conditions):
+            kind = .any(try conditions.map(materialize))
+        case .not(let condition):
+            kind = .not(try materialize(condition: condition))
+        }
+        return CatalogCondition(kind: kind)
+    }
+
+    private func catalogValue<Value>(
+        _ rawValue: String,
+        as type: Value.Type,
+        field: String
+    ) throws -> Value
+    where Value: RawRepresentable, Value.RawValue == String {
+        guard let value = Value(rawValue: rawValue) else {
+            throw NSError(
+                domain: "MenuCatalogService",
+                code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Unknown \(field) '\(rawValue)'."
+                ]
+            )
+        }
+        return value
     }
 
     private func validate(action: CatalogActionDefinition) -> String? {
@@ -261,16 +620,15 @@ final class MenuCatalogService: ObservableObject {
 
         switch tile.content {
         case .app(let app):
-            let bundleURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier)
             let isPinned = tile.id.hasPrefix("pinned:")
             return CatalogActionContext(
                 tile: tile,
                 modifierFlags: modifierFlags,
                 bundleIdentifier: app.bundleIdentifier,
                 displayName: app.displayName,
-                appBundlePath: bundleURL?.path,
+                appBundlePath: nil,
                 folderPath: nil,
-                filePath: bundleURL?.path,
+                filePath: nil,
                 isRunning: WorkspaceService.shared.isRunning(bundleIdentifier: app.bundleIdentifier),
                 isPinned: isPinned,
                 canTogglePin: app.bundleIdentifier != finderBundleIdentifier,

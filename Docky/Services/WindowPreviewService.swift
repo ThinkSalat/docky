@@ -95,7 +95,9 @@ final class WindowPreviewService: ObservableObject {
     }
 
     func confirm(window: AppWindow) {
-        _ = WorkspaceService.shared.focus(window: window)
+        Task {
+            _ = await WorkspaceService.shared.focus(window: window)
+        }
         dismiss()
     }
 

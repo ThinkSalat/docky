@@ -17,9 +17,21 @@ struct MinimizedWindowTileView: View {
                 previewCard(in: geo.size)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
 
-                Image(nsImage: icon)
-                    .resizable()
-                    .interpolation(.high)
+                CachedAsyncAppImage(
+                    bundleIdentifier: tile.bundleIdentifier,
+                    overrideURL: preferences
+                        .effectiveAppIconOverrideURL(
+                            forBundleIdentifier: tile.bundleIdentifier
+                        ),
+                    placeholder: {
+                        Image(systemName: "app.fill")
+                            .resizable()
+                    }
+                ) { image in
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                }
                     .aspectRatio(contentMode: .fit)
                     .frame(width: geo.size.width * 0.32, height: geo.size.width * 0.32)
                     .padding(overrideIconPadding(side: geo.size.width * 0.32))
@@ -56,15 +68,6 @@ struct MinimizedWindowTileView: View {
             }
         }
         .frame(width: cardSize.width, height: cardSize.height)
-    }
-
-    private var icon: NSImage {
-        if let overrideURL = preferences.effectiveAppIconOverrideURL(forBundleIdentifier: tile.bundleIdentifier),
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-
-        return IconCacheService.shared.icon(forBundleIdentifier: tile.bundleIdentifier)
     }
 
     private func overrideIconPadding(side: CGFloat) -> CGFloat {

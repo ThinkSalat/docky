@@ -9,7 +9,6 @@ import SwiftUI
 struct FolderTileView: View {
     let tile: FolderTile
     let isOpen: Bool
-    @ObservedObject private var permissions = PermissionsService.shared
     @ObservedObject private var folderAccess = FolderAccessService.shared
     @Bindable private var preferences = DockyPreferences.shared
     @State private var preview: [URL] = []
@@ -18,13 +17,15 @@ struct FolderTileView: View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .task(id: reloadKey) {
-                preview = FolderAccessService.shared.recentContents(of: tile.url, sortMode: tile.sortMode, limit: 3)
-            }
-            .onAppear {
-                folderAccess.beginWatching(tile.url, ownerID: watcherOwnerID)
-            }
-            .onDisappear {
-                folderAccess.endWatching(tile.url, ownerID: watcherOwnerID)
+                guard tile.displayMode != .folder else {
+                    preview = []
+                    return
+                }
+                preview = FolderAccessService.shared.cachedRecentContents(
+                    of: tile.url,
+                    sortMode: tile.sortMode,
+                    limit: 3
+                )
             }
     }
 
@@ -55,9 +56,7 @@ struct FolderTileView: View {
 
     private var folderIcon: some View {
         GeometryReader { proxy in
-            Image(nsImage: resolvedFolderIconImage)
-                .resizable()
-                .interpolation(.high)
+            folderIconImage()
                 .aspectRatio(contentMode: .fit)
                 .padding(overrideIconPadding(in: proxy.size))
         }
@@ -70,12 +69,11 @@ struct FolderTileView: View {
         return preferences.folderIconOverridePadding(forPath: tile.url.path) * min(size.width, size.height)
     }
 
-    private var resolvedFolderIconImage: NSImage {
-        if let overrideURL = preferences.effectiveFolderIconOverrideURL(forPath: tile.url.path),
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-        return IconCacheService.shared.previewIcon(forFileURL: tile.url)
+    private var genericFolderIconImage: NSImage {
+        NSImage(
+            systemSymbolName: "folder.fill",
+            accessibilityDescription: String(localized: "Folder")
+        ) ?? NSImage()
     }
 
     @ViewBuilder
@@ -96,7 +94,7 @@ struct FolderTileView: View {
             ForEach(Array(preview.enumerated()).reversed(), id: \.element) { pair in
                 let depth = CGFloat(pair.offset)
 
-                Image(nsImage: IconCacheService.shared.previewIcon(forFileURL: pair.element))
+                Image(nsImage: cachedPreviewIcon(for: pair.element))
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
@@ -108,15 +106,25 @@ struct FolderTileView: View {
         .frame(width: size.width, height: size.height, alignment: .center)
     }
 
+    private func cachedPreviewIcon(for itemURL: URL) -> NSImage {
+        IconCacheService.shared.cachedIcon(forFileURL: itemURL)
+            ?? genericFileIconImage
+    }
+
+    private var genericFileIconImage: NSImage {
+        NSImage(
+            systemSymbolName: "doc.fill",
+            accessibilityDescription: String(localized: "File")
+        ) ?? NSImage()
+    }
+
     private func fallbackStack(in size: CGSize) -> some View {
         let side = min(size.width, size.height) * 0.8
         let offsets: [CGFloat] = [-4, 0, 4]
 
         return ZStack {
             ForEach(Array(offsets.enumerated()), id: \.offset) { index, offset in
-                Image(nsImage: IconCacheService.shared.previewIcon(forFileURL: tile.url))
-                    .resizable()
-                    .interpolation(.high)
+                folderIconImage()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: side, height: side)
                     .opacity(index == 1 ? 1 : 0.55)
@@ -127,13 +135,34 @@ struct FolderTileView: View {
         .frame(width: size.width, height: size.height, alignment: .center)
     }
 
+    private func folderIconImage() -> some View {
+        CachedAsyncImageFile(
+            url: preferences.effectiveFolderIconOverrideURL(
+                forPath: tile.url.path
+            ),
+            placeholder: {
+                CachedAsyncFileImage(
+                    url: tile.url,
+                    placeholder: {
+                        Image(nsImage: genericFolderIconImage)
+                            .resizable()
+                            .interpolation(.high)
+                    }
+                ) { image in
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                }
+            }
+        ) { image in
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+        }
+    }
+
     private var reloadKey: String {
-        "\(tile.url.path)|\(permissions.userFolders)|\(tile.displayMode.rawValue)|\(tile.sortMode.rawValue)|\(folderAccess.changeToken)"
+        "\(tile.url.path)|\(tile.displayMode.rawValue)|\(tile.sortMode.rawValue)|\(folderAccess.changeToken)"
     }
 
-    private var watcherOwnerID: String {
-        "folder-tile:\(tile.url.standardizedFileURL.path)"
-    }
 }
-
-extension PermissionStatus: Hashable {}

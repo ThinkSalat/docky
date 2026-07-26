@@ -13,7 +13,11 @@ import AppKit
 import Foundation
 import Observation
 
-enum PinnedTileItemKind: String, Codable, Equatable {
+nonisolated enum PinnedTileItemKind:
+    String,
+    Codable,
+    Equatable,
+    Sendable {
     case app
     case appFolder
     case launchpad
@@ -25,7 +29,11 @@ enum PinnedTileItemKind: String, Codable, Equatable {
     case divider
 }
 
-enum TrailingTileItemKind: String, Codable, Equatable {
+nonisolated enum TrailingTileItemKind:
+    String,
+    Codable,
+    Equatable,
+    Sendable {
     case folder
     case trash
     case widget
@@ -35,7 +43,11 @@ enum TrailingTileItemKind: String, Codable, Equatable {
     case divider
 }
 
-struct PinnedTileItem: Codable, Equatable, Identifiable {
+nonisolated struct PinnedTileItem:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let id: String
     let kind: PinnedTileItemKind
     let bundleIdentifier: String?
@@ -203,7 +215,11 @@ struct PinnedTileItem: Codable, Equatable, Identifiable {
     }
 }
 
-struct TrailingTileItem: Codable, Equatable, Identifiable {
+nonisolated struct TrailingTileItem:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let id: String
     let kind: TrailingTileItemKind
     let sourceTileID: String?
@@ -648,11 +664,7 @@ struct AppIconOverride: Codable, Equatable, Identifiable {
     var id: String { bundleIdentifier }
 
     var effectiveIconURL: URL? {
-        guard !iconPath.isEmpty, FileManager.default.fileExists(atPath: iconPath) else {
-            return nil
-        }
-
-        return URL(fileURLWithPath: iconPath)
+        ManagedUserAssetStore.managedCandidateURL(forPath: iconPath)
     }
 }
 
@@ -692,11 +704,7 @@ struct TrashIconOverride: Codable, Equatable, Identifiable {
     var id: String { state.rawValue }
 
     var effectiveIconURL: URL? {
-        guard !iconPath.isEmpty, FileManager.default.fileExists(atPath: iconPath) else {
-            return nil
-        }
-
-        return URL(fileURLWithPath: iconPath)
+        ManagedUserAssetStore.managedCandidateURL(forPath: iconPath)
     }
 }
 
@@ -715,11 +723,7 @@ struct FolderIconOverride: Codable, Equatable, Identifiable {
     var id: String { folderPath }
 
     var effectiveIconURL: URL? {
-        guard !iconPath.isEmpty, FileManager.default.fileExists(atPath: iconPath) else {
-            return nil
-        }
-
-        return URL(fileURLWithPath: iconPath)
+        ManagedUserAssetStore.managedCandidateURL(forPath: iconPath)
     }
 }
 
@@ -751,7 +755,12 @@ struct DockColor: Codable, Equatable {
     }
 }
 
-enum FolderTileDisplayMode: String, CaseIterable, Codable, Identifiable {
+nonisolated enum FolderTileDisplayMode:
+    String,
+    CaseIterable,
+    Codable,
+    Identifiable,
+    Sendable {
     case folder
     case contents
 
@@ -765,7 +774,12 @@ enum FolderTileDisplayMode: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-enum AppFolderTileDisplayMode: String, CaseIterable, Codable, Identifiable {
+nonisolated enum AppFolderTileDisplayMode:
+    String,
+    CaseIterable,
+    Codable,
+    Identifiable,
+    Sendable {
     case grid
     case stack
 
@@ -813,7 +827,12 @@ enum FolderBadgePreviewStyle: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-enum FolderTileContentViewMode: String, CaseIterable, Codable, Identifiable {
+nonisolated enum FolderTileContentViewMode:
+    String,
+    CaseIterable,
+    Codable,
+    Identifiable,
+    Sendable {
     case grid
     case list
     case inline
@@ -858,7 +877,12 @@ enum FolderTileContentViewMode: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-enum FolderTileSortMode: String, CaseIterable, Codable, Identifiable {
+nonisolated enum FolderTileSortMode:
+    String,
+    CaseIterable,
+    Codable,
+    Identifiable,
+    Sendable {
     case name
     case dateModified
     case dateCreated
@@ -999,10 +1023,12 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 }
 
 @Observable final class DockyPreferences {
-    static let shared = DockyPreferences()
+    static var shared: DockyPreferences {
+        ProfileStateBootstrap.shared.preferences
+    }
 
     /// Set of `Keys.*` strings the user has explicitly customized. Each
-    /// appearance setter inserts its key; setters that clear a value
+    /// theme-aware setter inserts its key; setters that clear a value
     /// (e.g. setting `windowTintColor` back to `nil`) remove it.
     ///
     /// This is the predicate the theme override layer uses: when a key
@@ -1011,74 +1037,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// key *is* in this set, the user's explicit value wins.
     ///
     /// Persisted to `UserDefaults` so override status survives relaunch.
-    /// Populated on first launch via the migration in `init` (any key
-    /// already present in `UserDefaults` at upgrade time is treated as
-    /// user-overridden, better to over-respect existing customizations
-    /// than to let a theme silently replace them).
+    /// Populated on first launch via the migration in `init` (eligible keys
+    /// already present in `UserDefaults` at upgrade time are treated as
+    /// user-overridden; automatically imported DockSettings values are not).
     var userOverriddenAppearanceKeys: Set<String> = []
-
-    /// All preference keys that participate in the theme override
-    /// layer (i.e. the appearance subset). Used by `init` migration
-    /// and by `clearAllAppearanceOverrides()`.
-    static let appearanceKeys: Set<String> = [
-        Keys.disablesGlassLook,
-        Keys.tileVerticalPadding,
-        Keys.tileSpacing,
-        Keys.tileClipShape,
-        Keys.tileIconPadding,
-        Keys.tileHoverOpacity,
-        Keys.tileHoverScale,
-        Keys.tileHoverBackgroundColor,
-        Keys.tileHoverBackgroundImagePath,
-        Keys.tileHoverBackgroundOpacity,
-        Keys.tileHoverBackgroundCornerRadius,
-        Keys.tileActiveBackgroundColor,
-        Keys.tileActiveBackgroundImagePath,
-        Keys.tileActiveBackgroundOpacity,
-        Keys.tileActiveBackgroundCornerRadius,
-        Keys.widget1xContentPadding,
-        Keys.widget1xCornerRadius,
-        Keys.widget2xContentPadding,
-        Keys.widget2xCornerRadius,
-        Keys.widget3xContentPadding,
-        Keys.widget3xCornerRadius,
-        Keys.widget4xContentPadding,
-        Keys.widget4xCornerRadius,
-        Keys.windowCornerRadius,
-        Keys.windowCornerRadiusTopLeading,
-        Keys.windowCornerRadiusTopTrailing,
-        Keys.windowCornerRadiusBottomLeading,
-        Keys.windowCornerRadiusBottomTrailing,
-        Keys.windowContentInsetTop,
-        Keys.windowContentInsetLeading,
-        Keys.windowContentInsetBottom,
-        Keys.windowContentInsetTrailing,
-        Keys.windowClipShape,
-        Keys.windowTintColor,
-        Keys.windowTintOpacity,
-        Keys.windowBackgroundImagePath,
-        Keys.windowBackgroundImageMode,
-        Keys.activeIndicatorShape,
-        Keys.activeIndicatorImagePath,
-        Keys.activeIndicatorColor,
-        Keys.activeIndicatorOffset,
-        Keys.activeIndicatorScale,
-        Keys.dividerImagePath,
-        Keys.leftDividerImagePath,
-        Keys.rightDividerImagePath,
-        Keys.mirrorsLeftDividerOnRight,
-        Keys.dividerPaddingFraction,
-        Keys.dividerImageScale,
-        Keys.dividerOffset,
-        Keys.dividerOpacity,
-        Keys.dividerColor,
-        Keys.windowBorderColor,
-        Keys.windowBorderWidth,
-        Keys.iconShadowColor,
-        Keys.iconShadowRadius,
-        Keys.iconShadowOpacity,
-        Keys.showsActivePinnedSeparator,
-    ]
 
     /// Whether the user has an explicit override for this preference
     /// key. Used by Settings UI to show an "override / theme value"
@@ -1088,8 +1050,8 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         userOverriddenAppearanceKeys.contains(key)
     }
 
-    /// Marks an appearance key as user-overridden. Idempotent.
-    /// Called from every appearance setter alongside the persist write.
+    /// Marks a theme-aware key as user-overridden. Idempotent.
+    /// Called from every participating setter alongside the persist write.
     /// Internal (not fileprivate) so other services that own their own
     /// preference storage (e.g. `DockSettingsService` for tile size /
     /// magnification) can participate in the same override layer when a
@@ -1100,7 +1062,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         persistUserOverriddenAppearanceKeys()
     }
 
-    /// Clears the override flag for a single appearance key. The
+    /// Clears the override flag for a single theme-aware key. The
     /// stored value is left untouched, `effective<X>` simply starts
     /// preferring the theme value (or built-in default). Used by the
     /// Settings UI "revert to theme" affordance.
@@ -1110,11 +1072,25 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         persistUserOverriddenAppearanceKeys()
     }
 
-    /// Clears every appearance override. Used by the "use theme as-is"
-    /// flow and by `resetAppearanceToDefaults()`.
+    /// Clears every theme override. Used only by the explicit
+    /// "use theme as-is" flow; partial resets use scoped clearing.
     func clearAllAppearanceOverrides() {
         guard !userOverriddenAppearanceKeys.isEmpty else { return }
         userOverriddenAppearanceKeys.removeAll()
+        persistUserOverriddenAppearanceKeys()
+    }
+
+    /// Clears only the override flags owned by a partial reset. Unknown keys
+    /// and keys owned by other settings surfaces survive untouched.
+    private func clearThemeOverrides(
+        afterReset scope: DockyPreferenceResetScope
+    ) {
+        let retained = DockyPreferenceResetScopeModel.retainingThemeOverrides(
+            userOverriddenAppearanceKeys,
+            afterReset: scope
+        )
+        guard retained != userOverriddenAppearanceKeys else { return }
+        userOverriddenAppearanceKeys = retained
         persistUserOverriddenAppearanceKeys()
     }
 
@@ -1694,6 +1670,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var windowSpaceBehavior: DockWindowSpaceBehavior {
         didSet {
             guard windowSpaceBehavior != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.windowSpaceBehavior,
+                "old": String(describing: oldValue),
+                "new": String(describing: windowSpaceBehavior),
+            ])
             defaults.set(windowSpaceBehavior.rawValue, forKey: Keys.windowSpaceBehavior)
         }
     }
@@ -1702,6 +1683,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var autohidesWindow: Bool {
         didSet {
             guard autohidesWindow != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.autohidesWindow,
+                "old": oldValue,
+                "new": autohidesWindow,
+            ])
             defaults.set(autohidesWindow, forKey: Keys.autohidesWindow)
         }
     }
@@ -1799,6 +1785,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var maximizedWindowBehavior: MaximizedWindowBehavior {
         didSet {
             guard maximizedWindowBehavior != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.maximizedWindowBehavior,
+                "old": String(describing: oldValue),
+                "new": String(describing: maximizedWindowBehavior),
+            ])
             defaults.set(maximizedWindowBehavior.rawValue, forKey: Keys.maximizedWindowBehavior)
         }
     }
@@ -1987,6 +1978,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var hidesDuringFullscreen: Bool {
         didSet {
             guard hidesDuringFullscreen != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.hidesDuringFullscreen,
+                "old": oldValue,
+                "new": hidesDuringFullscreen,
+            ])
             defaults.set(hidesDuringFullscreen, forKey: Keys.hidesDuringFullscreen)
         }
     }
@@ -1999,6 +1995,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var enablesShelveMode: Bool {
         didSet {
             guard enablesShelveMode != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.enablesShelveMode,
+                "old": oldValue,
+                "new": enablesShelveMode,
+            ])
             defaults.set(enablesShelveMode, forKey: Keys.enablesShelveMode)
         }
     }
@@ -2027,6 +2028,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var hidesRecentApps: Bool {
         didSet {
             guard hidesRecentApps != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.hidesRecentApps,
+                "old": oldValue,
+                "new": hidesRecentApps,
+            ])
             defaults.set(hidesRecentApps, forKey: Keys.hidesRecentApps)
         }
     }
@@ -2039,6 +2045,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var hidesProfileStrip: Bool {
         didSet {
             guard hidesProfileStrip != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.hidesProfileStrip,
+                "old": oldValue,
+                "new": hidesProfileStrip,
+            ])
             defaults.set(hidesProfileStrip, forKey: Keys.hidesProfileStrip)
         }
     }
@@ -2286,6 +2297,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// Bundle identifiers hidden from Docky's app tile surfaces.
     var hiddenAppBundleIdentifiers: [String] {
         didSet {
+            guard !isRevertingProfileBackedPreference else { return }
             let normalizedIdentifiers = Self.normalizedBundleIdentifiers(hiddenAppBundleIdentifiers)
             guard normalizedIdentifiers != oldValue else {
                 if hiddenAppBundleIdentifiers != normalizedIdentifiers {
@@ -2299,8 +2311,19 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
                 return
             }
 
+            guard mirrorToActiveProfile({
+                $0.hiddenAppBundleIdentifiers = normalizedIdentifiers
+            }) else {
+                let authoritativeIdentifiers =
+                    profileService?.activeProfile?.hiddenAppBundleIdentifiers
+                    ?? Self.normalizedBundleIdentifiers(oldValue)
+                revertProfileBackedPreference {
+                    hiddenAppBundleIdentifiers = authoritativeIdentifiers
+                }
+                return
+            }
+
             defaults.set(normalizedIdentifiers, forKey: Keys.hiddenAppBundleIdentifiers)
-            mirrorToActiveProfile { $0.hiddenAppBundleIdentifiers = normalizedIdentifiers }
         }
     }
 
@@ -2479,6 +2502,12 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+    var effectiveLaunchpadBackgroundImageURL: URL? {
+        ManagedUserAssetStore.managedCandidateURL(
+            forPath: launchpadBackgroundImagePath
+        )
+    }
+
     /// Whether the launchpad's backdrop image (custom or desktop
     /// wallpaper) is rendered through the heavy SwiftUI blur. Default
     /// `true` matches the previous behavior; disabling shows the image
@@ -2607,10 +2636,14 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// Docky-owned ordered pinned section items.
     var pinnedItems: [PinnedTileItem] {
         didSet {
-            guard pinnedItems != oldValue else { return }
-            persistPinnedItems(pinnedItems)
+            guard pinnedItems != oldValue, !isRevertingProfileBackedPreference else { return }
             let snapshot = pinnedItems
-            mirrorToActiveProfile { $0.pinnedItems = snapshot }
+            guard mirrorToActiveProfile({ $0.pinnedItems = snapshot }) else {
+                revertProfileBackedPreference {
+                    pinnedItems = oldValue
+                }
+                return
+            }
 
             let appBundleIdentifiers = pinnedItems.compactMap { item in
                 item.kind == .app ? item.bundleIdentifier : nil
@@ -2624,30 +2657,42 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// Enabled widgets grouped by the app tile they extend.
     var widgetPlacements: [WidgetPlacement] {
         didSet {
-            guard widgetPlacements != oldValue else { return }
-            persistWidgetPlacements(widgetPlacements)
+            guard widgetPlacements != oldValue, !isRevertingProfileBackedPreference else { return }
             let snapshot = widgetPlacements
-            mirrorToActiveProfile { $0.widgetPlacements = snapshot }
+            guard mirrorToActiveProfile({ $0.widgetPlacements = snapshot }) else {
+                revertProfileBackedPreference {
+                    widgetPlacements = oldValue
+                }
+                return
+            }
         }
     }
 
     /// Optional widget substitutions for app tiles.
     var appWidgetDisplays: [AppWidgetDisplay] {
         didSet {
-            guard appWidgetDisplays != oldValue else { return }
-            persistAppWidgetDisplays(appWidgetDisplays)
+            guard appWidgetDisplays != oldValue, !isRevertingProfileBackedPreference else { return }
             let snapshot = appWidgetDisplays
-            mirrorToActiveProfile { $0.appWidgetDisplays = snapshot }
+            guard mirrorToActiveProfile({ $0.appWidgetDisplays = snapshot }) else {
+                revertProfileBackedPreference {
+                    appWidgetDisplays = oldValue
+                }
+                return
+            }
         }
     }
 
     /// Docky-owned ordered folder/trash section items.
     var trailingItems: [TrailingTileItem] {
         didSet {
-            guard trailingItems != oldValue else { return }
-            persistTrailingItems(trailingItems)
+            guard trailingItems != oldValue, !isRevertingProfileBackedPreference else { return }
             let snapshot = trailingItems
-            mirrorToActiveProfile { $0.trailingItems = snapshot }
+            guard mirrorToActiveProfile({ $0.trailingItems = snapshot }) else {
+                revertProfileBackedPreference {
+                    trailingItems = oldValue
+                }
+                return
+            }
         }
     }
 
@@ -2679,20 +2724,60 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var isSyncingOpenAtLoginPreference = false
+    private weak var profileService: ProfileService?
+    @ObservationIgnored
+    private var userAssetImportGenerationBySlot: [String: UInt64] = [:]
+    @ObservationIgnored
+    private var pendingUserAssetImportBySlot:
+        [String: (path: String, generation: UInt64)] = [:]
+    @ObservationIgnored
+    private var userAssetCleanupRevision: UInt64 = 0
+
+    /// Legacy profile-backed values that existed in UserDefaults but could
+    /// not be decoded during bootstrap. Profile migration treats these as a
+    /// blocking integrity failure rather than silently replacing them with
+    /// empty/default values.
+    private(set) var legacyProfileSnapshotDecodeFailures: [String] = []
 
     /// When `true`, tile-store didSet observers skip the push to
     /// `ProfileService`. Used by `applyProfile(_:)` so loading a profile
     /// doesn't immediately overwrite it with the values just loaded.
     private var isApplyingProfile = false
+    private var isRevertingProfileBackedPreference = false
+
+    fileprivate func attachProfileService(_ profileService: ProfileService) {
+        precondition(self.profileService == nil)
+        self.profileService = profileService
+    }
 
     /// Swap the active profile's tile-store fields into this preferences
-    /// object. Each assignment fires its didSet — those still persist to
-    /// the legacy top-level keys (which now act as a snapshot of the
-    /// active profile) but skip mirroring back to `ProfileService` while
-    /// `isApplyingProfile` is set.
+    /// object. Each assignment fires its didSet but skips mirroring back to
+    /// `ProfileService` while `isApplyingProfile` is set. Authoritative and
+    /// compatibility persistence are both owned by ProfileService.
     func applyProfile(_ profile: DockProfile) {
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(.profiles, "preferenceProfileApplyBegan", fields: [
+            "profileToken": diagnostics.token(profile.id),
+            "pinnedItemCountBefore": pinnedItems.count,
+            "pinnedItemCount": profile.pinnedItems.count,
+            "trailingItemCountBefore": trailingItems.count,
+            "trailingItemCount": profile.trailingItems.count,
+            "widgetPlacementCountBefore": widgetPlacements.count,
+            "widgetPlacementCount": profile.widgetPlacements.count,
+            "hiddenAppCountBefore": hiddenAppBundleIdentifiers.count,
+            "hiddenAppCount": profile.hiddenAppBundleIdentifiers.count,
+        ])
         isApplyingProfile = true
-        defer { isApplyingProfile = false }
+        defer {
+            isApplyingProfile = false
+            diagnostics.record(.profiles, "preferenceProfileApplyCompleted", fields: [
+                "profileToken": diagnostics.token(profile.id),
+                "pinnedItemCount": pinnedItems.count,
+                "trailingItemCount": trailingItems.count,
+                "widgetPlacementCount": widgetPlacements.count,
+                "hiddenAppCount": hiddenAppBundleIdentifiers.count,
+            ])
+        }
         pinnedItems = profile.pinnedItems
         trailingItems = profile.trailingItems
         widgetPlacements = profile.widgetPlacements
@@ -2702,9 +2787,33 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     /// Mirror a tile-store edit to the active profile so it survives the
     /// next profile switch. No-op while a profile is being applied.
-    fileprivate func mirrorToActiveProfile(_ mutate: @escaping (inout DockProfile) -> Void) {
-        guard !isApplyingProfile else { return }
-        ProfileService.shared.updateActiveProfile(mutate)
+    @discardableResult
+    private func mirrorToActiveProfile(
+        _ mutate: @escaping (inout DockProfile) -> Void
+    ) -> Bool {
+        guard !isApplyingProfile, !isRevertingProfileBackedPreference else {
+            return true
+        }
+        guard let profileService else {
+            DiagnosticsTrace.shared.record(.profiles, "profilePreferenceMutationRejected", fields: [
+                "reason": "profileServiceUnavailable",
+            ])
+            return false
+        }
+        return profileService.updateActiveProfile(mutate)
+    }
+
+    private func revertProfileBackedPreference(_ revert: () -> Void) {
+        isRevertingProfileBackedPreference = true
+        revert()
+        isRevertingProfileBackedPreference = false
+        DiagnosticsTrace.shared.record(.profiles, "profilePreferenceMutationReverted", fields: [
+            "activeProfileToken": DiagnosticsTrace.shared.token(profileService?.activeProfileID),
+            "error":
+                DiagnosticPrivacy.redactedTextDescriptor(
+                    profileService?.lastPersistenceError
+                ),
+        ])
     }
 
     // MARK: - Effective appearance values (theme override layer)
@@ -2796,9 +2905,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     var effectiveTileHoverBackgroundImageURL: URL? {
         if isAppearanceOverridden(Keys.tileHoverBackgroundImagePath),
-           let path = tileHoverBackgroundImagePath, !path.isEmpty,
-           FileManager.default.fileExists(atPath: path) {
-            return URL(fileURLWithPath: path)
+           let url = ManagedUserAssetStore.managedCandidateURL(
+               forPath: tileHoverBackgroundImagePath
+           ) {
+            return url
         }
         if let assetPath = ThemeManager.shared.activeManifest?.appearance.tile?.hover?.backgroundImage,
            let url = ThemeManager.shared.activeAssetURL(assetPath) {
@@ -2842,9 +2952,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     var effectiveTileActiveBackgroundImageURL: URL? {
         if isAppearanceOverridden(Keys.tileActiveBackgroundImagePath),
-           let path = tileActiveBackgroundImagePath, !path.isEmpty,
-           FileManager.default.fileExists(atPath: path) {
-            return URL(fileURLWithPath: path)
+           let url = ManagedUserAssetStore.managedCandidateURL(
+               forPath: tileActiveBackgroundImagePath
+           ) {
+            return url
         }
         if let assetPath = ThemeManager.shared.activeManifest?.appearance.tile?.active?.backgroundImage,
            let url = ThemeManager.shared.activeAssetURL(assetPath) {
@@ -3003,9 +3114,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     var effectiveWindowBackgroundImageURL: URL? {
         if isAppearanceOverridden(Keys.windowBackgroundImagePath),
-           let path = windowBackgroundImagePath, !path.isEmpty,
-           FileManager.default.fileExists(atPath: path) {
-            return URL(fileURLWithPath: path)
+           let url = ManagedUserAssetStore.managedCandidateURL(
+               forPath: windowBackgroundImagePath
+           ) {
+            return url
         }
 
         if let assetPath = ThemeManager.shared.activeManifest?.appearance.window?.backgroundImage,
@@ -3104,9 +3216,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     var effectiveActiveIndicatorImageURL: URL? {
         if isAppearanceOverridden(Keys.activeIndicatorImagePath),
-           let path = activeIndicatorImagePath, !path.isEmpty,
-           FileManager.default.fileExists(atPath: path) {
-            return URL(fileURLWithPath: path)
+           let url = ManagedUserAssetStore.managedCandidateURL(
+               forPath: activeIndicatorImagePath
+           ) {
+            return url
         }
 
         if let assetPath = ThemeManager.shared.activeManifest?.appearance.indicators?.image,
@@ -3175,7 +3288,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     var effectiveDividerImageURL: URL? {
         if isAppearanceOverridden(Keys.dividerImagePath),
-           let url = Self.existingFileURL(at: dividerImagePath) {
+           let url = ManagedUserAssetStore.managedCandidateURL(
+               forPath: dividerImagePath
+           ) {
             return url
         }
         if let assetPath = ThemeManager.shared.activeManifest?.appearance.indicators?.divider?.center,
@@ -3187,7 +3302,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     var effectiveLeftDividerImageURL: URL? {
         if isAppearanceOverridden(Keys.leftDividerImagePath),
-           let url = Self.existingFileURL(at: leftDividerImagePath) {
+           let url = ManagedUserAssetStore.managedCandidateURL(
+               forPath: leftDividerImagePath
+           ) {
             return url
         }
         if let assetPath = ThemeManager.shared.activeManifest?.appearance.indicators?.divider?.left,
@@ -3202,7 +3319,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
             return effectiveLeftDividerImageURL
         }
         if isAppearanceOverridden(Keys.rightDividerImagePath),
-           let url = Self.existingFileURL(at: rightDividerImagePath) {
+           let url = ManagedUserAssetStore.managedCandidateURL(
+               forPath: rightDividerImagePath
+           ) {
             return url
         }
         if let assetPath = ThemeManager.shared.activeManifest?.appearance.indicators?.divider?.right,
@@ -3290,12 +3409,6 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    private static func existingFileURL(at path: String?) -> URL? {
-        guard let path, !path.isEmpty else { return nil }
-        guard FileManager.default.fileExists(atPath: path) else { return nil }
-        return URL(fileURLWithPath: path)
-    }
-
     func appIconOverride(forBundleIdentifier bundleIdentifier: String) -> AppIconOverride? {
         return appIconOverrides.first { $0.bundleIdentifier == bundleIdentifier }
     }
@@ -3309,39 +3422,370 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         return ThemeManager.shared.activeAppIconURL(forBundleIdentifier: bundleIdentifier)
     }
 
-    func setAppIconOverride(bundleIdentifier: String, iconPath: String, paddingFraction: CGFloat? = nil) {
+    /// Pre-managed custom-image preferences that need an explicit recovery
+    /// import. Candidate discovery is deliberately lexical: merely opening
+    /// Settings never probes any legacy source path or protected directory.
+    var legacyUserAssetRecoveryCandidates: [LegacyUserAssetCandidate] {
+        LegacyUserAssetRecoveryPlanner.candidates(
+            from: legacyUserAssetReferences,
+            managedDirectory: ManagedUserAssetStore.directoryURL
+        )
+    }
+
+    /// Copies legacy custom images only after the user requests recovery.
+    /// Imports run away from MainActor. A result is committed only when its
+    /// owning preference still contains the captured source path, preventing
+    /// a concurrent picker/reset from being overwritten by a late result.
+    func recoverLegacyUserAssets() async -> LegacyUserAssetRecoverySummary {
+        let candidates = legacyUserAssetRecoveryCandidates
+        guard !candidates.isEmpty else {
+            return LegacyUserAssetRecoverySummary(
+                attemptedCount: 0,
+                recoveredCount: 0,
+                failedCount: 0,
+                staleCount: 0
+            )
+        }
+
+        DiagnosticsTrace.shared.record(
+            .preferences,
+            "legacyUserAssetRecoveryRequested",
+            fields: ["count": candidates.count]
+        )
+
+        let results = await LegacyUserAssetRecoveryWorker.importCandidates(
+            candidates
+        )
+        var recoveredCount = 0
+        var failedCount = 0
+        var staleCount = 0
+
+        for result in results {
+            guard let destinationPath = result.destinationPath else {
+                failedCount += 1
+                DiagnosticsTrace.shared.record(
+                    .preferences,
+                    "legacyUserAssetRecoveryItem",
+                    fields: [
+                        "kind": result.candidate.target.diagnosticKind,
+                        "outcome": "importFailed",
+                        "errorDomain": result.errorDomain ?? "unknown",
+                        "errorCode": result.errorCode ?? 0,
+                    ]
+                )
+                continue
+            }
+
+            if replaceLegacyUserAsset(
+                target: result.candidate.target,
+                expectedSourcePath: result.candidate.sourcePath,
+                destinationPath: destinationPath
+            ) {
+                recoveredCount += 1
+                DiagnosticsTrace.shared.record(
+                    .preferences,
+                    "legacyUserAssetRecoveryItem",
+                    fields: [
+                        "kind": result.candidate.target.diagnosticKind,
+                        "outcome": "recovered",
+                    ]
+                )
+            } else {
+                staleCount += 1
+                DiagnosticsTrace.shared.record(
+                    .preferences,
+                    "legacyUserAssetRecoveryItem",
+                    fields: [
+                        "kind": result.candidate.target.diagnosticKind,
+                        "outcome": "stalePreference",
+                    ]
+                )
+            }
+            scheduleManagedUserAssetCleanup(
+                for: result.candidate.slot,
+                resolvingPendingPath: destinationPath
+            )
+        }
+
+        let summary = LegacyUserAssetRecoverySummary(
+            attemptedCount: results.count,
+            recoveredCount: recoveredCount,
+            failedCount: failedCount,
+            staleCount: staleCount
+        )
+        DiagnosticsTrace.shared.record(
+            .preferences,
+            "legacyUserAssetRecoveryCompleted",
+            fields: [
+                "attemptedCount": summary.attemptedCount,
+                "recoveredCount": summary.recoveredCount,
+                "failedCount": summary.failedCount,
+                "staleCount": summary.staleCount,
+            ]
+        )
+        return summary
+    }
+
+    /// Imports an explicitly selected asset into Docky-owned storage. Callers
+    /// persist only the returned path; a nil result leaves the prior setting
+    /// untouched and is recorded for diagnostics.
+    func importUserAssetPath(
+        from sourceURL: URL,
+        slot: String
+    ) async -> String? {
+        let (generation, abandonedPath) =
+            advanceUserAssetImportGeneration(for: slot)
+        if let abandonedPath {
+            scheduleManagedUserAssetCleanup(
+                for: slot,
+                resolvingPendingPath: abandonedPath
+            )
+        }
+
+        let result = await ManagedUserAssetStore.importAssetOffMain(
+            from: sourceURL,
+            slot: slot
+        )
+        guard userAssetImportGenerationBySlot[slot] == generation else {
+            if let destinationPath = result.destinationPath {
+                scheduleManagedUserAssetCleanup(
+                    for: slot,
+                    resolvingPendingPath: destinationPath
+                )
+            }
+            DiagnosticsTrace.shared.record(
+                .preferences,
+                "userAssetImportDiscarded",
+                fields: [
+                    "kind": userAssetDiagnosticKind(for: slot),
+                    "reason": "superseded",
+                ]
+            )
+            return nil
+        }
+        guard let destinationPath = result.destinationPath else {
+            scheduleManagedUserAssetCleanup(for: slot)
+            DiagnosticsTrace.shared.record(
+                .preferences,
+                "userAssetImportFailed",
+                fields: [
+                    "kind": userAssetDiagnosticKind(for: slot),
+                    "errorDomain": result.errorDomain ?? "unknown",
+                    "errorCode": result.errorCode ?? 0,
+                ]
+            )
+            return nil
+        }
+        pendingUserAssetImportBySlot[slot] = (
+            path: destinationPath,
+            generation: generation
+        )
+        return destinationPath
+    }
+
+    /// Commits a picker result only while it is still the newest request for
+    /// its logical slot. The mutation and reference snapshot happen together
+    /// on MainActor; reclamation then runs off-main and preserves any other
+    /// preference (or still-pending picker) that references the same file.
+    @discardableResult
+    func commitImportedUserAssetPath(
+        _ path: String,
+        slot: String,
+        apply: (String) -> Void
+    ) -> Bool {
+        guard let pending = pendingUserAssetImportBySlot[slot],
+              pending.path == path,
+              userAssetImportGenerationBySlot[slot]
+                == pending.generation else {
+            scheduleManagedUserAssetCleanup(
+                for: slot,
+                resolvingPendingPath: path
+            )
+            return false
+        }
+        pendingUserAssetImportBySlot.removeValue(forKey: slot)
+        apply(path)
+        scheduleManagedUserAssetCleanup(
+            for: slot,
+            resolvingPendingPath: path
+        )
+        return true
+    }
+
+    /// Invalidates an in-flight/recent picker result even when the current
+    /// property is already nil, then applies the caller's clear/reset and
+    /// reclaims only files no longer referenced anywhere in preferences.
+    func clearUserAsset(
+        slot: String,
+        apply: () -> Void
+    ) {
+        clearUserAssets(slots: [slot], apply: apply)
+    }
+
+    private func clearUserAssets(
+        slots: Set<String>,
+        apply: () -> Void
+    ) {
+        var abandonedPathBySlot: [String: String] = [:]
+        for slot in slots {
+            let (_, abandonedPath) =
+                advanceUserAssetImportGeneration(for: slot)
+            if let abandonedPath {
+                abandonedPathBySlot[slot] = abandonedPath
+            }
+        }
+        apply()
+        for slot in slots {
+            scheduleManagedUserAssetCleanup(
+                for: slot,
+                resolvingPendingPath: abandonedPathBySlot[slot]
+            )
+        }
+    }
+
+    private func advanceUserAssetImportGeneration(
+        for slot: String
+    ) -> (generation: UInt64, abandonedPath: String?) {
+        let next = (userAssetImportGenerationBySlot[slot] ?? 0) &+ 1
+        userAssetImportGenerationBySlot[slot] = next
+        let abandonedPath =
+            pendingUserAssetImportBySlot.removeValue(forKey: slot)?.path
+        return (next, abandonedPath)
+    }
+
+    private var managedUserAssetReferencedPaths: Set<String> {
+        Set(legacyUserAssetReferences.compactMap { reference in
+            ManagedUserAssetStore.managedCandidateURL(
+                forPath: reference.sourcePath
+            )?.standardizedFileURL.path
+        })
+    }
+
+    private func scheduleManagedUserAssetCleanup(
+        for slot: String,
+        resolvingPendingPath: String? = nil
+    ) {
+        let preservingPaths = managedUserAssetReferencedPaths
+        let diagnosticKind = userAssetDiagnosticKind(for: slot)
+        userAssetCleanupRevision &+= 1
+        let cleanupRevision = userAssetCleanupRevision
+        ManagedUserAssetStore.announceCleanupPlan(
+            forSlot: slot,
+            revision: cleanupRevision,
+            preservingPaths: preservingPaths
+        )
+        Task {
+            let removedCount: Int
+            if let resolvingPendingPath {
+                removedCount =
+                    await ManagedUserAssetStore
+                        .resolvePendingImportOffMain(
+                            atPath: resolvingPendingPath,
+                            forSlot: slot,
+                            preservingPaths: preservingPaths,
+                            cleanupRevision: cleanupRevision
+                        )
+            } else {
+                removedCount =
+                    await ManagedUserAssetStore
+                        .pruneUnreferencedAssetsOffMain(
+                            forSlot: slot,
+                            preservingPaths: preservingPaths,
+                            cleanupRevision: cleanupRevision
+                        )
+            }
+            guard removedCount > 0 else { return }
+            DiagnosticsTrace.shared.record(
+                .preferences,
+                "userAssetVersionsPruned",
+                fields: [
+                    "kind": diagnosticKind,
+                    "removedCount": removedCount,
+                ]
+            )
+        }
+    }
+
+    private func userAssetDiagnosticKind(for slot: String) -> String {
+        switch slot {
+        case let value where value.hasPrefix("app-icon:"):
+            "appIcon"
+        case let value where value.hasPrefix("trash-icon:"):
+            "trashIcon"
+        case let value where value.hasPrefix("folder-icon:"):
+            "folderIcon"
+        case "special-icon:launchpad":
+            "launchpadIcon"
+        case "special-icon:start-menu":
+            "startMenuIcon"
+        case "launchpad:background":
+            "launchpadBackground"
+        case let value where value.hasPrefix("appearance:"):
+            "appearance"
+        default:
+            "unknown"
+        }
+    }
+
+    func setAppIconOverride(
+        bundleIdentifier: String,
+        iconPath: String,
+        paddingFraction: CGFloat? = nil
+    ) async {
         guard !bundleIdentifier.isEmpty, !iconPath.isEmpty else {
             return
         }
+        guard let managedPath = await importUserAssetPath(
+            from: URL(fileURLWithPath: iconPath),
+            slot: "app-icon:\(bundleIdentifier)"
+        ) else {
+            return
+        }
 
-        var overridesByBundleIdentifier = Dictionary(uniqueKeysWithValues: appIconOverrides.map {
-            ($0.bundleIdentifier, $0)
-        })
-        overridesByBundleIdentifier[bundleIdentifier] = AppIconOverride(
-            bundleIdentifier: bundleIdentifier,
-            iconPath: iconPath,
-            paddingFraction: paddingFraction
-        )
-        appIconOverrides = overridesByBundleIdentifier.values.sorted {
-            $0.bundleIdentifier.localizedCaseInsensitiveCompare($1.bundleIdentifier) == .orderedAscending
+        commitImportedUserAssetPath(
+            managedPath,
+            slot: "app-icon:\(bundleIdentifier)"
+        ) { committedPath in
+            var overridesByBundleIdentifier = Dictionary(
+                uniqueKeysWithValues: appIconOverrides.map {
+                    ($0.bundleIdentifier, $0)
+                }
+            )
+            overridesByBundleIdentifier[bundleIdentifier] = AppIconOverride(
+                bundleIdentifier: bundleIdentifier,
+                iconPath: committedPath,
+                paddingFraction: paddingFraction
+            )
+            appIconOverrides = overridesByBundleIdentifier.values.sorted {
+                $0.bundleIdentifier.localizedCaseInsensitiveCompare(
+                    $1.bundleIdentifier
+                ) == .orderedAscending
+            }
         }
     }
 
     /// Updates only the padding for an existing override. No-op when the
     /// app has no override yet, callers should set an icon first.
     func setAppIconPaddingFraction(bundleIdentifier: String, paddingFraction: CGFloat?) {
-        guard let existing = appIconOverrides.first(where: { $0.bundleIdentifier == bundleIdentifier }) else {
+        guard let index = appIconOverrides.firstIndex(where: {
+            $0.bundleIdentifier == bundleIdentifier
+        }) else {
             return
         }
-        setAppIconOverride(
-            bundleIdentifier: bundleIdentifier,
+        let existing = appIconOverrides[index]
+        appIconOverrides[index] = AppIconOverride(
+            bundleIdentifier: existing.bundleIdentifier,
             iconPath: existing.iconPath,
             paddingFraction: paddingFraction
         )
     }
 
     func removeAppIconOverride(bundleIdentifier: String) {
-        appIconOverrides.removeAll { $0.bundleIdentifier == bundleIdentifier }
+        clearUserAsset(slot: "app-icon:\(bundleIdentifier)") {
+            appIconOverrides.removeAll {
+                $0.bundleIdentifier == bundleIdentifier
+            }
+        }
     }
 
     /// Padding fraction (0...0.5) applied around an app's override icon.
@@ -3358,27 +3802,49 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         trashIconOverride(forState: state)?.effectiveIconURL
     }
 
-    func setTrashIconOverride(state: TrashIconState, iconPath: String, paddingFraction: CGFloat? = nil) {
+    func setTrashIconOverride(
+        state: TrashIconState,
+        iconPath: String,
+        paddingFraction: CGFloat? = nil
+    ) async {
         guard !iconPath.isEmpty else {
             return
         }
+        guard let managedPath = await importUserAssetPath(
+            from: URL(fileURLWithPath: iconPath),
+            slot: "trash-icon:\(state.rawValue)"
+        ) else {
+            return
+        }
 
-        var overridesByState = Dictionary(uniqueKeysWithValues: trashIconOverrides.map {
-            ($0.state, $0)
-        })
-        overridesByState[state] = TrashIconOverride(
-            state: state,
-            iconPath: iconPath,
-            paddingFraction: paddingFraction
-        )
-        trashIconOverrides = TrashIconState.allCases.compactMap { overridesByState[$0] }
+        commitImportedUserAssetPath(
+            managedPath,
+            slot: "trash-icon:\(state.rawValue)"
+        ) { committedPath in
+            var overridesByState = Dictionary(
+                uniqueKeysWithValues: trashIconOverrides.map {
+                    ($0.state, $0)
+                }
+            )
+            overridesByState[state] = TrashIconOverride(
+                state: state,
+                iconPath: committedPath,
+                paddingFraction: paddingFraction
+            )
+            trashIconOverrides = TrashIconState.allCases.compactMap {
+                overridesByState[$0]
+            }
+        }
     }
 
     func setTrashIconPaddingFraction(state: TrashIconState, paddingFraction: CGFloat?) {
-        guard let existing = trashIconOverrides.first(where: { $0.state == state }) else {
+        guard let index = trashIconOverrides.firstIndex(where: {
+            $0.state == state
+        }) else {
             return
         }
-        setTrashIconOverride(
+        let existing = trashIconOverrides[index]
+        trashIconOverrides[index] = TrashIconOverride(
             state: state,
             iconPath: existing.iconPath,
             paddingFraction: paddingFraction
@@ -3386,7 +3852,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     func removeTrashIconOverride(state: TrashIconState) {
-        trashIconOverrides.removeAll { $0.state == state }
+        clearUserAsset(slot: "trash-icon:\(state.rawValue)") {
+            trashIconOverrides.removeAll { $0.state == state }
+        }
     }
 
     func trashIconOverridePadding(forState state: TrashIconState) -> CGFloat {
@@ -3401,30 +3869,50 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         folderIconOverride(forPath: path)?.effectiveIconURL
     }
 
-    func setFolderIconOverride(folderPath: String, iconPath: String, paddingFraction: CGFloat? = nil) {
+    func setFolderIconOverride(
+        folderPath: String,
+        iconPath: String,
+        paddingFraction: CGFloat? = nil
+    ) async {
         guard !folderPath.isEmpty, !iconPath.isEmpty else {
             return
         }
+        guard let managedPath = await importUserAssetPath(
+            from: URL(fileURLWithPath: iconPath),
+            slot: "folder-icon:\(folderPath)"
+        ) else {
+            return
+        }
 
-        var overridesByPath = DataIntegrityReporter.makeDictionary(
-            folderIconOverrides.map { ($0.folderPath, $0) },
-            site: "DockyPreferences.folderIconOverrides"
-        )
-        overridesByPath[folderPath] = FolderIconOverride(
-            folderPath: folderPath,
-            iconPath: iconPath,
-            paddingFraction: paddingFraction
-        )
-        folderIconOverrides = overridesByPath.values.sorted {
-            $0.folderPath.localizedCaseInsensitiveCompare($1.folderPath) == .orderedAscending
+        commitImportedUserAssetPath(
+            managedPath,
+            slot: "folder-icon:\(folderPath)"
+        ) { committedPath in
+            var overridesByPath = DataIntegrityReporter.makeDictionary(
+                folderIconOverrides.map { ($0.folderPath, $0) },
+                site: "DockyPreferences.folderIconOverrides"
+            )
+            overridesByPath[folderPath] = FolderIconOverride(
+                folderPath: folderPath,
+                iconPath: committedPath,
+                paddingFraction: paddingFraction
+            )
+            folderIconOverrides = overridesByPath.values.sorted {
+                $0.folderPath.localizedCaseInsensitiveCompare(
+                    $1.folderPath
+                ) == .orderedAscending
+            }
         }
     }
 
     func setFolderIconPaddingFraction(folderPath: String, paddingFraction: CGFloat?) {
-        guard let existing = folderIconOverrides.first(where: { $0.folderPath == folderPath }) else {
+        guard let index = folderIconOverrides.firstIndex(where: {
+            $0.folderPath == folderPath
+        }) else {
             return
         }
-        setFolderIconOverride(
+        let existing = folderIconOverrides[index]
+        folderIconOverrides[index] = FolderIconOverride(
             folderPath: folderPath,
             iconPath: existing.iconPath,
             paddingFraction: paddingFraction
@@ -3436,17 +3924,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     func removeFolderIconOverride(folderPath: String) {
-        folderIconOverrides.removeAll { $0.folderPath == folderPath }
+        clearUserAsset(slot: "folder-icon:\(folderPath)") {
+            folderIconOverrides.removeAll { $0.folderPath == folderPath }
+        }
     }
 
     var effectiveLaunchpadIconOverrideURL: URL? {
-        guard let path = launchpadIconPath, !path.isEmpty else {
-            return nil
-        }
-        guard FileManager.default.fileExists(atPath: path) else {
-            return nil
-        }
-        return URL(fileURLWithPath: path)
+        ManagedUserAssetStore.managedCandidateURL(forPath: launchpadIconPath)
     }
 
     /// Padding fraction (0...0.5) for the Launchpad override icon. Returns
@@ -3457,18 +3941,206 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     var effectiveStartMenuIconOverrideURL: URL? {
-        guard let path = startMenuIconPath, !path.isEmpty else {
-            return nil
-        }
-        guard FileManager.default.fileExists(atPath: path) else {
-            return nil
-        }
-        return URL(fileURLWithPath: path)
+        ManagedUserAssetStore.managedCandidateURL(forPath: startMenuIconPath)
     }
 
     var effectiveStartMenuIconOverridePadding: CGFloat {
         guard effectiveStartMenuIconOverrideURL != nil else { return 0 }
         return startMenuIconPaddingFraction ?? 0
+    }
+
+    private var legacyUserAssetReferences: [LegacyUserAssetReference] {
+        var references = appIconOverrides.map { override in
+            LegacyUserAssetReference(
+                target: .appIcon(
+                    bundleIdentifier: override.bundleIdentifier
+                ),
+                sourcePath: override.iconPath,
+                slot: "app-icon:\(override.bundleIdentifier)"
+            )
+        }
+        references.append(contentsOf: trashIconOverrides.map { override in
+            LegacyUserAssetReference(
+                target: .trashIcon(state: override.state.rawValue),
+                sourcePath: override.iconPath,
+                slot: "trash-icon:\(override.state.rawValue)"
+            )
+        })
+        references.append(contentsOf: folderIconOverrides.map { override in
+            LegacyUserAssetReference(
+                target: .folderIcon(folderPath: override.folderPath),
+                sourcePath: override.iconPath,
+                slot: "folder-icon:\(override.folderPath)"
+            )
+        })
+
+        let optionalReferences: [
+            (LegacyUserAssetTarget, String?, String)
+        ] = [
+            (.launchpadIcon, launchpadIconPath, "special-icon:launchpad"),
+            (.startMenuIcon, startMenuIconPath, "special-icon:start-menu"),
+            (
+                .launchpadBackground,
+                launchpadBackgroundImagePath,
+                "launchpad:background"
+            ),
+            (
+                .activeIndicator,
+                activeIndicatorImagePath,
+                "appearance:active-indicator"
+            ),
+            (
+                .windowBackground,
+                windowBackgroundImagePath,
+                "appearance:window-background"
+            ),
+            (
+                .tileActiveBackground,
+                tileActiveBackgroundImagePath,
+                "appearance:tile-active-background"
+            ),
+            (
+                .tileHoverBackground,
+                tileHoverBackgroundImagePath,
+                "appearance:tile-hover-background"
+            ),
+            (.divider, dividerImagePath, "appearance:divider-global"),
+            (.leftDivider, leftDividerImagePath, "appearance:divider-left"),
+            (
+                .rightDivider,
+                rightDividerImagePath,
+                "appearance:divider-right"
+            ),
+        ]
+        references.append(contentsOf: optionalReferences.compactMap {
+            target, path, slot in
+            guard let path, !path.isEmpty else { return nil }
+            return LegacyUserAssetReference(
+                target: target,
+                sourcePath: path,
+                slot: slot
+            )
+        })
+        return references
+    }
+
+    private func replaceLegacyUserAsset(
+        target: LegacyUserAssetTarget,
+        expectedSourcePath: String,
+        destinationPath: String
+    ) -> Bool {
+        switch target {
+        case .appIcon(let bundleIdentifier):
+            guard let index = appIconOverrides.firstIndex(where: {
+                $0.bundleIdentifier == bundleIdentifier
+                    && LegacyUserAssetRecoveryPlanner.canReplace(
+                        currentPath: $0.iconPath,
+                        expectedSourcePath: expectedSourcePath
+                    )
+            }) else {
+                return false
+            }
+            let existing = appIconOverrides[index]
+            appIconOverrides[index] = AppIconOverride(
+                bundleIdentifier: existing.bundleIdentifier,
+                iconPath: destinationPath,
+                paddingFraction: existing.paddingFraction
+            )
+        case .trashIcon(let stateRawValue):
+            guard let state = TrashIconState(rawValue: stateRawValue),
+                  let index = trashIconOverrides.firstIndex(where: {
+                      $0.state == state
+                          && LegacyUserAssetRecoveryPlanner.canReplace(
+                              currentPath: $0.iconPath,
+                              expectedSourcePath: expectedSourcePath
+                          )
+                  }) else {
+                return false
+            }
+            let existing = trashIconOverrides[index]
+            trashIconOverrides[index] = TrashIconOverride(
+                state: existing.state,
+                iconPath: destinationPath,
+                paddingFraction: existing.paddingFraction
+            )
+        case .folderIcon(let folderPath):
+            guard let index = folderIconOverrides.firstIndex(where: {
+                $0.folderPath == folderPath
+                    && LegacyUserAssetRecoveryPlanner.canReplace(
+                        currentPath: $0.iconPath,
+                        expectedSourcePath: expectedSourcePath
+                    )
+            }) else {
+                return false
+            }
+            let existing = folderIconOverrides[index]
+            folderIconOverrides[index] = FolderIconOverride(
+                folderPath: existing.folderPath,
+                iconPath: destinationPath,
+                paddingFraction: existing.paddingFraction
+            )
+        case .launchpadIcon:
+            guard LegacyUserAssetRecoveryPlanner.canReplace(
+                currentPath: launchpadIconPath,
+                expectedSourcePath: expectedSourcePath
+            ) else { return false }
+            launchpadIconPath = destinationPath
+        case .startMenuIcon:
+            guard LegacyUserAssetRecoveryPlanner.canReplace(
+                currentPath: startMenuIconPath,
+                expectedSourcePath: expectedSourcePath
+            ) else { return false }
+            startMenuIconPath = destinationPath
+        case .launchpadBackground:
+            guard LegacyUserAssetRecoveryPlanner.canReplace(
+                currentPath: launchpadBackgroundImagePath,
+                expectedSourcePath: expectedSourcePath
+            ) else { return false }
+            launchpadBackgroundImagePath = destinationPath
+        case .activeIndicator:
+            guard LegacyUserAssetRecoveryPlanner.canReplace(
+                currentPath: activeIndicatorImagePath,
+                expectedSourcePath: expectedSourcePath
+            ) else { return false }
+            activeIndicatorImagePath = destinationPath
+        case .windowBackground:
+            guard LegacyUserAssetRecoveryPlanner.canReplace(
+                currentPath: windowBackgroundImagePath,
+                expectedSourcePath: expectedSourcePath
+            ) else { return false }
+            windowBackgroundImagePath = destinationPath
+        case .tileActiveBackground:
+            guard LegacyUserAssetRecoveryPlanner.canReplace(
+                currentPath: tileActiveBackgroundImagePath,
+                expectedSourcePath: expectedSourcePath
+            ) else { return false }
+            tileActiveBackgroundImagePath = destinationPath
+        case .tileHoverBackground:
+            guard LegacyUserAssetRecoveryPlanner.canReplace(
+                currentPath: tileHoverBackgroundImagePath,
+                expectedSourcePath: expectedSourcePath
+            ) else { return false }
+            tileHoverBackgroundImagePath = destinationPath
+        case .divider:
+            guard LegacyUserAssetRecoveryPlanner.canReplace(
+                currentPath: dividerImagePath,
+                expectedSourcePath: expectedSourcePath
+            ) else { return false }
+            dividerImagePath = destinationPath
+        case .leftDivider:
+            guard LegacyUserAssetRecoveryPlanner.canReplace(
+                currentPath: leftDividerImagePath,
+                expectedSourcePath: expectedSourcePath
+            ) else { return false }
+            leftDividerImagePath = destinationPath
+        case .rightDivider:
+            guard LegacyUserAssetRecoveryPlanner.canReplace(
+                currentPath: rightDividerImagePath,
+                expectedSourcePath: expectedSourcePath
+            ) else { return false }
+            rightDividerImagePath = destinationPath
+        }
+        return true
     }
 
     func isAppHiddenInDocky(bundleIdentifier: String) -> Bool {
@@ -3559,11 +4231,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let maximizedWindowBehavior = "docky.maximizedWindowBehavior"
         static let hidesSystemDock = "docky.hidesSystemDock"
         static let overflowBehavior = "docky.overflowBehavior"
-        static let windowAxisSizing = "docky.windowAxisSizing"
+        static let windowAxisSizing =
+            DockyThemeOverrideKey.windowAxisSizing.rawValue
         static let enablesWidgetHoverPreview = "docky.enablesWidgetHoverPreview"
         static let widgetHoverPreviewSpans = "docky.widgetHoverPreviewSpans"
         static let widgetHoverPreviewDelay = "docky.widgetHoverGrowDelay"
-        static let showsActivePinnedSeparator = "docky.showsActivePinnedSeparator"
+        static let showsActivePinnedSeparator =
+            DockyThemeOverrideKey.showsActivePinnedSeparator.rawValue
         static let showsRunningApps = "docky.showsRunningApps"
         static let showsMinimizedWindows = "docky.showsMinimizedWindows"
         static let hidesDuringFullscreen = "docky.hidesDuringFullscreen"
@@ -3745,7 +4419,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let hasSeenDockEditorHint = false
     }
 
-    private init() {
+    fileprivate init() {
         self.defaults = .standard
         let storedVerticalPadding = defaults.object(forKey: Keys.tileVerticalPadding) as? Double
         let storedTileSpacing = defaults.object(forKey: Keys.tileSpacing) as? Double
@@ -3870,8 +4544,42 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         let storedAppWidgetDisplays = defaults.data(forKey: Keys.appWidgetDisplays)
         let storedTrailingItems = defaults.data(forKey: Keys.trailingItems)
         let storedHasSeenDockEditorHint = defaults.object(forKey: Keys.hasSeenDockEditorHint) as? Bool
+        var profileSnapshotDecodeFailures: [String] = []
+        let decodedPinnedItems: [PinnedTileItem]? = Self.decodeProfileSnapshot(
+            from: storedPinnedItems,
+            storedObjectExists: defaults.object(forKey: Keys.pinnedItems) != nil,
+            key: Keys.pinnedItems,
+            failures: &profileSnapshotDecodeFailures
+        )
+        let decodedWidgetPlacements: [WidgetPlacement]? = Self.decodeProfileSnapshot(
+            from: storedWidgetPlacements,
+            storedObjectExists: defaults.object(forKey: Keys.widgetPlacements) != nil,
+            key: Keys.widgetPlacements,
+            failures: &profileSnapshotDecodeFailures
+        )
+        let decodedAppWidgetDisplays: [AppWidgetDisplay]? = Self.decodeProfileSnapshot(
+            from: storedAppWidgetDisplays,
+            storedObjectExists: defaults.object(forKey: Keys.appWidgetDisplays) != nil,
+            key: Keys.appWidgetDisplays,
+            failures: &profileSnapshotDecodeFailures
+        )
+        let decodedTrailingItems: [TrailingTileItem]? = Self.decodeProfileSnapshot(
+            from: storedTrailingItems,
+            storedObjectExists: defaults.object(forKey: Keys.trailingItems) != nil,
+            key: Keys.trailingItems,
+            failures: &profileSnapshotDecodeFailures
+        )
+        if defaults.object(forKey: Keys.hiddenAppBundleIdentifiers) != nil,
+           storedHiddenAppBundleIdentifiers == nil {
+            profileSnapshotDecodeFailures.append(Keys.hiddenAppBundleIdentifiers)
+        }
+        if storedPinnedItems == nil,
+           defaults.object(forKey: Keys.pinnedAppBundleIdentifiers) != nil,
+           storedPinnedAppBundleIdentifiers == nil {
+            profileSnapshotDecodeFailures.append(Keys.pinnedAppBundleIdentifiers)
+        }
         let initialPinnedAppBundleIdentifiers = storedPinnedAppBundleIdentifiers ?? DefaultValues.pinnedAppBundleIdentifiers
-        let initialPinnedItems = Self.decodePinnedItems(from: storedPinnedItems)
+        let initialPinnedItems = decodedPinnedItems
             ?? initialPinnedAppBundleIdentifiers.map(PinnedTileItem.app(bundleIdentifier:))
         self.tileVerticalPadding = storedVerticalPadding.map { CGFloat($0) } ?? DefaultValues.tileVerticalPadding
         self.tileSpacing = storedTileSpacing.map { CGFloat($0) } ?? DefaultValues.tileSpacing
@@ -4021,36 +4729,57 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         self.switcherZoomKeyCode = storedSwitcherZoomKeyCode.map(UInt16.init) ?? DefaultValues.switcherZoomKeyCode
         self.pinnedAppBundleIdentifiers = initialPinnedAppBundleIdentifiers
         self.pinnedItems = initialPinnedItems
-        self.widgetPlacements = Self.decodeWidgetPlacements(from: storedWidgetPlacements) ?? DefaultValues.widgetPlacements
-        self.appWidgetDisplays = Self.decodeAppWidgetDisplays(from: storedAppWidgetDisplays) ?? DefaultValues.appWidgetDisplays
-        self.trailingItems = Self.decodeTrailingItems(from: storedTrailingItems) ?? DefaultValues.trailingItems
+        self.widgetPlacements = decodedWidgetPlacements ?? DefaultValues.widgetPlacements
+        self.appWidgetDisplays = decodedAppWidgetDisplays ?? DefaultValues.appWidgetDisplays
+        self.trailingItems = decodedTrailingItems ?? DefaultValues.trailingItems
         self.hasSeenDockEditorHint = storedHasSeenDockEditorHint ?? DefaultValues.hasSeenDockEditorHint
+        self.legacyProfileSnapshotDecodeFailures = profileSnapshotDecodeFailures
         self.photoFrameBookmarks = (defaults.array(forKey: Keys.photoFrameBookmarks) as? [Data]) ?? []
 
         // Load the user-override set, then run the one-shot migration
         // that infers overrides from existing UserDefaults presence.
         // After this runs once, the set is the authoritative source of
-        // truth, appearance setters maintain it from then on.
+        // truth; theme-aware setters maintain it from then on.
         if let storedOverrideKeys = defaults.stringArray(forKey: Keys.userOverriddenAppearanceKeys) {
+            // Preserve unknown/future keys as well as newly-recognized keys.
+            // Older builds may otherwise erase override intent merely by
+            // loading and re-persisting this compatibility set.
             self.userOverriddenAppearanceKeys = Set(storedOverrideKeys)
-                .intersection(Self.appearanceKeys)
         }
 
         let migrationVersion = defaults.integer(forKey: Keys.appearanceOverrideMigrationVersion)
         if migrationVersion < 1 {
             // First launch with the override layer: treat any
-            // appearance key that exists in UserDefaults as a user
-            // override. Better to over-respect existing customizations
-            // than to let a theme silently replace them.
+            // safely-inferable key that exists in UserDefaults as a user
+            // override. DockSettings-owned values are excluded because raw
+            // presence may only mean they were imported from the system Dock.
             var seeded = self.userOverriddenAppearanceKeys
-            for key in Self.appearanceKeys {
+            for key in DockyPreferenceResetScopeModel
+                .presenceInferredThemeOverrideKeys
+            {
                 if defaults.object(forKey: key) != nil {
                     seeded.insert(key)
                 }
             }
             self.userOverriddenAppearanceKeys = seeded
             persistUserOverriddenAppearanceKeys()
-            defaults.set(1, forKey: Keys.appearanceOverrideMigrationVersion)
+            defaults.set(2, forKey: Keys.appearanceOverrideMigrationVersion)
+        } else if migrationVersion < 2 {
+            // Version 1 accidentally omitted behavior.windowAxisSizing from
+            // its recognized-key catalog. Seed only that newly-recognized,
+            // safely-inferable key; re-seeding every key would resurrect
+            // overrides a user had explicitly cleared. Newly-recognized
+            // DockSettings keys survive via the unfiltered stored set above,
+            // but are not inferred from their automatically imported values.
+            var seeded = self.userOverriddenAppearanceKeys
+            for key in DockyPreferenceResetScopeModel.recognitionMigrationV2Keys {
+                if defaults.object(forKey: key) != nil {
+                    seeded.insert(key)
+                }
+            }
+            self.userOverriddenAppearanceKeys = seeded
+            persistUserOverriddenAppearanceKeys()
+            defaults.set(2, forKey: Keys.appearanceOverrideMigrationVersion)
         }
     }
 
@@ -4081,8 +4810,8 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     /// Resets only the preferences exposed in Settings → Appearance
     /// (General, Indicators, Tile Layout, Window Shape, Window
-    /// Background). App-icon overrides, behavior, widgets, launchpad,
-    /// window-management, and system-dock settings are untouched ,
+    /// Background, Appearance Widgets). App-icon overrides, behavior,
+    /// launchpad, window-management, and system-dock settings are untouched;
     /// callers that want a full wipe should call `resetToDefaults()`
     /// instead.
     func resetAppearanceToDefaults() {
@@ -4091,13 +4820,22 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
         // Indicators
         activeIndicatorShape = DefaultValues.activeIndicatorShape
-        activeIndicatorImagePath = DefaultValues.activeIndicatorImagePath
+        clearUserAsset(slot: "appearance:active-indicator") {
+            activeIndicatorImagePath =
+                DefaultValues.activeIndicatorImagePath
+        }
         activeIndicatorColor = DefaultValues.activeIndicatorColor
         activeIndicatorOffset = DefaultValues.activeIndicatorOffset
         activeIndicatorScale = DefaultValues.activeIndicatorScale
-        dividerImagePath = DefaultValues.dividerImagePath
-        leftDividerImagePath = DefaultValues.leftDividerImagePath
-        rightDividerImagePath = DefaultValues.rightDividerImagePath
+        clearUserAsset(slot: "appearance:divider-global") {
+            dividerImagePath = DefaultValues.dividerImagePath
+        }
+        clearUserAsset(slot: "appearance:divider-left") {
+            leftDividerImagePath = DefaultValues.leftDividerImagePath
+        }
+        clearUserAsset(slot: "appearance:divider-right") {
+            rightDividerImagePath = DefaultValues.rightDividerImagePath
+        }
         mirrorsLeftDividerOnRight = DefaultValues.mirrorsLeftDividerOnRight
         dividerPaddingFraction = DefaultValues.dividerPaddingFraction
         dividerOffset = DefaultValues.dividerOffset
@@ -4116,13 +4854,17 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         tileHoverOpacity = nil
         tileHoverScale = nil
         tileHoverBackgroundColor = nil
-        tileHoverBackgroundImagePath = nil
+        clearUserAsset(slot: "appearance:tile-hover-background") {
+            tileHoverBackgroundImagePath = nil
+        }
         tileHoverBackgroundOpacity = nil
         tileHoverBackgroundCornerRadius = nil
 
         // Tile Active Background
         tileActiveBackgroundColor = nil
-        tileActiveBackgroundImagePath = nil
+        clearUserAsset(slot: "appearance:tile-active-background") {
+            tileActiveBackgroundImagePath = nil
+        }
         tileActiveBackgroundOpacity = nil
         tileActiveBackgroundCornerRadius = nil
 
@@ -4156,19 +4898,18 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         windowBorderWidth = DefaultValues.windowBorderWidth
 
         // Window Background
-        windowBackgroundImagePath = DefaultValues.windowBackgroundImagePath
+        clearUserAsset(slot: "appearance:window-background") {
+            windowBackgroundImagePath =
+                DefaultValues.windowBackgroundImagePath
+        }
         windowBackgroundImageMode = DefaultValues.windowBackgroundImageMode
         windowTintColor = DefaultValues.windowTintColor
         windowTintOpacity = DefaultValues.windowTintOpacity
 
-        // Clear all override flags so the active theme (if any) takes
-        // over for these fields. The setters above re-mark whichever
-        // keys ended up with a non-default value, but for non-Optional
-        // fields setting back to the exact default doesn't trigger
-        // `didSet` (the guard short-circuits), so any pre-existing
-        // override flag would survive. Clearing them all here is the
-        // simplest way to honor "reset" semantically.
-        clearAllAppearanceOverrides()
+        // Same-value setters do not re-persist or alter override flags.
+        // Explicitly clear only Appearance-owned flags so behavior and
+        // DockSettings-owned overrides keep their current meaning.
+        clearThemeOverrides(afterReset: .appearance)
     }
 
     /// Resets every preference surfaced in the Behavior settings panes
@@ -4213,8 +4954,6 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         enablesWidgetHoverPreview = DefaultValues.enablesWidgetHoverPreview
         widgetHoverPreviewSpans = DefaultValues.widgetHoverPreviewSpans
         widgetHoverPreviewDelay = DefaultValues.widgetHoverPreviewDelay
-        windowPreviewHoverDelay = DefaultValues.windowPreviewHoverDelay
-        windowPreviewLayout = DefaultValues.windowPreviewLayout
 
         // Launch
         opensAtLogin = DefaultValues.opensAtLogin
@@ -4222,85 +4961,78 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         // System dock
         hidesSystemDock = DefaultValues.hidesSystemDock
 
-        // Same rationale as `resetAppearanceToDefaults`: setters guard
-        // against same-value writes, so any pre-existing override flag
-        // would survive without an explicit wipe. The behavior keys
-        // currently in `appearanceKeys` (windowAxisSizing, tileSize,
-        // largeSize, magnification) get their override status cleared
-        // alongside the rest, themes can drive these again.
-        clearAllAppearanceOverrides()
+        // Clear only theme overrides for behavior values reset above.
+        // Appearance and DockSettings-owned overrides remain untouched.
+        clearThemeOverrides(afterReset: .behavior)
     }
 
+    /// Resets every global setting owned by DockyPreferences. Active-profile
+    /// content (pinned/trailing items, widgets, hidden apps), user content
+    /// such as Photo Frame bookmarks, DockSettings-imported values, and
+    /// migration/onboarding markers are intentionally preserved.
     func resetToDefaults() {
-        tileVerticalPadding = DefaultValues.tileVerticalPadding
-        tileSpacing = DefaultValues.tileSpacing
-        tileClipShape = DefaultValues.tileClipShape
-        windowCornerRadius = DefaultValues.windowCornerRadius
-        windowClipShape = DefaultValues.windowClipShape
-        windowTintColor = DefaultValues.windowTintColor
-        windowTintOpacity = DefaultValues.windowTintOpacity
-        disablesGlassLook = DefaultValues.disablesGlassLook
-        windowBackgroundImagePath = DefaultValues.windowBackgroundImagePath
-        windowBackgroundImageMode = DefaultValues.windowBackgroundImageMode
-        windowPosition = DefaultValues.windowPosition
-        windowDisplayTarget = DefaultValues.windowDisplayTarget
-        windowSpaceBehavior = DefaultValues.windowSpaceBehavior
-        autohidesWindow = DefaultValues.autohidesWindow
-        showsAppBadges = DefaultValues.showsAppBadges
-        folderBadgeMode = DefaultValues.folderBadgeMode
-        folderBadgePreviewStyle = DefaultValues.folderBadgePreviewStyle
-        opensAtLogin = DefaultValues.opensAtLogin
-        autohideWindowDelay = DefaultValues.autohideWindowDelay
-        autohideAnimationDuration = DefaultValues.autohideAnimationDuration
-        fullscreenRevealDelay = DefaultValues.fullscreenRevealDelay
-        windowPreviewHoverDelay = DefaultValues.windowPreviewHoverDelay
-        windowPreviewLayout = DefaultValues.windowPreviewLayout
-        maximizedWindowBehavior = DefaultValues.maximizedWindowBehavior
-        hidesSystemDock = DefaultValues.hidesSystemDock
-        overflowBehavior = DefaultValues.overflowBehavior
-        windowAxisSizing = DefaultValues.windowAxisSizing
-        enablesWidgetHoverPreview = DefaultValues.enablesWidgetHoverPreview
-        widgetHoverPreviewSpans = DefaultValues.widgetHoverPreviewSpans
-        widgetHoverPreviewDelay = DefaultValues.widgetHoverPreviewDelay
-        showsActivePinnedSeparator = DefaultValues.showsActivePinnedSeparator
-        showsRunningApps = DefaultValues.showsRunningApps
-        showsMinimizedWindows = DefaultValues.showsMinimizedWindows
-        hidesDuringFullscreen = DefaultValues.hidesDuringFullscreen
-        enablesShelveMode = DefaultValues.enablesShelveMode
-        shelveHidesFinder = DefaultValues.shelveHidesFinder
-        shelveHidesTrash = DefaultValues.shelveHidesTrash
-        hidesRecentApps = DefaultValues.hidesRecentApps
-        appTileFrontmostClickBehavior = DefaultValues.appTileFrontmostClickBehavior
-        activeIndicatorShape = DefaultValues.activeIndicatorShape
-        activeIndicatorImagePath = DefaultValues.activeIndicatorImagePath
-        activeIndicatorColor = DefaultValues.activeIndicatorColor
-        dividerImagePath = DefaultValues.dividerImagePath
-        leftDividerImagePath = DefaultValues.leftDividerImagePath
-        rightDividerImagePath = DefaultValues.rightDividerImagePath
-        mirrorsLeftDividerOnRight = DefaultValues.mirrorsLeftDividerOnRight
-        activeIndicatorOffset = DefaultValues.activeIndicatorOffset
-        activeIndicatorScale = DefaultValues.activeIndicatorScale
-        dividerPaddingFraction = DefaultValues.dividerPaddingFraction
-        dividerImageScale = DefaultValues.dividerImageScale
-        dividerOffset = DefaultValues.dividerOffset
-        dividerOpacity = DefaultValues.dividerOpacity
-        appIconOverrides = DefaultValues.appIconOverrides
-        trashIconOverrides = DefaultValues.trashIconOverrides
-        folderIconOverrides = DefaultValues.folderIconOverrides
-        launchpadIconPath = DefaultValues.launchpadIconPath
-        launchpadIconPaddingFraction = DefaultValues.launchpadIconPaddingFraction
-        startMenuIconPath = DefaultValues.startMenuIconPath
-        startMenuIconPaddingFraction = DefaultValues.startMenuIconPaddingFraction
-        hiddenAppBundleIdentifiers = DefaultValues.hiddenAppBundleIdentifiers
-        showsGroupedOpenedAppsInDock = DefaultValues.showsGroupedOpenedAppsInDock
-        showsGroupedOpenedAppsBackdrop = DefaultValues.showsGroupedOpenedAppsBackdrop
+        resetAppearanceToDefaults()
+        resetBehaviorToDefaults()
+
+        // Profile switcher visibility is managed on the Profiles surface,
+        // not by the Behavior reset.
+        hidesProfileStrip = DefaultValues.hidesProfileStrip
+
+        // User-supplied global icon replacements. Include in-flight slots
+        // whose current preference is still empty so a full reset always
+        // invalidates a picker result that has not returned yet.
+        let currentIconSlots =
+            Set(appIconOverrides.map {
+                "app-icon:\($0.bundleIdentifier)"
+            })
+            .union(trashIconOverrides.map {
+                "trash-icon:\($0.state.rawValue)"
+            })
+            .union(folderIconOverrides.map {
+                "folder-icon:\($0.folderPath)"
+            })
+            .union(userAssetImportGenerationBySlot.keys.filter {
+                $0.hasPrefix("app-icon:")
+                    || $0.hasPrefix("trash-icon:")
+                    || $0.hasPrefix("folder-icon:")
+            })
+            .union([
+                "special-icon:launchpad",
+                "special-icon:start-menu",
+            ])
+        clearUserAssets(slots: currentIconSlots) {
+            appIconOverrides = DefaultValues.appIconOverrides
+            trashIconOverrides = DefaultValues.trashIconOverrides
+            folderIconOverrides = DefaultValues.folderIconOverrides
+            launchpadIconPath = DefaultValues.launchpadIconPath
+            launchpadIconPaddingFraction =
+                DefaultValues.launchpadIconPaddingFraction
+            startMenuIconPath = DefaultValues.startMenuIconPath
+            startMenuIconPaddingFraction =
+                DefaultValues.startMenuIconPaddingFraction
+        }
+
+        // Launchpad and Start Menu.
         enablesLaunchpadOverlay = DefaultValues.enablesLaunchpadOverlay
         enablesStartMenuOverlay = DefaultValues.enablesStartMenuOverlay
         opensStartMenuFromFinderTile = DefaultValues.opensStartMenuFromFinderTile
         launchpadOverlayTransparency = DefaultValues.launchpadOverlayTransparency
         launchpadGridColumnCount = DefaultValues.launchpadGridColumnCount
         launchpadGridRowCount = DefaultValues.launchpadGridRowCount
+        launchpadBaseIconSize = DefaultValues.launchpadBaseIconSize
+        launchpadColumnSpacing = DefaultValues.launchpadColumnSpacing
+        clearUserAsset(slot: "launchpad:background") {
+            launchpadBackgroundImagePath =
+                DefaultValues.launchpadBackgroundImagePath
+        }
+        launchpadBackgroundBlursImage = DefaultValues.launchpadBackgroundBlursImage
+        launchpadLayoutAxis = DefaultValues.launchpadLayoutAxis
+        launchpadSortMode = DefaultValues.launchpadSortMode
         launchpadShortcut = DefaultValues.launchpadShortcut
+
+        // Window Manager.
+        windowPreviewHoverDelay = DefaultValues.windowPreviewHoverDelay
+        windowPreviewLayout = DefaultValues.windowPreviewLayout
         enablesWindowSwitcher = DefaultValues.enablesWindowSwitcher
         includesMinimizedWindows = DefaultValues.includesMinimizedWindows
         windowSwitcherShortcut = DefaultValues.windowSwitcherShortcut
@@ -4310,8 +5042,6 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         switcherMinimizeKeyCode = DefaultValues.switcherMinimizeKeyCode
         switcherCloseKeyCode = DefaultValues.switcherCloseKeyCode
         switcherZoomKeyCode = DefaultValues.switcherZoomKeyCode
-        appWidgetDisplays = DefaultValues.appWidgetDisplays
-        hasSeenDockEditorHint = DefaultValues.hasSeenDockEditorHint
     }
 
     private func syncSystemDockPositionIfNeeded() {
@@ -4342,42 +5072,6 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         isSyncingOpenAtLoginPreference = true
         opensAtLogin = actualValue
         isSyncingOpenAtLoginPreference = false
-    }
-
-    private func persistPinnedItems(_ items: [PinnedTileItem]) {
-        guard let data = try? encoder.encode(items) else {
-            defaults.removeObject(forKey: Keys.pinnedItems)
-            return
-        }
-
-        defaults.set(data, forKey: Keys.pinnedItems)
-    }
-
-    private func persistWidgetPlacements(_ placements: [WidgetPlacement]) {
-        guard let data = try? encoder.encode(placements) else {
-            defaults.removeObject(forKey: Keys.widgetPlacements)
-            return
-        }
-
-        defaults.set(data, forKey: Keys.widgetPlacements)
-    }
-
-    private func persistAppWidgetDisplays(_ displays: [AppWidgetDisplay]) {
-        guard let data = try? encoder.encode(displays) else {
-            defaults.removeObject(forKey: Keys.appWidgetDisplays)
-            return
-        }
-
-        defaults.set(data, forKey: Keys.appWidgetDisplays)
-    }
-
-    private func persistTrailingItems(_ items: [TrailingTileItem]) {
-        guard let data = try? encoder.encode(items) else {
-            defaults.removeObject(forKey: Keys.trailingItems)
-            return
-        }
-
-        defaults.set(data, forKey: Keys.trailingItems)
     }
 
     private func persistWindowTintColor(_ color: DockColor?) {
@@ -4477,22 +5171,6 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         return try? JSONDecoder().decode(DockColor.self, from: data)
     }
 
-    private static func decodeWidgetPlacements(from data: Data?) -> [WidgetPlacement]? {
-        guard let data else {
-            return nil
-        }
-
-        return try? JSONDecoder().decode([WidgetPlacement].self, from: data)
-    }
-
-    private static func decodeAppWidgetDisplays(from data: Data?) -> [AppWidgetDisplay]? {
-        guard let data else {
-            return nil
-        }
-
-        return try? JSONDecoder().decode([AppWidgetDisplay].self, from: data)
-    }
-
     private static func decodeAppIconOverrides(from data: Data?) -> [AppIconOverride]? {
         guard let data else {
             return nil
@@ -4525,20 +5203,25 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         return try? JSONDecoder().decode(KeyboardShortcut.self, from: data)
     }
 
-    private static func decodePinnedItems(from data: Data?) -> [PinnedTileItem]? {
+    private static func decodeProfileSnapshot<Value: Decodable>(
+        from data: Data?,
+        storedObjectExists: Bool,
+        key: String,
+        failures: inout [String]
+    ) -> Value? {
         guard let data else {
+            if storedObjectExists {
+                failures.append(key)
+            }
             return nil
         }
 
-        return try? JSONDecoder().decode([PinnedTileItem].self, from: data)
-    }
-
-    private static func decodeTrailingItems(from data: Data?) -> [TrailingTileItem]? {
-        guard let data else {
+        do {
+            return try JSONDecoder().decode(Value.self, from: data)
+        } catch {
+            failures.append(key)
             return nil
         }
-
-        return try? JSONDecoder().decode([TrailingTileItem].self, from: data)
     }
 
     private static func normalizedBundleIdentifiers(_ bundleIdentifiers: [String]) -> [String] {
@@ -4546,4 +5229,20 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
             $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
         }
     }
+}
+
+/// Constructs both sides of the profile/preferences bridge as one bootstrap
+/// transaction. Neither singleton is published until migration, validation,
+/// recovery, and active-profile reconciliation have completed.
+enum ProfileStateBootstrap {
+    static let shared: (
+        preferences: DockyPreferences,
+        profileService: ProfileService
+    ) = {
+        let preferences = DockyPreferences()
+        let profileService = ProfileService(preferences: preferences)
+        preferences.attachProfileService(profileService)
+        profileService.completeBootstrap()
+        return (preferences, profileService)
+    }()
 }

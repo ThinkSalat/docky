@@ -61,12 +61,8 @@ struct WidgetSettingsView: View {
                 tileID: tileID,
                 ownerBundleIdentifier: widget.ownerBundleIdentifier
             )
-        case .external(let identifier):
-            ExternalWidgetSettingsForm(
-                tileID: tileID,
-                schema: ExternalWidgetRegistry.shared.metadata(for: identifier)?.settingsSchema ?? []
-            )
-        case .calendarDate, .reminders, .batteries, .systemStatus, .search, .photoFrame:
+        case .calendarDate, .reminders, .batteries, .systemStatus, .search,
+                .photoFrame, .external:
             EmptyView()
         }
     }

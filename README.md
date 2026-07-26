@@ -67,8 +67,8 @@ layout, and an optional global shortcut.
 
 Built-in widgets (Calendar, Reminders, Batteries, System, Weather, Now Playing,
 and more) live right in the dock. Stack several into a single tile with **Smart
-Stacks** and cycle through them in place. Add community `.dockywidget` bundles
-through the widget store.
+Stacks** and cycle through them in place. Legacy community `.dockywidget`
+bundles are currently preserved but disabled pending a safe isolated runtime.
 
 <div align="center"><img src="docs/images/feature-widgets.jpg" alt="Widgets and Smart Stacks" width="820"></div>
 
@@ -103,8 +103,9 @@ Updates are delivered in-app via Sparkle. No tap trust step is needed for a norm
 install. If you run Homebrew with `HOMEBREW_REQUIRE_TAP_TRUST=1`, trust the cask
 first with `brew trust --cask josejuanqm/tap/docky`.
 
-Docky needs **Accessibility** and **Screen Recording** permissions to manage
-windows and render previews. It prompts for these on first launch.
+Docky can use **Accessibility** to manage windows and **Screen Recording** to
+render previews. The dock launches without either capability and requests
+access only when you explicitly use or enable the corresponding feature.
 
 > [!NOTE]
 > Docky uses private SkyLight / CoreGraphics Services and Accessibility SPI (see
@@ -130,8 +131,8 @@ automatically on first build.
 
 ## Documentation
 
-- [External widget bundles](docs/external-widgets.md): the `.dockywidget` bundle
-  contract and how to build community widgets.
+- [External widget security status](docs/external-widgets.md): why legacy
+  `.dockywidget` bundles are currently inert.
 
 ## Supporting Docky
 

@@ -2,25 +2,20 @@
 //  ThemesSettingsView.swift
 //  Docky
 //
-//  Settings pane that lists installed `.dockytheme` bundles and lets
-//  the user activate, deactivate, and delete them. Installed themes
-//  persist on disk under `~/Library/Application Support/Docky/Themes/`
-//  regardless of which is active — WordPress-style install/activate.
-//
-//  Bundle import via zip is handled in a separate commit; for now the
-//  pane includes a "Reveal Themes Folder" affordance so users can drop
-//  unzipped bundles in directly while iterating.
+//  Read-only catalog of installed `.dockytheme` bundles. Validated themes can
+//  be activated, deactivated, revealed, and refreshed. Runtime import, export,
+//  and deletion remain visibly unavailable while theme storage is secured.
 //
 
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ThemesSettingsView: View {
     @Bindable private var manager = ThemeManager.shared
     @Bindable private var preferences = DockyPreferences.shared
-    @State private var themeIDPendingDeletion: String?
-    @State private var importErrorMessage: String?
+    @State private var errorPresentation: ThemeSettingsError?
+    @State private var operation: ThemeSettingsOperation?
+    @State private var actionTask: Task<Void, Never>?
 
     var body: some View {
         Form {
@@ -35,9 +30,9 @@ struct ThemesSettingsView: View {
                 if !preferences.userOverriddenAppearanceKeys.isEmpty {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("You have \(preferences.userOverriddenAppearanceKeys.count) appearance override(s).")
+                            Text("You have \(preferences.userOverriddenAppearanceKeys.count) theme override(s).")
                                 .font(.callout)
-                            Text("These take precedence over the active theme. Clear them to let the theme show through.")
+                            Text("These appearance and behavior choices take precedence over the active theme. Clear them to let the theme show through.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -45,15 +40,26 @@ struct ThemesSettingsView: View {
                         Button("Clear Overrides") {
                             preferences.clearAllAppearanceOverrides()
                         }
+                        .disabled(operation != nil)
                     }
                 }
+            }
+
+            Section {
+                Label {
+                    Text(ThemeRuntimeMutationPolicy.unavailableExplanation)
+                        .font(.callout)
+                } icon: {
+                    Image(systemName: "lock.shield")
+                }
+                .foregroundStyle(.secondary)
             }
 
             Section("Installed Themes") {
                 let installed = manager.installedThemes.values
                     .sorted { $0.manifest.name.localizedCaseInsensitiveCompare($1.manifest.name) == .orderedAscending }
 
-                if installed.isEmpty {
+                if installed.isEmpty, operation == nil {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("No themes installed yet.")
                             .font(.callout)
@@ -72,18 +78,6 @@ struct ThemesSettingsView: View {
                 Grid(horizontalSpacing: 12, verticalSpacing: 12) {
                     GridRow {
                         themesActionButton(
-                            "Import Theme…",
-                            systemImage: "square.and.arrow.down",
-                            action: importTheme
-                        )
-                        themesActionButton(
-                            "Export to Theme…",
-                            systemImage: "square.and.arrow.up",
-                            action: exportTheme
-                        )
-                    }
-                    GridRow {
-                        themesActionButton(
                             "Reveal Themes Folder",
                             systemImage: "folder",
                             action: revealThemesFolder
@@ -91,36 +85,42 @@ struct ThemesSettingsView: View {
                         themesActionButton(
                             "Refresh",
                             systemImage: "arrow.clockwise",
-                            action: manager.refreshInstalled
+                            action: refreshThemes
                         )
                     }
+                }
+                .disabled(operation != nil)
+
+                if let operation {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(operation.progressLabel)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
                 }
             }
         }
         .formStyle(.grouped)
-        .confirmationDialog(
-            "Delete this theme?",
-            isPresented: deletionDialogBinding,
-            presenting: themeIDPendingDeletion
-        ) { id in
-            Button("Delete", role: .destructive) {
-                try? manager.deleteTheme(id: id)
-                themeIDPendingDeletion = nil
-            }
-            Button("Cancel", role: .cancel) {
-                themeIDPendingDeletion = nil
-            }
-        } message: { _ in
-            Text("The theme bundle will be removed from disk. This cannot be undone.")
-        }
         .alert(
-            "Could not import theme",
-            isPresented: importErrorBinding,
-            presenting: importErrorMessage
+            errorPresentation?.title ?? "Theme operation failed",
+            isPresented: errorBinding,
+            presenting: errorPresentation
         ) { _ in
-            Button("OK", role: .cancel) { importErrorMessage = nil }
-        } message: { message in
-            Text(message)
+            Button("OK", role: .cancel) { errorPresentation = nil }
+        } message: { error in
+            Text(error.message)
+        }
+        .task {
+            await performOperation(.loading) {
+                try await manager.bootstrap()
+            }
+        }
+        .onDisappear {
+            actionTask?.cancel()
+            actionTask = nil
         }
     }
 
@@ -143,6 +143,7 @@ struct ThemesSettingsView: View {
             Button("Deactivate") {
                 manager.clearActive()
             }
+            .disabled(operation != nil)
         }
     }
 
@@ -191,21 +192,14 @@ struct ThemesSettingsView: View {
                 Button("Deactivate") {
                     manager.clearActive()
                 }
+                .disabled(operation != nil)
             } else {
                 Button("Apply") {
                     manager.setActive(theme.manifest.id)
                 }
+                .disabled(operation != nil)
             }
 
-            if !theme.isBundled {
-                Button(role: .destructive) {
-                    themeIDPendingDeletion = theme.manifest.id
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
-                .help("Delete this theme")
-            }
         }
     }
 
@@ -216,81 +210,53 @@ struct ThemesSettingsView: View {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    private func importTheme() {
-        let panel = NSOpenPanel()
-        panel.title = "Import Theme"
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = ThemesSettingsView.importContentTypes
-
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try manager.importTheme(from: url)
-        } catch {
-            importErrorMessage = (error as? LocalizedError)?.errorDescription
-                ?? error.localizedDescription
+    private func refreshThemes() {
+        startOperation(.refreshing) {
+            try await manager.refreshInstalled()
         }
     }
 
-    private func exportTheme() {
-        let panel = NSSavePanel()
-        panel.title = "Export Theme"
-        panel.nameFieldStringValue = defaultExportName()
-        panel.allowedContentTypes = ThemesSettingsView.importContentTypes
-        panel.canCreateDirectories = true
-
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        // The filename (sans extension) becomes the theme's display
-        // name; the slugified version is the manifest id. This keeps
-        // export as a single-click flow without an extra naming sheet.
-        let name = url.deletingPathExtension().lastPathComponent
-        do {
-            try manager.exportCurrentAppearance(name: name, to: url)
-        } catch {
-            importErrorMessage = (error as? LocalizedError)?.errorDescription
-                ?? error.localizedDescription
-        }
-    }
-
-    private func defaultExportName() -> String {
-        if let active = manager.activeManifest {
-            return "\(active.name) Copy.dockytheme"
-        }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return "My Docky Theme \(formatter.string(from: Date())).dockytheme"
-    }
-
-    private var deletionDialogBinding: Binding<Bool> {
+    private var errorBinding: Binding<Bool> {
         Binding(
-            get: { themeIDPendingDeletion != nil },
+            get: { errorPresentation != nil },
             set: { newValue in
-                if !newValue { themeIDPendingDeletion = nil }
+                if !newValue { errorPresentation = nil }
             }
         )
     }
 
-    private var importErrorBinding: Binding<Bool> {
-        Binding(
-            get: { importErrorMessage != nil },
-            set: { newValue in
-                if !newValue { importErrorMessage = nil }
-            }
-        )
+    @MainActor
+    private func startOperation(
+        _ requestedOperation: ThemeSettingsOperation,
+        action: @escaping @MainActor () async throws -> Void
+    ) {
+        guard operation == nil else { return }
+        actionTask = Task {
+            await performOperation(requestedOperation, action: action)
+            actionTask = nil
+        }
     }
 
-    /// File types accepted by the import panel. Accept both the custom
-    /// `.dockytheme` extension and a plain `.zip` so users can grab
-    /// either flavor from a release archive.
-    private static let importContentTypes: [UTType] = {
-        var types: [UTType] = [.zip]
-        if let custom = UTType(filenameExtension: "dockytheme") {
-            types.insert(custom, at: 0)
+    @MainActor
+    private func performOperation(
+        _ requestedOperation: ThemeSettingsOperation,
+        action: @escaping @MainActor () async throws -> Void
+    ) async {
+        guard operation == nil else { return }
+        operation = requestedOperation
+        defer { operation = nil }
+        do {
+            try await action()
+        } catch is CancellationError {
+            return
+        } catch {
+            errorPresentation = ThemeSettingsError(
+                title: requestedOperation.errorTitle,
+                message: (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+            )
         }
-        return types
-    }()
+    }
 
     /// Grid cell used for every Themes action button. Mirrors the
     /// onboarding's `.bordered` + `.large` styling so on macOS 26+
@@ -312,6 +278,30 @@ struct ThemesSettingsView: View {
     }
 }
 
+private enum ThemeSettingsOperation: Equatable {
+    case loading
+    case refreshing
+
+    var progressLabel: String {
+        switch self {
+        case .loading: return "Loading themes…"
+        case .refreshing: return "Refreshing themes…"
+        }
+    }
+
+    var errorTitle: String {
+        switch self {
+        case .loading, .refreshing: return "Could not load themes"
+        }
+    }
+}
+
+private struct ThemeSettingsError: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
 /// 16:9 cover/preview tile used in the installed-themes list.
 ///
 /// Preference order:
@@ -331,51 +321,45 @@ private struct ThemePreviewBadge: View {
 
     var body: some View {
         let tint = manifest.appearance.window?.tintColor?.nsColor
-        let cover = coverImageURL.flatMap { NSImage(contentsOf: $0) }
-        let background: NSImage? = cover == nil
-            ? backgroundImageURL.flatMap { NSImage(contentsOf: $0) }
-            : nil
         let clipShape = RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
 
         // The outer `.clipShape` guarantees the fill, image overlay,
         // and anything added later are all confined to the rounded
         // bounds — `scaledToFill` will gladly render outside the
         // frame, and per-image clipping has been forgotten before.
-        Rectangle()
-            .fill(tint.map(Color.init(nsColor:)) ?? Color.secondary.opacity(0.2))
-            .frame(width: Self.size.width, height: Self.size.height)
-            .overlay {
-                if let cover {
-                    Image(nsImage: cover)
-                        .resizable()
-                        .scaledToFill()
-                } else if let background {
-                    Image(nsImage: background)
-                        .resizable()
-                        .scaledToFill()
-                }
+        ZStack {
+            Rectangle()
+                .fill(
+                    tint.map(Color.init(nsColor:))
+                        ?? Color.secondary.opacity(0.2)
+                )
+            CachedAsyncImageFile(url: previewImageURL) {
+                EmptyView()
+            } content: { image in
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
             }
+        }
+            .frame(width: Self.size.width, height: Self.size.height)
             .clipShape(clipShape)
             .overlay {
                 clipShape.strokeBorder(.separator, lineWidth: 0.5)
             }
     }
 
-    private var coverImageURL: URL? {
-        ThemeManager.shared.installedThemes[manifest.id]?.coverImageURL
-    }
-
-    private var backgroundImageURL: URL? {
-        guard let asset = manifest.appearance.window?.backgroundImage else { return nil }
-        // Use the manager's resolver when this theme is active so
-        // previews stay in lockstep with what the dock chrome renders.
-        if ThemeManager.shared.activeThemeID == manifest.id {
-            return ThemeManager.shared.activeAssetURL(asset)
-        }
-        guard let bundle = ThemeManager.shared.installedThemes[manifest.id]?.bundleURL else {
+    private var previewImageURL: URL? {
+        guard let installed =
+                ThemeManager.shared.installedThemes[manifest.id] else {
             return nil
         }
-        let url = bundle.appending(path: asset, directoryHint: .notDirectory)
-        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        if let coverImageURL = installed.coverImageURL {
+            return coverImageURL
+        }
+        guard let backgroundImage =
+                manifest.appearance.window?.backgroundImage else {
+            return nil
+        }
+        return installed.assetURL(for: backgroundImage)
     }
 }

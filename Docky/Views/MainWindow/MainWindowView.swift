@@ -113,7 +113,13 @@ struct MainWindowView: View {
         UnevenRoundedRectangle(cornerRadii: radii, style: .continuous)
             .fill(Color.clear)
             .background {
-                if let backgroundImage = resolvedBackgroundImage {
+                CachedAsyncImageFile(
+                    url: preferences.effectiveWindowBackgroundImageURL,
+                    placeholder: {
+                        Color(nsColor: preferences.effectiveWindowTintColor)
+                            .opacity(preferences.effectiveWindowTintOpacity)
+                    }
+                ) { backgroundImage in
                     GeometryReader { proxy in
                         backgroundImageContent(image: backgroundImage)
                             .frame(
@@ -123,9 +129,6 @@ struct MainWindowView: View {
                             .rotationEffect(.degrees(backgroundImageRotationDegrees(for: resolvedPosition)))
                             .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
                     }
-                } else {
-                    Color(nsColor: preferences.effectiveWindowTintColor)
-                        .opacity(preferences.effectiveWindowTintOpacity)
                 }
             }
             .clipped()
@@ -212,13 +215,6 @@ struct MainWindowView: View {
         return CGSize(width: chromeSize.width + chromeGrowth, height: chromeSize.height)
     }
 
-    private var resolvedBackgroundImage: NSImage? {
-        guard let backgroundImageURL = preferences.effectiveWindowBackgroundImageURL else {
-            return nil
-        }
-
-        return NSImage(contentsOf: backgroundImageURL)
-    }
 }
 
 /// `NSGlassEffectView` SPI bridge — same surface

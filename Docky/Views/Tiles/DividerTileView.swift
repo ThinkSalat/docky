@@ -101,22 +101,40 @@ struct DividerTileView: View {
             .map(Color.init(nsColor:)) ?? Color.primary
 
         Group {
-            if let resolvedImage = preferences.resolvedDividerImage(forPositionClass: positionClass),
-               let nsImage = NSImage(contentsOf: resolvedImage.url) {
-                customImageDivider(nsImage: nsImage, mirrored: resolvedImage.mirrored)
-            } else if position.isVertical {
-                Rectangle()
-                    .fill(fillColor)
-                    .frame(height: 1)
-                    .padding(.horizontal, lineInset)
+            if let resolvedImage = preferences.resolvedDividerImage(
+                forPositionClass: positionClass
+            ) {
+                CachedAsyncImageFile(
+                    url: resolvedImage.url,
+                    placeholder: {
+                        standardDivider(fillColor: fillColor)
+                    }
+                ) { nsImage in
+                    customImageDivider(
+                        nsImage: nsImage,
+                        mirrored: resolvedImage.mirrored
+                    )
+                }
             } else {
-                Rectangle()
-                    .fill(fillColor)
-                    .frame(width: 1)
-                    .padding(.vertical, lineInset)
+                standardDivider(fillColor: fillColor)
             }
         }
         .opacity(min(max(preferences.effectiveDividerOpacity, 0), 1))
+    }
+
+    @ViewBuilder
+    private func standardDivider(fillColor: Color) -> some View {
+        if position.isVertical {
+            Rectangle()
+                .fill(fillColor)
+                .frame(height: 1)
+                .padding(.horizontal, lineInset)
+        } else {
+            Rectangle()
+                .fill(fillColor)
+                .frame(width: 1)
+                .padding(.vertical, lineInset)
+        }
     }
 
     @ViewBuilder

@@ -5,7 +5,6 @@
 //  Created by Jose Quintero on 17/04/26.
 //
 
-import ApplicationServices
 import Cocoa
 
 import Combine
@@ -25,9 +24,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var debugSnapshotCancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
-        // Bound every AX call to 1s so a hung app can't stall the main run loop.
-        // Must precede any other AX work — applies process-wide.
-        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
+        DiagnosticsTrace.shared.start()
+        DiagnosticsTrace.shared.record(.widgets, "runtimeDisabled")
 
         window?.orderOut(nil)
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -41,38 +39,42 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         _ = AppUpdateService.shared
         _ = LaunchpadHotKeyService.shared
         _ = LaunchpadOverlayService.shared
+        _ = MenuCatalogService.shared
+        Task { @MainActor in
+            do {
+                try await ThemeManager.shared.bootstrap()
+            } catch {
+                DiagnosticsTrace.shared.record(
+                    .lifecycle,
+                    "themeBootstrapFailed",
+                    fields: [
+                        "error":
+                            DiagnosticPrivacy.errorDescriptor(error),
+                    ]
+                )
+            }
+        }
         AppUpdateService.shared.checkForUpdatesInBackground()
         WindowReservationService.shared.start()
         DockBadgeService.shared.start()
 
-        // Must precede TileStore.syncPreferencesFromSystemDockIfNeeded
-        // below: persisted dock contents may reference external widget
-        // identifiers, and TileStore filters out unknown widgets when
-        // rehydrating.
-        ExternalWidgetLoader.shared.discoverAndLoad()
-
         DockyPreferences.shared.applySystemDockVisibilityPreference()
         DockyPreferences.shared.applyOpenAtLoginPreference()
-        TileStore.shared.syncPreferencesFromSystemDockIfNeeded()
+
+        // Profiles are authoritative for their tile-store fields. Reapply
+        // the persisted active profile before any import can mirror a stale
+        // top-level snapshot back into it, then resolve the current Space.
+        ProfileService.shared.reapplyActiveProfile()
         ProfileTriggerEngine.shared.start()
+        TileStore.shared.syncPreferencesFromSystemDockIfNeeded()
 
         PermissionsService.shared.refresh()
-
-        if PermissionsService.shared.setupComplete {
-            PermissionsService.shared.markInitialOnboardingCompleted()
-            showMainWindow()
-        } else {
-            showPermissionsWindow(
-                steps: PermissionsService.shared.setupPermissions,
-                marksInitialOnboardingCompleted: true,
-                showsMainWindowOnCompletion: true
-            )
-        }
+        showMainWindow()
     }
 
     /// Handles two entry points:
     ///  - Double-clicking a `.dockytheme` bundle (or `.zip` of one) in
-    ///    Finder → imports each via `ThemeManager` and opens Settings.
+    ///    Finder → explains that runtime theme import is unavailable.
     ///  - `docky://<host>/<path>` deep links from automation tools
     ///    (BTT, Raycast, Shortcuts, Stream Deck, ...). See
     ///    `handleDockyURL` for the routing table.
@@ -80,7 +82,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         guard !urls.isEmpty else { return }
 
         let dockyURLs = urls.filter { $0.scheme == "docky" }
-        let themeURLs = urls.filter { $0.scheme != "docky" }
+        let themeURLs = urls.filter {
+            guard $0.scheme != "docky", $0.isFileURL else { return false }
+            return ["dockytheme", "zip"].contains(
+                $0.pathExtension.lowercased()
+            )
+        }
 
         for url in dockyURLs {
             handleDockyURL(url)
@@ -88,39 +95,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         guard !themeURLs.isEmpty else { return }
 
-        var importedAny = false
-        var firstError: String?
-
-        for url in themeURLs {
-            do {
-                try ThemeManager.shared.importTheme(from: url)
-                importedAny = true
-            } catch {
-                if firstError == nil {
-                    firstError = (error as? LocalizedError)?.errorDescription
-                        ?? error.localizedDescription
-                }
-            }
-        }
-
-        if importedAny {
-            showSettingsWindow(nil)
-        }
-
-        if let firstError {
-            let alert = NSAlert()
-            alert.messageText = "Could not import theme"
-            alert.informativeText = firstError
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-        }
+        let alert = NSAlert()
+        alert.messageText = "Theme import is temporarily unavailable"
+        alert.informativeText =
+            ThemeRuntimeMutationPolicy.unavailableExplanation
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     /// Routes a `docky://` URL to the matching handler.
     ///
     /// Routing table:
-    ///  - `docky://install-widget?url=<https://...>` — Widget Store install.
     ///  - `docky://launchpad[/show|/hide|/toggle]` — launchpad overlay.
     ///  - `docky://start-menu[/show|/hide|/toggle]` — start menu overlay.
     ///  - `docky://dock[/show|/hide|/toggle]` — flips `autohidesWindow`.
@@ -138,7 +124,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         switch action {
         case "install-widget":
-            handleInstallWidgetURL(url)
+            if !ExternalWidgetRuntimePolicy.acceptsInstallDeepLink(
+                host: action
+            ) {
+                DiagnosticsTrace.shared.record(
+                    .widgets,
+                    "installDeepLinkRejected",
+                    fields: ["reason": "runtimeDisabled"]
+                )
+                return
+            }
         case "launchpad":
             applyOverlayAction(
                 path: path,
@@ -228,59 +223,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
-    /// `docky://install-widget?url=<downloadURL>` from the marketplace
-    /// website. Gated on Pro tier; surfaces an alert with the install
-    /// outcome so the user knows whether to restart Docky.
-    private func handleInstallWidgetURL(_ url: URL) {
-        guard
-            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-            let downloadString = components.queryItems?.first(where: { $0.name == "url" })?.value,
-            let downloadURL = URL(string: downloadString),
-            let scheme = downloadURL.scheme?.lowercased(),
-            scheme == "https"
-        else {
-            presentInstallAlert(title: "Invalid widget install link", message: "The link did not include a valid HTTPS download URL.", style: .warning)
-            return
-        }
-
-        Task { @MainActor in
-            do {
-                let staged = try await MarketplaceClient.shared.downloadBundle(from: downloadURL)
-                _ = try ExternalWidgetLoader.shared.installBundle(from: staged)
-                try? FileManager.default.removeItem(at: staged.deletingLastPathComponent())
-
-                let alert = NSAlert()
-                alert.messageText = "Widget installed"
-                alert.informativeText = "Restart Docky to start using \(downloadURL.lastPathComponent)."
-                alert.alertStyle = .informational
-                alert.addButton(withTitle: "Restart Docky")
-                alert.addButton(withTitle: "Later")
-                if alert.runModal() == .alertFirstButtonReturn {
-                    NSApp.terminate(nil)
-                }
-            } catch {
-                presentInstallAlert(
-                    title: "Couldn't install widget",
-                    message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
-                    style: .warning
-                )
-            }
-        }
-    }
-
-    private func presentInstallAlert(title: String, message: String, style: NSAlert.Style) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = style
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
-
     func applicationWillTerminate(_ aNotification: Notification) {
+        DiagnosticsTrace.shared.record(.lifecycle, "willTerminate")
+        ProfileService.shared.flushPersistence()
         if SystemDockVisibilityService.shared.hasSnapshot {
             SystemDockVisibilityService.shared.restore()
         }
+        DiagnosticsTrace.shared.flush()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
@@ -316,24 +265,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         return true
     }
 
-    private func showPermissionsWindow(
-        steps: [Permission],
-        marksInitialOnboardingCompleted: Bool,
-        showsMainWindowOnCompletion: Bool
-    ) {
+    private func showPermissionsWindow(steps: [Permission]) {
         NSApp.setActivationPolicy(.regular)
         let controller = PermissionsWindowController(steps: steps)
         controller.onComplete = { [weak self] in
             NSApp.setActivationPolicy(.accessory)
             self?.permissionsWindowController = nil
-
-            if marksInitialOnboardingCompleted {
-                PermissionsService.shared.markInitialOnboardingCompleted()
-            }
-
-            if showsMainWindowOnCompletion {
-                self?.showMainWindow()
-            }
         }
         permissionsWindowController = controller
         controller.showWindow(nil)
@@ -465,11 +402,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func showDebugOnboarding(_ sender: Any?) {
         PermissionsService.shared.refresh()
-        showPermissionsWindow(
-            steps: Permission.allCases,
-            marksInitialOnboardingCompleted: false,
-            showsMainWindowOnCompletion: false
-        )
+        showPermissionsWindow(steps: Permission.allCases)
     }
 
     private func installDebugStatusItem() {

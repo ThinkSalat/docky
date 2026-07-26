@@ -24,7 +24,8 @@ final class WidgetSettingsPanelController: NSObject {
     private var currentTileID: String?
     private var globalClickMonitor: Any?
     private var localEventMonitor: Any?
-    private weak var heldMainWindow: MainWindow?
+    private var mainWindowInteractionLease: MainWindowInteractionLease?
+    private var presentationGeneration = PresentationGeneration()
 
     private override init() { super.init() }
 
@@ -35,9 +36,10 @@ final class WidgetSettingsPanelController: NSObject {
             return
         }
         dismiss()
+        let presentation = presentationGeneration.advance()
 
         let rootView = WidgetSettingsView(tileID: tileID, widget: widget) { [weak self] in
-            self?.dismiss()
+            self?.dismiss(ifCurrent: presentation)
         }
         .frame(width: Self.contentWidth)
         .fixedSize(horizontal: false, vertical: true)
@@ -73,10 +75,11 @@ final class WidgetSettingsPanelController: NSObject {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
 
-        installEventMonitors()
+        installEventMonitors(for: presentation)
     }
 
     func dismiss() {
+        _ = presentationGeneration.advance()
         removeEventMonitors()
         endDockVisibilityHoldIfNeeded()
         currentTileID = nil
@@ -88,28 +91,40 @@ final class WidgetSettingsPanelController: NSObject {
         panel = nil
     }
 
-    private func installEventMonitors() {
+    private func dismiss(ifCurrent presentation: PresentationGeneration.Token) {
+        guard presentationGeneration.isCurrent(presentation) else { return }
+        dismiss()
+    }
+
+    private func installEventMonitors(
+        for presentation: PresentationGeneration.Token
+    ) {
         globalClickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] _ in
-            Task { @MainActor in self?.dismiss() }
+            Task { @MainActor in
+                self?.dismiss(ifCurrent: presentation)
+            }
         }
 
         localEventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .keyDown]
         ) { [weak self] event in
             guard let self else { return event }
+            guard self.presentationGeneration.isCurrent(presentation) else {
+                return event
+            }
 
             if event.type == .keyDown {
                 if event.keyCode == 53 {
-                    self.dismiss()
+                    self.dismiss(ifCurrent: presentation)
                     return nil
                 }
                 return event
             }
 
             if event.window !== self.panel {
-                self.dismiss()
+                self.dismiss(ifCurrent: presentation)
             }
             return event
         }
@@ -127,17 +142,15 @@ final class WidgetSettingsPanelController: NSObject {
     }
 
     private func beginDockVisibilityHoldIfNeeded() {
-        guard heldMainWindow == nil,
+        guard mainWindowInteractionLease?.isActive != true,
               let mainWindow = NSApp.windows.compactMap({ $0 as? MainWindow }).first else {
             return
         }
-        mainWindow.beginInteraction()
-        heldMainWindow = mainWindow
+        mainWindowInteractionLease = mainWindow.acquireInteractionLease()
     }
 
     private func endDockVisibilityHoldIfNeeded() {
-        heldMainWindow?.endInteraction()
-        heldMainWindow = nil
+        mainWindowInteractionLease = nil
     }
 
     private func frameOrigin(for size: CGSize, sourceFrame originalSourceFrame: CGRect) -> CGPoint {
@@ -207,6 +220,10 @@ final class WidgetSettingsPanelController: NSObject {
 
 extension WidgetSettingsPanelController: NSWindowDelegate {
     func windowDidResignKey(_ notification: Notification) {
+        guard let resigningPanel = notification.object as? NSWindow,
+              resigningPanel === panel else {
+            return
+        }
         dismiss()
     }
 }

@@ -10,8 +10,12 @@ import UniformTypeIdentifiers
 struct AppIconsSettingsView: View {
     @Bindable private var preferences = DockyPreferences.shared
     @ObservedObject private var workspace = WorkspaceService.shared
+    @State private var appEntries: [AppIconSettingsEntry] = []
+    @State private var folderEntries: [FolderIconSettingsEntry] = []
+    @State private var metadataRequestGeneration: UInt64 = 0
     @State private var otherApps: [AppIconSettingsEntry] = []
     @State private var otherAppsLoaded = false
+    @State private var otherAppsRequestGeneration: UInt64 = 0
 
     var body: some View {
         Form {
@@ -100,9 +104,73 @@ struct AppIconsSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .task(id: metadataRequest) {
+            await refreshMetadata(for: metadataRequest)
+        }
         .task(id: dockBundleIDsSignature) {
             await refreshOtherApps()
         }
+    }
+
+    /// A value-only description of the settings rows. Building it reads only
+    /// Docky's already-published model state; LaunchServices and filesystem
+    /// metadata resolution happen later on the metadata worker.
+    private var metadataRequest: AppIconSettingsMetadataRequest {
+        var bundleIdentifiers: Set<String> = ["com.apple.finder"]
+        bundleIdentifiers.formUnion(workspace.runningApps.map(\.bundleIdentifier))
+        bundleIdentifiers.formUnion(preferences.appIconOverrides.map(\.bundleIdentifier))
+        bundleIdentifiers.formUnion(preferences.widgetPlacements.map(\.ownerBundleIdentifier))
+
+        for item in preferences.pinnedItems {
+            if let bundleIdentifier = item.bundleIdentifier {
+                bundleIdentifiers.insert(bundleIdentifier)
+            }
+
+            bundleIdentifiers.formUnion(item.folderBundleIdentifiers)
+        }
+
+        var seenPaths: Set<String> = []
+        let folders = preferences.trailingItems.compactMap {
+            item -> FolderIconSettingsMetadataRequest? in
+            guard item.kind == .folder, let url = item.folderURL else {
+                return nil
+            }
+            let path = url.standardizedFileURL.path
+            guard seenPaths.insert(path).inserted else { return nil }
+            return FolderIconSettingsMetadataRequest(
+                folderPath: path,
+                preferredDisplayName: item.folderDisplayName
+            )
+        }
+
+        return AppIconSettingsMetadataRequest(
+            bundleIdentifiers: bundleIdentifiers.sorted(),
+            folders: folders
+        )
+    }
+
+    private func refreshMetadata(
+        for request: AppIconSettingsMetadataRequest
+    ) async {
+        metadataRequestGeneration &+= 1
+        let generation = metadataRequestGeneration
+        let worker = Task.detached(priority: .userInitiated) {
+            AppIconSettingsMetadataLoader.load(request)
+        }
+        let snapshot = await withTaskCancellationHandler {
+            await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
+
+        guard !Task.isCancelled,
+              metadataRequestGeneration == generation,
+              metadataRequest == request else {
+            return
+        }
+
+        appEntries = snapshot.apps
+        folderEntries = snapshot.folders
     }
 
     /// Stable string fingerprint of every bundle id already shown in
@@ -119,10 +187,17 @@ struct AppIconsSettingsView: View {
     /// `appEntries`. Bundle ids are deduped; the first occurrence
     /// across roots wins (matching `LaunchpadOverlayService`).
     private func refreshOtherApps() async {
+        otherAppsRequestGeneration &+= 1
+        let generation = otherAppsRequestGeneration
         let excluded = Set(appEntries.map(\.bundleIdentifier))
-        let scanned: [AppIconSettingsEntry] = await Task.detached(priority: .userInitiated) {
+        let worker = Task.detached(priority: .userInitiated) {
             AppIconsInstalledAppScanner.scan()
-        }.value
+        }
+        let scanned = await withTaskCancellationHandler {
+            await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
 
         let filtered = scanned
             .filter { !excluded.contains($0.bundleIdentifier) }
@@ -134,71 +209,14 @@ struct AppIconsSettingsView: View {
                 return comparison == .orderedAscending
             }
 
+        guard !Task.isCancelled,
+              otherAppsRequestGeneration == generation,
+              Set(appEntries.map(\.bundleIdentifier)) == excluded else {
+            return
+        }
+
         otherApps = filtered
         otherAppsLoaded = true
-    }
-
-    private var appEntries: [AppIconSettingsEntry] {
-        var bundleIdentifiers: Set<String> = ["com.apple.finder"]
-        bundleIdentifiers.formUnion(workspace.runningApps.map(\.bundleIdentifier))
-        bundleIdentifiers.formUnion(preferences.appIconOverrides.map(\.bundleIdentifier))
-        bundleIdentifiers.formUnion(preferences.widgetPlacements.map(\.ownerBundleIdentifier))
-
-        for item in preferences.pinnedItems {
-            if let bundleIdentifier = item.bundleIdentifier {
-                bundleIdentifiers.insert(bundleIdentifier)
-            }
-
-            bundleIdentifiers.formUnion(item.folderBundleIdentifiers)
-        }
-
-        return bundleIdentifiers.compactMap { bundleIdentifier in
-            let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
-            let displayName = appURL.map { FileManager.default.displayName(atPath: $0.path) } ?? bundleIdentifier
-            let subtitle = appURL == nil
-                ? "\(bundleIdentifier) • App not currently found on disk"
-                : bundleIdentifier
-
-            return AppIconSettingsEntry(
-                bundleIdentifier: bundleIdentifier,
-                displayName: displayName,
-                subtitle: subtitle
-            )
-        }
-        .sorted { lhs, rhs in
-            let comparison = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
-            if comparison == .orderedSame {
-                return lhs.bundleIdentifier.localizedCaseInsensitiveCompare(rhs.bundleIdentifier) == .orderedAscending
-            }
-            return comparison == .orderedAscending
-        }
-    }
-
-    private var folderEntries: [FolderIconSettingsEntry] {
-        var seenPaths: Set<String> = []
-        var entries: [FolderIconSettingsEntry] = []
-
-        for item in preferences.trailingItems {
-            guard item.kind == .folder, let url = item.folderURL else { continue }
-            let path = url.path
-            guard seenPaths.insert(path).inserted else { continue }
-            let displayName = item.folderDisplayName?.isEmpty == false
-                ? item.folderDisplayName!
-                : FileManager.default.displayName(atPath: path)
-            entries.append(FolderIconSettingsEntry(
-                folderPath: path,
-                displayName: displayName,
-                systemIcon: IconCacheService.shared.previewIcon(forFileURL: url)
-            ))
-        }
-
-        return entries.sorted { lhs, rhs in
-            let comparison = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
-            if comparison == .orderedSame {
-                return lhs.folderPath.localizedCaseInsensitiveCompare(rhs.folderPath) == .orderedAscending
-            }
-            return comparison == .orderedAscending
-        }
     }
 }
 
@@ -210,10 +228,11 @@ private struct AppIconOverrideRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 36, height: 36)
+                AppIconSettingsPreview(
+                    bundleIdentifier: entry.bundleIdentifier,
+                    overrideURL: effectivePreviewURL,
+                    placeholderSystemName: "app"
+                )
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.displayName)
@@ -240,10 +259,12 @@ private struct AppIconOverrideRow: View {
 
                     if let themeIconURL {
                         Button("Use Theme Icon") {
-                            preferences.setAppIconOverride(
-                                bundleIdentifier: entry.bundleIdentifier,
-                                iconPath: themeIconURL.path
-                            )
+                            Task { @MainActor in
+                                await preferences.setAppIconOverride(
+                                    bundleIdentifier: entry.bundleIdentifier,
+                                    iconPath: themeIconURL.path
+                                )
+                            }
                         }
                         .help("Pin the active theme's icon for this app as your override. Without this, the theme icon already applies; pinning it preserves the choice if you switch themes.")
                     }
@@ -314,21 +335,13 @@ private struct AppIconOverrideRow: View {
         return URL(fileURLWithPath: iconPath).lastPathComponent
     }
 
-    /// Mirrors what the dock actually renders: user override → active
-    /// theme icon → system icon. Reading via
-    /// `effectiveAppIconOverrideURL` keeps this in lockstep with the
-    /// tile views so the settings preview never disagrees with the
-    /// running dock. System-icon fallback is fetched on demand from
-    /// the cache so the Others section doesn't pay for 200+ icon
-    /// loads up front.
-    private var previewImage: NSImage {
-        if let effectiveURL = preferences.effectiveAppIconOverrideURL(
+    /// URL selection is a pure lookup in the managed-asset/theme catalogs.
+    /// `CachedAsyncAppImage` performs any cold decode or LaunchServices icon
+    /// fetch asynchronously and rejects stale results when this URL changes.
+    private var effectivePreviewURL: URL? {
+        preferences.effectiveAppIconOverrideURL(
             forBundleIdentifier: entry.bundleIdentifier
-        ), let image = IconCacheService.shared.image(forImageFileURL: effectiveURL) {
-            return image
-        }
-
-        return IconCacheService.shared.icon(forBundleIdentifier: entry.bundleIdentifier)
+        )
     }
 
     private func chooseOverrideImage() {
@@ -339,11 +352,58 @@ private struct AppIconOverrideRow: View {
         panel.canChooseFiles = true
 
         if panel.runModal() == .OK, let url = panel.url {
-            preferences.setAppIconOverride(
-                bundleIdentifier: entry.bundleIdentifier,
-                iconPath: url.path
-            )
+            Task { @MainActor in
+                await preferences.setAppIconOverride(
+                    bundleIdentifier: entry.bundleIdentifier,
+                    iconPath: url.path
+                )
+            }
         }
+    }
+}
+
+/// Async settings preview with the same configured-image → system-app-icon
+/// fallback the old synchronous code provided. Both cold paths use the shared
+/// cache components, so a corrupt/missing override cannot trigger body I/O or
+/// leave the row without its ordinary app icon.
+private struct AppIconSettingsPreview: View {
+    let bundleIdentifier: String
+    let overrideURL: URL?
+    let placeholderSystemName: String
+
+    var body: some View {
+        if let overrideURL {
+            CachedAsyncImageFile(url: overrideURL) {
+                systemAppIcon
+            } content: { image in
+                rendered(image)
+            }
+        } else {
+            systemAppIcon
+        }
+    }
+
+    private var systemAppIcon: some View {
+        CachedAsyncAppImage(
+            bundleIdentifier: bundleIdentifier,
+            overrideURL: nil
+        ) {
+            Image(systemName: placeholderSystemName)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .padding(5)
+                .foregroundStyle(.secondary)
+                .frame(width: 36, height: 36)
+        } content: { image in
+            rendered(image)
+        }
+    }
+
+    private func rendered(_ image: NSImage) -> some View {
+        Image(nsImage: image)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(width: 36, height: 36)
     }
 }
 
@@ -355,13 +415,115 @@ private struct AppIconSettingsEntry: Identifiable, Sendable {
     var id: String { bundleIdentifier }
 }
 
+private struct AppIconSettingsMetadataRequest: Hashable, Sendable {
+    let bundleIdentifiers: [String]
+    let folders: [FolderIconSettingsMetadataRequest]
+}
+
+private struct FolderIconSettingsMetadataRequest: Hashable, Sendable {
+    let folderPath: String
+    let preferredDisplayName: String?
+}
+
+private struct AppIconSettingsMetadataSnapshot: Sendable {
+    let apps: [AppIconSettingsEntry]
+    let folders: [FolderIconSettingsEntry]
+}
+
+/// Resolves LaunchServices and filesystem display metadata away from
+/// MainActor, publishing only immutable strings and URLs back to the view.
+private nonisolated enum AppIconSettingsMetadataLoader {
+    static func load(
+        _ request: AppIconSettingsMetadataRequest
+    ) -> AppIconSettingsMetadataSnapshot {
+        var apps: [AppIconSettingsEntry] = []
+        for bundleIdentifier in request.bundleIdentifiers {
+            guard !Task.isCancelled else { break }
+            let appURL = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: bundleIdentifier
+            )
+            let displayName = appURL.map {
+                FileManager.default.displayName(atPath: $0.path)
+            } ?? bundleIdentifier
+            let subtitle = appURL == nil
+                ? "\(bundleIdentifier) • App not currently found on disk"
+                : bundleIdentifier
+
+            apps.append(AppIconSettingsEntry(
+                bundleIdentifier: bundleIdentifier,
+                displayName: displayName,
+                subtitle: subtitle
+            ))
+        }
+        apps.sort(by: appEntrySort)
+
+        var folders: [FolderIconSettingsEntry] = []
+        for folder in request.folders {
+            guard !Task.isCancelled else { break }
+            let displayName: String
+            if let preferred = folder.preferredDisplayName,
+               !preferred.isEmpty {
+                displayName = preferred
+            } else {
+                displayName = FileManager.default.displayName(
+                    atPath: folder.folderPath
+                )
+            }
+            folders.append(FolderIconSettingsEntry(
+                folderPath: folder.folderPath,
+                displayName: displayName,
+                folderURL: URL(
+                    fileURLWithPath: folder.folderPath,
+                    isDirectory: true
+                )
+            ))
+        }
+        folders.sort(by: folderEntrySort)
+
+        return AppIconSettingsMetadataSnapshot(
+            apps: apps,
+            folders: folders
+        )
+    }
+
+    private static func appEntrySort(
+        _ lhs: AppIconSettingsEntry,
+        _ rhs: AppIconSettingsEntry
+    ) -> Bool {
+        let comparison = lhs.displayName.localizedCaseInsensitiveCompare(
+            rhs.displayName
+        )
+        if comparison == .orderedSame {
+            return lhs.bundleIdentifier.localizedCaseInsensitiveCompare(
+                rhs.bundleIdentifier
+            ) == .orderedAscending
+        }
+        return comparison == .orderedAscending
+    }
+
+    private static func folderEntrySort(
+        _ lhs: FolderIconSettingsEntry,
+        _ rhs: FolderIconSettingsEntry
+    ) -> Bool {
+        let comparison = lhs.displayName.localizedCaseInsensitiveCompare(
+            rhs.displayName
+        )
+        if comparison == .orderedSame {
+            return lhs.folderPath.localizedCaseInsensitiveCompare(
+                rhs.folderPath
+            ) == .orderedAscending
+        }
+        return comparison == .orderedAscending
+    }
+}
+
 /// Off-main scanner that walks the standard application directories
 /// and returns one `AppIconSettingsEntry` per discovered `.app`.
 /// Bundle ids are deduped (first occurrence wins). Skips Docky
 /// itself so users can't accidentally override the running app's
 /// own icon. Icons are *not* loaded here — preview rows fetch them
 /// lazily from `IconCacheService` so a 200-app scan stays cheap.
-private enum AppIconsInstalledAppScanner {
+private nonisolated enum AppIconsInstalledAppScanner {
     static func scan() -> [AppIconSettingsEntry] {
         let roots: [URL] = [
             URL(fileURLWithPath: "/Applications", isDirectory: true),
@@ -375,6 +537,7 @@ private enum AppIconsInstalledAppScanner {
         var seen: [String: AppIconSettingsEntry] = [:]
 
         for root in roots {
+            guard !Task.isCancelled else { break }
             guard let topLevel = try? fileManager.contentsOfDirectory(
                 at: root,
                 includingPropertiesForKeys: [.isDirectoryKey],
@@ -382,6 +545,7 @@ private enum AppIconsInstalledAppScanner {
             ) else { continue }
 
             for url in topLevel {
+                guard !Task.isCancelled else { break }
                 if url.pathExtension == "app" {
                     addEntry(at: url, into: &seen, skipping: selfBundleIdentifier)
                     continue
@@ -400,6 +564,7 @@ private enum AppIconsInstalledAppScanner {
                 ) else { continue }
 
                 for nestedURL in nested where nestedURL.pathExtension == "app" {
+                    guard !Task.isCancelled else { break }
                     addEntry(at: nestedURL, into: &seen, skipping: selfBundleIdentifier)
                 }
             }
@@ -435,10 +600,17 @@ private struct TrashIconOverrideRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 36, height: 36)
+                CachedAsyncImageFile(url: overrideEntry?.effectiveIconURL) {
+                    Image(nsImage: NSImage(named: state.systemImageName) ?? NSImage())
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 36, height: 36)
+                } content: { image in
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 36, height: 36)
+                }
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Trash (\(state.title))")
@@ -520,15 +692,6 @@ private struct TrashIconOverrideRow: View {
         return URL(fileURLWithPath: iconPath).lastPathComponent
     }
 
-    private var previewImage: NSImage {
-        if let overrideURL = overrideEntry?.effectiveIconURL,
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-
-        return NSImage(named: state.systemImageName) ?? NSImage()
-    }
-
     private func chooseOverrideImage() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
@@ -537,15 +700,20 @@ private struct TrashIconOverrideRow: View {
         panel.canChooseFiles = true
 
         if panel.runModal() == .OK, let url = panel.url {
-            preferences.setTrashIconOverride(state: state, iconPath: url.path)
+            Task { @MainActor in
+                await preferences.setTrashIconOverride(
+                    state: state,
+                    iconPath: url.path
+                )
+            }
         }
     }
 }
 
-private struct FolderIconSettingsEntry: Identifiable {
+private struct FolderIconSettingsEntry: Identifiable, Sendable {
     let folderPath: String
     let displayName: String
-    let systemIcon: NSImage
+    let folderURL: URL
 
     var id: String { folderPath }
 }
@@ -558,10 +726,26 @@ private struct FolderIconOverrideRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 36, height: 36)
+                CachedAsyncImageFile(url: overrideEntry?.effectiveIconURL) {
+                    CachedAsyncFileImage(url: entry.folderURL) {
+                        Image(systemName: "folder")
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .padding(3)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 36, height: 36)
+                    } content: { image in
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 36, height: 36)
+                    }
+                } content: { image in
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 36, height: 36)
+                }
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.displayName)
@@ -643,15 +827,6 @@ private struct FolderIconOverrideRow: View {
         return URL(fileURLWithPath: iconPath).lastPathComponent
     }
 
-    private var previewImage: NSImage {
-        if let overrideURL = overrideEntry?.effectiveIconURL,
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-
-        return entry.systemIcon
-    }
-
     private func chooseOverrideImage() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
@@ -660,7 +835,12 @@ private struct FolderIconOverrideRow: View {
         panel.canChooseFiles = true
 
         if panel.runModal() == .OK, let url = panel.url {
-            preferences.setFolderIconOverride(folderPath: entry.folderPath, iconPath: url.path)
+            Task { @MainActor in
+                await preferences.setFolderIconOverride(
+                    folderPath: entry.folderPath,
+                    iconPath: url.path
+                )
+            }
         }
     }
 }
@@ -671,10 +851,11 @@ private struct LaunchpadIconOverrideRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 36, height: 36)
+                AppIconSettingsPreview(
+                    bundleIdentifier: LaunchpadTile.spotlightBundleIdentifier,
+                    overrideURL: preferences.effectiveLaunchpadIconOverrideURL,
+                    placeholderSystemName: "square.grid.3x3.fill"
+                )
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Launchpad")
@@ -700,8 +881,12 @@ private struct LaunchpadIconOverrideRow: View {
 
                     if hasOverride {
                         Button("Clear") {
-                            preferences.launchpadIconPath = nil
-                            preferences.launchpadIconPaddingFraction = nil
+                            preferences.clearUserAsset(
+                                slot: "special-icon:launchpad"
+                            ) {
+                                preferences.launchpadIconPath = nil
+                                preferences.launchpadIconPaddingFraction = nil
+                            }
                         }
                     }
                 }
@@ -752,14 +937,6 @@ private struct LaunchpadIconOverrideRow: View {
         return URL(fileURLWithPath: path).lastPathComponent
     }
 
-    private var previewImage: NSImage {
-        if let overrideURL = preferences.effectiveLaunchpadIconOverrideURL,
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-        return IconCacheService.shared.icon(forBundleIdentifier: LaunchpadTile.spotlightBundleIdentifier)
-    }
-
     private func chooseOverrideImage() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
@@ -768,7 +945,20 @@ private struct LaunchpadIconOverrideRow: View {
         panel.canChooseFiles = true
 
         if panel.runModal() == .OK, let url = panel.url {
-            preferences.launchpadIconPath = url.path
+            Task { @MainActor in
+                guard let path = await preferences.importUserAssetPath(
+                    from: url,
+                    slot: "special-icon:launchpad"
+                ) else {
+                    return
+                }
+                preferences.commitImportedUserAssetPath(
+                    path,
+                    slot: "special-icon:launchpad"
+                ) {
+                    preferences.launchpadIconPath = $0
+                }
+            }
         }
     }
 }
@@ -779,10 +969,11 @@ private struct StartMenuIconOverrideRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 36, height: 36)
+                AppIconSettingsPreview(
+                    bundleIdentifier: StartMenuTile.iconBundleIdentifier,
+                    overrideURL: preferences.effectiveStartMenuIconOverrideURL,
+                    placeholderSystemName: "square.grid.2x2.fill"
+                )
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Start Menu")
@@ -808,8 +999,12 @@ private struct StartMenuIconOverrideRow: View {
 
                     if hasOverride {
                         Button("Clear") {
-                            preferences.startMenuIconPath = nil
-                            preferences.startMenuIconPaddingFraction = nil
+                            preferences.clearUserAsset(
+                                slot: "special-icon:start-menu"
+                            ) {
+                                preferences.startMenuIconPath = nil
+                                preferences.startMenuIconPaddingFraction = nil
+                            }
                         }
                     }
                 }
@@ -860,14 +1055,6 @@ private struct StartMenuIconOverrideRow: View {
         return URL(fileURLWithPath: path).lastPathComponent
     }
 
-    private var previewImage: NSImage {
-        if let overrideURL = preferences.effectiveStartMenuIconOverrideURL,
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-        return IconCacheService.shared.icon(forBundleIdentifier: StartMenuTile.iconBundleIdentifier)
-    }
-
     private func chooseOverrideImage() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
@@ -876,7 +1063,20 @@ private struct StartMenuIconOverrideRow: View {
         panel.canChooseFiles = true
 
         if panel.runModal() == .OK, let url = panel.url {
-            preferences.startMenuIconPath = url.path
+            Task { @MainActor in
+                guard let path = await preferences.importUserAssetPath(
+                    from: url,
+                    slot: "special-icon:start-menu"
+                ) else {
+                    return
+                }
+                preferences.commitImportedUserAssetPath(
+                    path,
+                    slot: "special-icon:start-menu"
+                ) {
+                    preferences.startMenuIconPath = $0
+                }
+            }
         }
     }
 }

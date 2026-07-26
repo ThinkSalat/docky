@@ -19,10 +19,14 @@ func windowMenuContextActions(
 ) -> [ContextAction] {
     let workspace = WorkspaceService.shared
 
-    func run(_ action: @escaping (AppWindow) -> Bool) -> () -> Void {
+    func run(
+        _ action: @escaping (AppWindow) async -> Bool
+    ) -> () -> Void {
         return {
             dismiss()
-            _ = action(window)
+            Task {
+                _ = await action(window)
+            }
         }
     }
 

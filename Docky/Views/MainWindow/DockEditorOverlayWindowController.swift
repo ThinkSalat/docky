@@ -304,8 +304,8 @@ private struct DockEditorGalleryItem: Equatable, Identifiable {
                 "magnifyingglass"
             case .photoFrame:
                 "photo.on.rectangle.angled"
-            case .external(let identifier):
-                ExternalWidgetRegistry.shared.metadata(for: identifier)?.systemImageName ?? "puzzlepiece.extension"
+            case .external:
+                "lock.shield"
             }
         case .smartStack:
             "square.stack.3d.up"

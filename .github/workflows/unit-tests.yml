@@ -1,0 +1,58 @@
+name: Unit tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-26
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Verify security invariants
+        run: bash scripts/check_security_invariants.sh
+
+      - name: Verify release metadata
+        run: bash scripts/check_release_metadata.sh
+
+      - name: Test release workflow guards
+        run: bash scripts/tests/release_workflow_test.sh
+
+      - name: Compile Docky
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Docky.xcodeproj \
+            -scheme Docky \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/DockyDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=
+
+      - name: Build and run hostless unit tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project Docky.xcodeproj \
+            -scheme DockyTests \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/DockyTestsDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=

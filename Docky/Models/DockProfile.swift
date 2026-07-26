@@ -11,7 +11,11 @@
 
 import Foundation
 
-struct DockProfile: Codable, Equatable, Identifiable {
+nonisolated struct DockProfile:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let id: String
     var name: String
     var symbolName: String

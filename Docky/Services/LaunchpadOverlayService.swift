@@ -163,10 +163,10 @@ final class LaunchpadOverlayService: ObservableObject {
         }
 
         if entries.isEmpty {
-            // Run a synchronous scan so the overlay has something to
-            // render on first present; async rescans then keep it
-            // fresh as the user installs / uninstalls apps.
-            applyScan(Self.scanApplications())
+            // The initial scan can inspect hundreds of bundles. Keep the
+            // click path immediate and let the existing scan worker publish
+            // entries as soon as they are ready.
+            scheduleRescan(delay: 0)
         }
         isPresented = true
     }
@@ -336,7 +336,7 @@ final class LaunchpadOverlayService: ObservableObject {
             _ = LaunchpadLayoutService.shared.layout
             _ = self
         } onChange: { [weak self] in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.recomputeEntries()
                 self.observeLayoutChanges()

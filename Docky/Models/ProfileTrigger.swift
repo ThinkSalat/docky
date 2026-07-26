@@ -14,16 +14,22 @@
 
 import Foundation
 
-enum ProfileTrigger: Codable, Equatable, Identifiable {
+nonisolated enum ProfileTrigger:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     case timeOfDay(TimeOfDayTrigger)
     case frontmostApp(FrontmostAppTrigger)
     case space(SpaceTrigger)
+    case exactSpace(ExactSpaceTrigger)
 
     var id: String {
         switch self {
         case .timeOfDay(let trigger): return trigger.id
         case .frontmostApp(let trigger): return trigger.id
         case .space(let trigger): return trigger.id
+        case .exactSpace(let trigger): return trigger.id
         }
     }
 
@@ -32,6 +38,7 @@ enum ProfileTrigger: Codable, Equatable, Identifiable {
     /// app (frontmost choice) which beats time-of-day (passive).
     var specificity: Int {
         switch self {
+        case .exactSpace: return 4
         case .space: return 3
         case .frontmostApp: return 2
         case .timeOfDay: return 1
@@ -43,7 +50,11 @@ enum ProfileTrigger: Codable, Equatable, Identifiable {
 /// endMinuteOfDay)` on any of the listed weekdays. Minute-of-day is 0
 /// (00:00) up to 1439 (23:59). Wraparound (e.g. 22:00 → 06:00) is
 /// supported by `endMinuteOfDay < startMinuteOfDay`.
-struct TimeOfDayTrigger: Codable, Equatable, Identifiable {
+nonisolated struct TimeOfDayTrigger:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let id: String
     var startMinuteOfDay: Int
     var endMinuteOfDay: Int
@@ -83,7 +94,11 @@ struct TimeOfDayTrigger: Codable, Equatable, Identifiable {
 
 /// Fires while the user's frontmost application matches the bound
 /// bundle identifier.
-struct FrontmostAppTrigger: Codable, Equatable, Identifiable {
+nonisolated struct FrontmostAppTrigger:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let id: String
     var bundleIdentifier: String
 
@@ -98,12 +113,37 @@ struct FrontmostAppTrigger: Codable, Equatable, Identifiable {
 /// (rather than positional index) survives macOS's automatic space
 /// rearrangement based on most-recently-used apps. The common case is
 /// a fullscreen app on its own dedicated space.
-struct SpaceTrigger: Codable, Equatable, Identifiable {
+nonisolated struct SpaceTrigger:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let id: String
     var bundleIdentifier: String
 
     init(id: String = UUID().uuidString, bundleIdentifier: String) {
         self.id = id
         self.bundleIdentifier = bundleIdentifier
+    }
+}
+
+/// Fires only while the focused display is showing the exact Mission
+/// Control space captured by `spaceID`. Unlike `SpaceTrigger`, this does
+/// not depend on a particular app having a visible window in that space.
+///
+/// Space IDs come from the private SkyLight `CGSGetActiveSpace` API.
+/// macOS exposes a public space-change notification but no public space
+/// identity, so exact per-space profiles require this SPI.
+nonisolated struct ExactSpaceTrigger:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
+    let id: String
+    var spaceID: UInt64
+
+    init(id: String = UUID().uuidString, spaceID: UInt64) {
+        self.id = id
+        self.spaceID = spaceID
     }
 }

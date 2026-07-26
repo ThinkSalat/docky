@@ -30,6 +30,7 @@ final class WindowSwitcherService: ObservableObject {
     private var globalFlagsMonitor: Any?
     private var cancellables: Set<AnyCancellable> = []
     private var focusedPreviewTask: Task<Void, Never>?
+    private var instantFocusTask: Task<Void, Never>?
     private let forwardHotKeyID = EventHotKeyID(signature: OSType(0x444B5957), id: 1)
     private let reverseHotKeyID = EventHotKeyID(signature: OSType(0x444B5957), id: 2)
     private var reverseHotKeyRef: EventHotKeyRef?
@@ -142,11 +143,9 @@ final class WindowSwitcherService: ObservableObject {
 
         dismiss()
 
-        guard !usesInstantFocusPreview else {
-            return
+        Task {
+            _ = await WindowRegistry.shared.focus(selectedWindow)
         }
-
-        _ = WindowRegistry.shared.focus(selectedWindow)
     }
 
     func dismiss() {
@@ -208,15 +207,23 @@ final class WindowSwitcherService: ObservableObject {
 
     func minimizeSelectedWindow() {
         guard let window = selectedWindow else { return }
-        if WorkspaceService.shared.minimize(window: window) {
-            removeWindow(withIdentifier: window.windowIdentifier)
+        Task { [weak self] in
+            if await WorkspaceService.shared.minimize(window: window) {
+                self?.removeWindow(
+                    withIdentifier: window.windowIdentifier
+                )
+            }
         }
     }
 
     func closeSelectedWindow() {
         guard let window = selectedWindow else { return }
-        if WorkspaceService.shared.close(window: window) {
-            removeWindow(withIdentifier: window.windowIdentifier)
+        Task { [weak self] in
+            if await WorkspaceService.shared.close(window: window) {
+                self?.removeWindow(
+                    withIdentifier: window.windowIdentifier
+                )
+            }
         }
     }
 
@@ -225,7 +232,9 @@ final class WindowSwitcherService: ObservableObject {
         // Bypass WorkspaceService.zoom's focus side-effect: focusing the target
         // window would yank key status from the switcher overlay and break the
         // local key monitor, so subsequent shortcuts would stop working.
-        _ = WindowRegistry.shared.zoom(window)
+        Task {
+            _ = await WindowRegistry.shared.zoom(window)
+        }
     }
 
     func removeWindow(withIdentifier identifier: String) {
@@ -446,6 +455,8 @@ final class WindowSwitcherService: ObservableObject {
     private func cancelFocusedPreview() {
         focusedPreviewTask?.cancel()
         focusedPreviewTask = nil
+        instantFocusTask?.cancel()
+        instantFocusTask = nil
         WorkspaceService.shared.stopLiveFocusPreview()
         focusedPreview = nil
     }
@@ -475,7 +486,16 @@ final class WindowSwitcherService: ObservableObject {
             return
         }
 
-        _ = WorkspaceService.shared.focus(window: window)
+        instantFocusTask = Task { [weak self] in
+            _ = await WorkspaceService.shared.focus(window: window)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard self?.instantFocusTask?.isCancelled == false else {
+                    return
+                }
+                self?.instantFocusTask = nil
+            }
+        }
     }
 
     private func scheduleFocusedPreview(forWindowIdentifier identifier: String) {

@@ -10,9 +10,9 @@ struct PermissionsSettingsView: View {
 
     var body: some View {
         Form {
-            permissionSection(for: .userFolders)
             permissionSection(for: .finderAutomation)
             permissionSection(for: .accessibility)
+            permissionSection(for: .systemEventsAutomation)
             permissionSection(for: .screenCapture)
             permissionSection(for: .location)
             permissionSection(for: .calendar)
@@ -64,11 +64,10 @@ struct PermissionsSettingsView: View {
                         service.openSystemSettings(for: permission)
                     }
 
-                    if permission == .finderAutomation || permission == .accessibility || permission == .screenCapture || permission == .location || permission == .calendar || permission == .reminders {
-                        requestButton(for: permission)
-                    }
+                    requestButton(for: permission)
 
-                    if permission == .finderAutomation, service.finderAutomation != .notDetermined {
+                    if (permission == .finderAutomation || permission == .systemEventsAutomation),
+                       service.status(for: permission) != .notDetermined {
                         Button("Forget Status") {
                             service.clearAutomationStatus(for: permission)
                         }
@@ -81,11 +80,9 @@ struct PermissionsSettingsView: View {
 
     @ViewBuilder
     private func requestButton(for permission: Permission) -> some View {
-        if permission == .finderAutomation || permission == .accessibility || permission == .screenCapture || permission == .location || permission == .calendar || permission == .reminders {
-            Button(buttonTitle(for: permission)) {
-                Task {
-                    _ = await service.requestPermission(for: permission)
-                }
+        Button(buttonTitle(for: permission)) {
+            Task {
+                _ = await service.requestPermission(for: permission)
             }
         }
     }
@@ -108,7 +105,6 @@ struct PermissionsSettingsView: View {
 
     private func grantMethodText(for permission: Permission) -> String? {
         switch grantMethod(for: permission) {
-        case .fullDiskAccess: return "Full Disk Access"
         case .automation: return "Automation"
         case .accessibility: return "Accessibility"
         case .screenCapture: return "Screen Recording"
@@ -119,8 +115,6 @@ struct PermissionsSettingsView: View {
 
     private func grantMethod(for permission: Permission) -> GrantMethod? {
         switch permission {
-        case .userFolders:
-            return service.userFoldersGrantMethod
         case .finderAutomation:
             return service.finderAutomationGrantMethod
         case .systemEventsAutomation:
@@ -138,7 +132,6 @@ struct PermissionsSettingsView: View {
 
     private func buttonTitle(for permission: Permission) -> String {
         switch permission {
-        case .userFolders: return "Open System Settings"
         case .finderAutomation: return "Request Finder Access"
         case .systemEventsAutomation: return "Request System Events Access"
         case .accessibility: return "Request Accessibility Access"

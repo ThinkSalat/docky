@@ -100,7 +100,11 @@ struct StartMenuTile: Equatable {
     }
 }
 
-enum WidgetKind: Codable, Identifiable, Hashable {
+nonisolated enum WidgetKind:
+    Codable,
+    Identifiable,
+    Hashable,
+    Sendable {
     case calendar
     case calendarDate
     case reminders
@@ -110,10 +114,8 @@ enum WidgetKind: Codable, Identifiable, Hashable {
     case weather
     case search
     case photoFrame
-    /// Widget supplied by a community bundle loaded at startup. The
-    /// associated value is the plugin's stable identifier (e.g.
-    /// "com.example.MyWidget"); the live registration is owned by
-    /// ExternalWidgetRegistry.
+    /// Inert persistence marker for a legacy community widget. The associated
+    /// identifier is preserved so profiles round-trip without executing code.
     case external(String)
 
     nonisolated static let builtInCases: [WidgetKind] = [
@@ -185,7 +187,7 @@ enum WidgetKind: Codable, Identifiable, Hashable {
         self = kind
     }
 
-    var id: String { rawValue }
+    nonisolated var id: String { rawValue }
 
     nonisolated var title: String {
         switch self {
@@ -207,8 +209,8 @@ enum WidgetKind: Codable, Identifiable, Hashable {
             String(localized: "Search")
         case .photoFrame:
             String(localized: "Photo Frame")
-        case .external(let identifier):
-            ExternalWidgetRegistry.shared.metadata(for: identifier)?.displayName ?? identifier
+        case .external:
+            String(localized: "External Widget")
         }
     }
 
@@ -218,8 +220,8 @@ enum WidgetKind: Codable, Identifiable, Hashable {
             [.one]
         case .calendar, .reminders, .batteries, .systemStatus, .nowPlaying, .weather, .search, .photoFrame:
             TileSpan.allCases
-        case .external(let identifier):
-            ExternalWidgetRegistry.shared.metadata(for: identifier)?.supportedSpans ?? TileSpan.allCases
+        case .external:
+            TileSpan.allCases
         }
     }
 
@@ -229,8 +231,8 @@ enum WidgetKind: Codable, Identifiable, Hashable {
             WidgetExpansionExtent(widthTiles: 5, heightTiles: 2)
         case .calendar, .calendarDate, .reminders, .batteries, .systemStatus, .weather, .search, .photoFrame:
             .standard
-        case .external(let identifier):
-            ExternalWidgetRegistry.shared.metadata(for: identifier)?.expansionExtent ?? .standard
+        case .external:
+            .standard
         }
     }
 
@@ -245,20 +247,26 @@ enum WidgetKind: Codable, Identifiable, Hashable {
             true
         case .calendarDate, .search:
             false
-        case .external(let identifier):
-            ExternalWidgetRegistry.shared.metadata(for: identifier)?.isExpandable ?? false
+        case .external:
+            false
         }
     }
 }
 
-struct WidgetExpansionExtent: Equatable {
+nonisolated struct WidgetExpansionExtent: Equatable, Sendable {
     let widthTiles: Int
     let heightTiles: Int
 
-    static let standard = WidgetExpansionExtent(widthTiles: 3, heightTiles: 3)
+    nonisolated static let standard =
+        WidgetExpansionExtent(widthTiles: 3, heightTiles: 3)
 }
 
-enum TileSpan: Int, CaseIterable, Codable, Identifiable {
+nonisolated enum TileSpan:
+    Int,
+    CaseIterable,
+    Codable,
+    Identifiable,
+    Sendable {
     case one = 1
     case two = 2
     case three = 3
@@ -268,10 +276,14 @@ enum TileSpan: Int, CaseIterable, Codable, Identifiable {
     /// search bar, a wide weather rail, etc.).
     case four = 4
 
-    var id: Int { rawValue }
+    nonisolated var id: Int { rawValue }
 }
 
-struct WidgetPlacement: Codable, Equatable, Identifiable {
+nonisolated struct WidgetPlacement:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let kind: WidgetKind
     let ownerBundleIdentifier: String
     let span: TileSpan
@@ -281,7 +293,11 @@ struct WidgetPlacement: Codable, Equatable, Identifiable {
     }
 }
 
-struct AppWidgetDisplay: Codable, Equatable, Identifiable {
+nonisolated struct AppWidgetDisplay:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let bundleIdentifier: String
     let kind: WidgetKind
     let span: TileSpan

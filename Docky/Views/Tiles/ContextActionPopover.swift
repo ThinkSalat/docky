@@ -12,6 +12,7 @@ struct ContextAction: Identifiable {
         case action
         case submenu
         case lazySubmenu
+        case asyncLazySubmenu
         case customView
         case divider
     }
@@ -25,6 +26,7 @@ struct ContextAction: Identifiable {
     let isOn: Bool
     let children: [ContextAction]
     let childrenProvider: (() -> [ContextAction])?
+    let asyncChildrenProvider: (() async -> [ContextAction])?
     let handler: () -> Void
 
     static func action(
@@ -43,6 +45,7 @@ struct ContextAction: Identifiable {
             isOn: isOn,
             children: [],
             childrenProvider: nil,
+            asyncChildrenProvider: nil,
             handler: handler
         )
     }
@@ -57,6 +60,7 @@ struct ContextAction: Identifiable {
             isOn: false,
             children: children,
             childrenProvider: nil,
+            asyncChildrenProvider: nil,
             handler: {}
         )
     }
@@ -75,6 +79,26 @@ struct ContextAction: Identifiable {
             isOn: false,
             children: [],
             childrenProvider: childrenProvider,
+            asyncChildrenProvider: nil,
+            handler: {}
+        )
+    }
+
+    static func asyncLazySubmenu(
+        _ title: String,
+        image: NSImage? = nil,
+        childrenProvider: @escaping () async -> [ContextAction]
+    ) -> Self {
+        Self(
+            kind: .asyncLazySubmenu,
+            title: title,
+            image: image,
+            customView: nil,
+            isDestructive: false,
+            isOn: false,
+            children: [],
+            childrenProvider: nil,
+            asyncChildrenProvider: childrenProvider,
             handler: {}
         )
     }
@@ -89,6 +113,7 @@ struct ContextAction: Identifiable {
             isOn: false,
             children: [],
             childrenProvider: nil,
+            asyncChildrenProvider: nil,
             handler: {}
         )
     }
@@ -103,6 +128,7 @@ struct ContextAction: Identifiable {
             isOn: false,
             children: [],
             childrenProvider: nil,
+            asyncChildrenProvider: nil,
             handler: {}
         )
     }
@@ -141,13 +167,11 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
             preferredEdge: preferredEdge,
             onPresentationChanged: onPresentationChanged
         )
-        DispatchQueue.main.async {
-            context.coordinator.installIfNeeded(for: nsView)
-        }
+        context.coordinator.scheduleInstall(for: nsView)
     }
 
     static func dismantleNSView(_ nsView: AnchorView, coordinator: Coordinator) {
-        coordinator.uninstall()
+        coordinator.tearDown()
     }
 
     final class Coordinator: NSObject {
@@ -156,7 +180,9 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
         private var actionProvider: (NSEvent.ModifierFlags) -> [ContextAction]
         private var preferredEdge: NSRectEdge
         private var onPresentationChanged: (Bool) -> Void
-        private var isInterruptingAutohide = false
+        private var mainWindowInteractionLease: MainWindowInteractionLease?
+        private var installationGeneration = PresentationGeneration()
+        private var isTornDown = false
 
         init(
             actionProvider: @escaping (NSEvent.ModifierFlags) -> [ContextAction],
@@ -179,13 +205,21 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
             self.onPresentationChanged = onPresentationChanged
         }
 
-        func installIfNeeded(for anchorView: NSView) {
-            self.anchorView = anchorView
-
-            guard !actionProvider([]).isEmpty else {
-                uninstall()
-                return
+        func scheduleInstall(for anchorView: NSView) {
+            guard !isTornDown else { return }
+            let installation = installationGeneration.advance()
+            DispatchQueue.main.async { [weak self, weak anchorView] in
+                guard let self, let anchorView,
+                      !self.isTornDown,
+                      self.installationGeneration.isCurrent(installation) else {
+                    return
+                }
+                self.installIfNeeded(for: anchorView)
             }
+        }
+
+        private func installIfNeeded(for anchorView: NSView) {
+            self.anchorView = anchorView
 
             guard eventMonitor == nil else { return }
             eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
@@ -193,7 +227,13 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
             }
         }
 
-        func uninstall() {
+        func tearDown() {
+            isTornDown = true
+            _ = installationGeneration.advance()
+            removeInstallation()
+        }
+
+        private func removeInstallation() {
             if let eventMonitor {
                 NSEvent.removeMonitor(eventMonitor)
             }
@@ -201,6 +241,12 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
             endAutohideInterruption()
             eventMonitor = nil
             anchorView = nil
+        }
+
+        deinit {
+            if let eventMonitor {
+                NSEvent.removeMonitor(eventMonitor)
+            }
         }
 
         private func handleContextClick(_ event: NSEvent) -> NSEvent? {
@@ -235,15 +281,11 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
             beginAutohideInterruption(for: view)
             defer { endAutohideInterruption() }
 
-            let selector = NSSelectorFromString("_popUpMenuRelativeToRect:inView:preferredEdge:")
-            if menu.responds(to: selector) {
-                typealias Fn = @convention(c) (NSMenu, Selector, NSRect, NSView?, NSRectEdge) -> Void
-                let imp = menu.method(for: selector)
-                let fn = unsafeBitCast(imp, to: Fn.self)
-                fn(menu, selector, view.bounds, view, preferredEdge)
-                return
-            }
-
+            // Tahoe's private `_popUpMenuRelativeToRect:` implementation can
+            // create a 10-point-high cartouche after rapid Space transitions,
+            // leaving the entire menu rendered as a horizontal slit. The
+            // public API performs its own layout and screen-edge correction
+            // and remains stable across those transitions.
             menu.update()
             let anchor: NSPoint
             let anchorRect = view.bounds
@@ -263,15 +305,13 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
         }
 
         private func beginAutohideInterruption(for view: NSView) {
-            guard !isInterruptingAutohide else { return }
-            (view.window as? MainWindow)?.beginInteraction()
-            isInterruptingAutohide = true
+            guard mainWindowInteractionLease?.isActive != true else { return }
+            mainWindowInteractionLease =
+                (view.window as? MainWindow)?.acquireInteractionLease()
         }
 
         private func endAutohideInterruption() {
-            guard isInterruptingAutohide else { return }
-            (anchorView?.window as? MainWindow)?.endInteraction()
-            isInterruptingAutohide = false
+            mainWindowInteractionLease = nil
         }
 
         private func buildMenu(actions: [ContextAction]) -> NSMenu {
@@ -318,6 +358,42 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
                 objc_setAssociatedObject(submenu, &lazyMenuControllerKey, controller, .OBJC_ASSOCIATION_RETAIN)
                 item.submenu = submenu
                 menu.addItem(item)
+            case .asyncLazySubmenu:
+                let item = NSMenuItem(
+                    title: action.title,
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                item.image = thumbnailImage(action.image)
+                let submenu = NSMenu(title: action.title)
+                let provider = action.asyncChildrenProvider ?? { [] }
+                let controller = AsyncLazyMenuController(
+                    provider: provider
+                ) { [weak self] menu, children in
+                    guard let self else { return }
+                    menu.removeAllItems()
+                    for child in children {
+                        self.addMenuItem(for: child, to: menu)
+                    }
+                    if menu.items.isEmpty {
+                        let emptyItem = NSMenuItem(
+                            title: String(localized: "No Actions"),
+                            action: nil,
+                            keyEquivalent: ""
+                        )
+                        emptyItem.isEnabled = false
+                        menu.addItem(emptyItem)
+                    }
+                }
+                submenu.delegate = controller
+                objc_setAssociatedObject(
+                    submenu,
+                    &asyncLazyMenuControllerKey,
+                    controller,
+                    .OBJC_ASSOCIATION_RETAIN
+                )
+                item.submenu = submenu
+                menu.addItem(item)
             case .customView:
                 let item = NSMenuItem()
                 item.view = action.customView
@@ -342,6 +418,7 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
 }
 
 private var lazyMenuControllerKey: UInt8 = 0
+private var asyncLazyMenuControllerKey: UInt8 = 0
 
 private final class LazyMenuController: NSObject, NSMenuDelegate {
     private let provider: () -> [ContextAction]
@@ -357,6 +434,84 @@ private final class LazyMenuController: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         populate(menu, provider())
+    }
+}
+
+private final class AsyncLazyMenuController: NSObject, NSMenuDelegate {
+    /// More than one placeholder row keeps AppKit's initial submenu geometry
+    /// stable while asynchronous content is arriving. Replacing a one-row
+    /// tracking menu with a tall result was the source of the 10-point
+    /// horizontal-slit regression.
+    private static let loadingPlaceholderRowCount = 4
+
+    private let provider: () async -> [ContextAction]
+    private let populate: (NSMenu, [ContextAction]) -> Void
+    private var loadTask: Task<Void, Never>?
+    private var generation: UInt64 = 0
+    private var hasLoaded = false
+
+    init(
+        provider: @escaping () async -> [ContextAction],
+        populate: @escaping (NSMenu, [ContextAction]) -> Void
+    ) {
+        self.provider = provider
+        self.populate = populate
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard !hasLoaded, loadTask == nil else { return }
+
+        installStableLoadingItems(in: menu)
+
+        generation &+= 1
+        let requestGeneration = generation
+        let provider = provider
+        loadTask = Task { @MainActor [weak self, weak menu] in
+            let children = await provider()
+            guard let self,
+                  !Task.isCancelled,
+                  self.generation == requestGeneration,
+                  let menu else {
+                return
+            }
+            self.loadTask = nil
+            guard menu.supermenu != nil else {
+                return
+            }
+            self.hasLoaded = true
+            self.populate(menu, children)
+            // Force AppKit to discard the placeholder measurement before it
+            // paints the attached submenu. Both calls are public and avoid
+            // the stale cartouche geometry produced by private popup APIs.
+            menu.update()
+            _ = menu.size
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        generation &+= 1
+        loadTask?.cancel()
+        loadTask = nil
+        hasLoaded = false
+    }
+
+    private func installStableLoadingItems(in menu: NSMenu) {
+        menu.removeAllItems()
+        for index in 0..<Self.loadingPlaceholderRowCount {
+            let item = NSMenuItem(
+                title: index == 0
+                    ? String(localized: "Loading…")
+                    : " ",
+                action: nil,
+                keyEquivalent: ""
+            )
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+    }
+
+    deinit {
+        loadTask?.cancel()
     }
 }
 

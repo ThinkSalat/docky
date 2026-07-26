@@ -61,19 +61,6 @@ struct PermissionsView: View {
             guard !preference.frame.isEmpty else { return }
             onWindowFrameChange(preference.frame)
         }
-        .task(id: currentIndex) {
-            if (step == .finderAutomation || step == .location), status == .notDetermined {
-                _ = await service.requestPermission(for: step)
-            }
-
-            if step == .systemEventsAutomation,
-               status == .notDetermined,
-               service.status(for: .accessibility) == .granted {
-                _ = await service.requestPermission(for: step)
-            }
-
-            await pollUntilAdvance()
-        }
     }
 
     private var cardView: some View {
@@ -106,7 +93,7 @@ struct PermissionsView: View {
     private var bottomSection: some View {
         VStack(alignment: .leading, spacing: 24) {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Welcome to Docky")
+                Text("Docky Permissions")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.secondary)
 
@@ -206,14 +193,12 @@ struct PermissionsView: View {
             }
             .onboardingButtonStyle()
 
-            if step == .finderAutomation || step == .systemEventsAutomation || step == .screenCapture || step == .location {
-                requestButton
-            }
+            requestButton
         }
     }
 
     private var showsAppDragProxy: Bool {
-        step != .finderAutomation && step != .systemEventsAutomation && step != .location
+        step == .accessibility || step == .screenCapture
     }
 
     private var draggableAppProxy: some View {
@@ -285,7 +270,7 @@ struct PermissionsView: View {
 
     private var quitButton: some View {
         Button {
-            NSApp.terminate(nil)
+            dismissOnboarding()
         } label: {
             Image(systemName: "xmark")
                 .font(.system(size: 12, weight: .semibold))
@@ -299,7 +284,6 @@ struct PermissionsView: View {
 
     private var grantMethodLabel: String? {
         switch grantMethod {
-        case .fullDiskAccess: return "Full Disk Access"
         case .automation: return "Automation"
         case .accessibility: return "Accessibility"
         case .screenCapture: return "Screen Recording"
@@ -310,20 +294,16 @@ struct PermissionsView: View {
 
     @ViewBuilder
     private var requestButton: some View {
-        if step == .finderAutomation || step == .systemEventsAutomation || step == .screenCapture || step == .location {
-            Button(requestButtonTitle) {
-                Task {
-                    _ = await service.requestPermission(for: step)
-                }
+        Button(requestButtonTitle) {
+            Task {
+                _ = await service.requestPermission(for: step)
             }
-            .onboardingButtonStyle()
         }
+        .onboardingButtonStyle()
     }
 
     private var grantMethod: GrantMethod? {
         switch step {
-        case .userFolders:
-            return service.userFoldersGrantMethod
         case .finderAutomation:
             return service.finderAutomationGrantMethod
         case .accessibility:
@@ -345,8 +325,6 @@ struct PermissionsView: View {
             return "Open System Settings (Automation)"
         case .systemEventsAutomation:
             return "Open System Settings (Automation)"
-        case .userFolders:
-            return "Open System Settings (Full Disk Access)"
         case .accessibility:
             return "Open System Settings (Accessibility)"
         case .screenCapture:
@@ -374,8 +352,8 @@ struct PermissionsView: View {
             return "Request Calendar Access"
         case .reminders:
             return "Request Reminders Access"
-        case .userFolders, .accessibility:
-            return "Request Access"
+        case .accessibility:
+            return "Request Accessibility Access"
         }
     }
 
@@ -404,50 +382,15 @@ struct PermissionsView: View {
             dismissOnboarding()
         } else {
             currentIndex += 1
-            openNextStepSystemSettings()
         }
     }
 
     private func skipCurrentStep() {
-        service.markPermissionSkipped(step)
         advance()
-    }
-
-    private func openNextStepSystemSettings() {
-        guard !isDismissing else { return }
-
-        let nextStep = step
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !isDismissing, self.step == nextStep else { return }
-            onOpenSystemSettings(nextStep)
-        }
-    }
-
-    private func advanceIfReady() {
-        guard status == .granted else { return }
-        advance()
-    }
-
-    private func pollUntilAdvance() async {
-        advanceIfReady()
-
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else { return }
-
-            service.refresh()
-            if status == .granted {
-                advance()
-                return
-            }
-        }
     }
 
     private var heroGradient: [Color] {
         switch step {
-        case .userFolders:
-            return [Color(red: 0.29, green: 0.46, blue: 0.96), Color(red: 0.15, green: 0.14, blue: 0.48)]
         case .finderAutomation:
             return [Color(red: 0.27, green: 0.68, blue: 0.98), Color(red: 0.12, green: 0.31, blue: 0.68)]
         case .accessibility:
@@ -467,8 +410,6 @@ struct PermissionsView: View {
 
     private var stepSymbolName: String {
         switch step {
-        case .userFolders:
-            return "folder.badge.gearshape"
         case .finderAutomation:
             return "folder.badge.gearshape"
         case .accessibility:
@@ -499,8 +440,6 @@ struct PermissionsView: View {
 
     private var mediaCaption: String {
         switch step {
-        case .userFolders:
-            return "Preview pinned folders instantly"
         case .finderAutomation:
             return "Reveal and manage files in Finder"
         case .accessibility:
@@ -520,8 +459,6 @@ struct PermissionsView: View {
 
     private var mediaResourceName: String? {
         switch step {
-        case .userFolders:
-            return "folder-preview"
         case .finderAutomation:
             return "trash"
         case .accessibility:
@@ -544,11 +481,7 @@ struct PermissionsView: View {
             return "System Events access can be requested here now for curated menu-click actions. Accessibility should be enabled too, since UI scripting depends on both permissions."
         }
 
-        if step.isRequiredAtLaunch {
-            return "This permission unlocks a core Docky feature, but you can skip it for now and grant it later."
-        }
-
-        return "This permission unlocks an optional feature and can be granted later from Settings."
+        return "This permission unlocks a feature and can be granted later from Settings."
     }
 
     private var statusBadge: some View {

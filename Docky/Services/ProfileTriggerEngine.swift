@@ -22,6 +22,7 @@ final class ProfileTriggerEngine {
     private var minuteTimer: Timer?
     private var currentFrontmostBundleID: String?
     private var currentSpaceApps: Set<String> = []
+    private var currentExactSpaceID: UInt64 = 0
     /// id of the profile we activated automatically. Lets the user
     /// override us (manual pick) without us immediately reverting.
     private var lastAutoActivatedProfileID: String?
@@ -31,10 +32,23 @@ final class ProfileTriggerEngine {
     func start() {
         currentFrontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
+        currentExactSpaceID = ProfileTriggerEngine.activeSpaceID()
+        // Treat the profile that survived launch as the automation baseline.
+        // This lets a later manual choice be recognized as an override even
+        // when the launch profile already matched and no switch was needed.
+        lastAutoActivatedProfileID = profileService.activeProfileID
         observeFrontmostApp()
         observeActiveSpace()
         scheduleMinuteTick()
-        evaluate()
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(.spaces, "profileTriggerEngineStarted", fields: [
+            "spaceID": currentExactSpaceID,
+            "frontmostAppToken": diagnostics.token(currentFrontmostBundleID),
+            "spaceAppCount": currentSpaceApps.count,
+            "spaceAppTokens": currentSpaceApps.sorted().map(diagnostics.token),
+            "activeProfileToken": diagnostics.token(profileService.activeProfileID),
+        ])
+        evaluate(reason: "start")
     }
 
     func stop() {
@@ -80,7 +94,13 @@ final class ProfileTriggerEngine {
                 // Activating an app on the current space adds it to the
                 // set — refresh so space-by-app triggers stay accurate.
                 self.currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
-                self.evaluate()
+                let diagnostics = DiagnosticsTrace.shared
+                diagnostics.record(.spaces, "frontmostApplicationSignal", fields: [
+                    "spaceID": self.currentExactSpaceID,
+                    "frontmostAppToken": diagnostics.token(self.currentFrontmostBundleID),
+                    "spaceAppCount": self.currentSpaceApps.count,
+                ])
+                self.evaluate(reason: "frontmostApplication")
             }
             .store(in: &cancellables)
     }
@@ -90,10 +110,38 @@ final class ProfileTriggerEngine {
             .publisher(for: NSWorkspace.activeSpaceDidChangeNotification)
             .sink { [weak self] _ in
                 guard let self else { return }
+                let previousExactSpaceID = self.currentExactSpaceID
                 self.currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
-                self.evaluate()
+                self.currentExactSpaceID = ProfileTriggerEngine.activeSpaceID()
+                if self.currentExactSpaceID != 0,
+                   self.currentExactSpaceID != previousExactSpaceID {
+                    // A manual profile selection is an override for the
+                    // current desktop, not a permanent opt-out. Moving to a
+                    // different desktop re-enables its automatic mapping.
+                    self.lastAutoActivatedProfileID = self.profileService.activeProfileID
+                }
+                let snapshot = activeSpaceSnapshot()
+                let diagnostics = DiagnosticsTrace.shared
+                diagnostics.record(.spaces, "activeSpaceChanged", fields: [
+                    "previousSpaceID": previousExactSpaceID,
+                    "spaceID": self.currentExactSpaceID,
+                    "spaceType": snapshot.rawType.map(String.init) ?? "unknown",
+                    "fullscreen": snapshot.isFullscreen.map(String.init) ?? "unknown",
+                    "spaceAppCount": self.currentSpaceApps.count,
+                    "spaceAppTokens": self.currentSpaceApps.sorted().map(diagnostics.token),
+                    "activeProfileToken": diagnostics.token(self.profileService.activeProfileID),
+                    "autoBaselineProfileToken": diagnostics.token(self.lastAutoActivatedProfileID),
+                ])
+                self.evaluate(reason: "activeSpace")
             }
             .store(in: &cancellables)
+    }
+
+    /// Stable identifier for the Mission Control space on the focused
+    /// display. A zero result means SkyLight could not resolve a space and
+    /// deliberately matches no exact-space trigger.
+    static func activeSpaceID() -> UInt64 {
+        CGSGetActiveSpace(CGSMainConnectionID())
     }
 
     private func scheduleMinuteTick() {
@@ -117,19 +165,40 @@ final class ProfileTriggerEngine {
     }
 
     private func tickMinute() {
-        evaluate()
+        evaluate(reason: "minuteBoundary")
         let timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.evaluate()
+                self?.evaluate(reason: "minuteTimer")
             }
         }
         minuteTimer = timer
     }
 
-    private func evaluate() {
+    private func evaluate(reason: String) {
+        let diagnostics = DiagnosticsTrace.shared
         let matches = bestMatch()
-        guard let matched = matches else { return }
-        if matched.id == profileService.activeProfileID { return }
+        guard let match = matches else {
+            diagnostics.record(.profiles, "profileTriggerEvaluated", fields: [
+                "reason": reason,
+                "decision": "noMatch",
+                "spaceID": currentExactSpaceID,
+                "activeProfileToken": diagnostics.token(profileService.activeProfileID),
+                "autoBaselineProfileToken": diagnostics.token(lastAutoActivatedProfileID),
+            ])
+            return
+        }
+        let matched = match.profile
+        if matched.id == profileService.activeProfileID {
+            diagnostics.record(.profiles, "profileTriggerEvaluated", fields: [
+                "reason": reason,
+                "decision": "alreadyActive",
+                "specificity": match.specificity,
+                "spaceID": currentExactSpaceID,
+                "matchedProfileToken": diagnostics.token(matched.id),
+                "activeProfileToken": diagnostics.token(profileService.activeProfileID),
+            ])
+            return
+        }
 
         // Only auto-switch if the previously-active profile was the one
         // we set automatically (or initial state). If the user manually
@@ -140,17 +209,36 @@ final class ProfileTriggerEngine {
             // User overrode us — don't fight back. We'll resume on the
             // next manual switch back to one of our auto profiles, or
             // when the engine restarts.
+            diagnostics.record(.profiles, "profileTriggerEvaluated", fields: [
+                "reason": reason,
+                "decision": "manualOverrideSuppressedSwitch",
+                "specificity": match.specificity,
+                "spaceID": currentExactSpaceID,
+                "matchedProfileToken": diagnostics.token(matched.id),
+                "activeProfileToken": diagnostics.token(profileService.activeProfileID),
+                "autoBaselineProfileToken": diagnostics.token(lastAutoActivatedProfileID),
+            ])
             return
         }
 
-        profileService.setActiveProfile(id: matched.id)
+        diagnostics.record(.profiles, "profileTriggerEvaluated", fields: [
+            "reason": reason,
+            "decision": "switch",
+            "specificity": match.specificity,
+            "spaceID": currentExactSpaceID,
+            "matchedProfileToken": diagnostics.token(matched.id),
+            "activeProfileToken": diagnostics.token(profileService.activeProfileID),
+            "autoBaselineProfileToken": diagnostics.token(lastAutoActivatedProfileID),
+        ])
+        profileService.setActiveProfile(id: matched.id, source: .trigger)
         lastAutoActivatedProfileID = matched.id
     }
 
-    private func bestMatch() -> DockProfile? {
+    private func bestMatch() -> (profile: DockProfile, specificity: Int)? {
         let now = Date()
         let frontmost = currentFrontmostBundleID
         let spaceApps = currentSpaceApps
+        let exactSpaceID = currentExactSpaceID
 
         struct Match {
             let profile: DockProfile
@@ -161,7 +249,13 @@ final class ProfileTriggerEngine {
         for profile in profileService.profiles {
             var profileBest: Int?
             for trigger in profile.triggers {
-                guard ProfileTriggerEngine.trigger(trigger, matches: now, frontmost: frontmost, spaceApps: spaceApps) else { continue }
+                guard ProfileTriggerEngine.trigger(
+                    trigger,
+                    matches: now,
+                    frontmost: frontmost,
+                    spaceApps: spaceApps,
+                    exactSpaceID: exactSpaceID
+                ) else { continue }
                 if profileBest.map({ trigger.specificity > $0 }) ?? true {
                     profileBest = trigger.specificity
                 }
@@ -178,14 +272,16 @@ final class ProfileTriggerEngine {
                 best = Match(profile: profile, specificity: specificity)
             }
         }
-        return best?.profile
+        guard let best else { return nil }
+        return (best.profile, best.specificity)
     }
 
     private static func trigger(
         _ trigger: ProfileTrigger,
         matches now: Date,
         frontmost: String?,
-        spaceApps: Set<String>
+        spaceApps: Set<String>,
+        exactSpaceID: UInt64
     ) -> Bool {
         switch trigger {
         case .timeOfDay(let t):
@@ -194,6 +290,8 @@ final class ProfileTriggerEngine {
             return frontmost == t.bundleIdentifier
         case .space(let t):
             return spaceApps.contains(t.bundleIdentifier)
+        case .exactSpace(let t):
+            return exactSpaceID != 0 && exactSpaceID == t.spaceID
         }
     }
 }

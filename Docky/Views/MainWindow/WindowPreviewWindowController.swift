@@ -28,8 +28,7 @@ final class WindowPreviewWindowController: NSWindowController, ObservableObject 
     private var currentTileID: String?
     private var currentBundleIdentifier: String?
     private var isPreviewHovered = false
-    private var isHoldingDockVisible = false
-    private weak var heldMainWindow: MainWindow?
+    private var mainWindowInteractionLease: MainWindowInteractionLease?
     private var pendingDismissTask: Task<Void, Never>?
     private var dismissAnimationTask: Task<Void, Never>?
 
@@ -94,6 +93,7 @@ final class WindowPreviewWindowController: NSWindowController, ObservableObject 
             activeSourceTileID = sourceTileID
             pendingDismissTask?.cancel()
             pendingDismissTask = nil
+            beginDockVisibilityHoldIfNeeded()
             return true
         }
 
@@ -153,7 +153,6 @@ final class WindowPreviewWindowController: NSWindowController, ObservableObject 
         pendingDismissTask?.cancel()
         pendingDismissTask = nil
         isPreviewHovered = false
-        endDockVisibilityHoldIfNeeded()
         currentTileID = nil
         currentBundleIdentifier = nil
         activeSourceTileID = nil
@@ -164,6 +163,7 @@ final class WindowPreviewWindowController: NSWindowController, ObservableObject 
         // it in the completion handler so the user sees a real fade-out.
 
         guard let window, window.isVisible else {
+            endDockVisibilityHoldIfNeeded()
             WindowPreviewService.shared.dismiss()
             close()
             return
@@ -182,6 +182,7 @@ final class WindowPreviewWindowController: NSWindowController, ObservableObject 
             }
             if Task.isCancelled { return }
             guard self.currentTileID == nil else { return }
+            self.endDockVisibilityHoldIfNeeded()
             WindowPreviewService.shared.dismiss()
             self.close()
         }
@@ -223,25 +224,22 @@ final class WindowPreviewWindowController: NSWindowController, ObservableObject 
     /// Tap-to-confirm: tear down the preview and focus the chosen window.
     func confirm(_ window: AppWindow) {
         dismissCurrent()
-        _ = WorkspaceService.shared.focus(window: window)
+        Task {
+            _ = await WorkspaceService.shared.focus(window: window)
+        }
     }
 
     var isShowing: Bool { window?.isVisible == true }
     var presentedSourceTileID: String? { currentTileID }
 
     private func beginDockVisibilityHoldIfNeeded() {
-        guard !isHoldingDockVisible else { return }
+        guard mainWindowInteractionLease?.isActive != true else { return }
         guard let mainWindow = NSApp.windows.compactMap({ $0 as? MainWindow }).first else { return }
-        mainWindow.beginInteraction()
-        heldMainWindow = mainWindow
-        isHoldingDockVisible = true
+        mainWindowInteractionLease = mainWindow.acquireInteractionLease()
     }
 
     private func endDockVisibilityHoldIfNeeded() {
-        guard isHoldingDockVisible else { return }
-        heldMainWindow?.endInteraction()
-        heldMainWindow = nil
-        isHoldingDockVisible = false
+        mainWindowInteractionLease = nil
     }
 
     /// Positions the preview window against the inward edge of the dock so
@@ -439,6 +437,7 @@ private struct WindowPreviewCard: View {
 
     @ObservedObject private var preview = WindowPreviewService.shared
     @ObservedObject private var workspace = WorkspaceService.shared
+    @Bindable private var preferences = DockyPreferences.shared
     @State private var isPreviewHovered = false
     @State private var isMoreMenuPresented = false
 
@@ -557,7 +556,9 @@ private struct WindowPreviewCard: View {
         var actions: [ContextAction] = [
             .action(String(localized: "Focus Window")) {
                 dismiss()
-                _ = workspace.focus(window: window)
+                Task {
+                    _ = await workspace.focus(window: window)
+                }
             },
             .divider,
         ]
@@ -565,8 +566,12 @@ private struct WindowPreviewCard: View {
         actions.append(contentsOf: [
             .divider,
             .action(String(localized: "Close Window"), isDestructive: true) {
-                if workspace.close(window: window) {
-                    preview.removeWindow(withIdentifier: window.windowIdentifier)
+                Task {
+                    if await workspace.close(window: window) {
+                        preview.removeWindow(
+                            withIdentifier: window.windowIdentifier
+                        )
+                    }
                 }
             },
             .divider,
@@ -651,6 +656,7 @@ private struct WindowPreviewListRow: View {
 
     @ObservedObject private var preview = WindowPreviewService.shared
     @ObservedObject private var workspace = WorkspaceService.shared
+    @Bindable private var preferences = DockyPreferences.shared
 
     private let iconSize: CGFloat = 28
 
@@ -668,9 +674,23 @@ private struct WindowPreviewListRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(nsImage: IconCacheService.shared.icon(forBundleIdentifier: window.bundleIdentifier))
-                .resizable()
-                .interpolation(.high)
+            CachedAsyncAppImage(
+                bundleIdentifier: window.bundleIdentifier,
+                overrideURL: preferences
+                    .effectiveAppIconOverrideURL(
+                        forBundleIdentifier: window.bundleIdentifier
+                    ),
+                placeholder: {
+                    Image(systemName: "app.fill")
+                        .resizable()
+                        .padding(4)
+                        .foregroundStyle(.secondary)
+                }
+            ) { image in
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+            }
                 .frame(width: iconSize, height: iconSize)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -726,7 +746,9 @@ private struct WindowPreviewListRow: View {
         var actions: [ContextAction] = [
             .action(String(localized: "Focus Window")) {
                 dismiss()
-                _ = workspace.focus(window: window)
+                Task {
+                    _ = await workspace.focus(window: window)
+                }
             },
             .divider,
         ]
@@ -734,8 +756,12 @@ private struct WindowPreviewListRow: View {
         actions.append(contentsOf: [
             .divider,
             .action(String(localized: "Close Window"), isDestructive: true) {
-                if workspace.close(window: window) {
-                    preview.removeWindow(withIdentifier: window.windowIdentifier)
+                Task {
+                    if await workspace.close(window: window) {
+                        preview.removeWindow(
+                            withIdentifier: window.windowIdentifier
+                        )
+                    }
                 }
             },
             .divider,

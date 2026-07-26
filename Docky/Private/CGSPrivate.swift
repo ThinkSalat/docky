@@ -22,6 +22,26 @@ func CGSMainConnectionID() -> CGSConnectionID
 @_silgen_name("CGSGetActiveSpace")
 func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
 
+// Returns 0 for a regular desktop Space and 4 for a native fullscreen
+// or tiled-window Space on current macOS releases.
+@_silgen_name("CGSSpaceGetType")
+private func CGSSpaceGetType(_ connection: CGSConnectionID, _ space: UInt64) -> Int32
+
+func activeSpaceSnapshot() -> ActiveSpaceSnapshot {
+    let connection = CGSMainConnectionID()
+    let spaceID = CGSGetActiveSpace(connection)
+    guard spaceID != 0 else {
+        return .unknown
+    }
+
+    let rawType = CGSSpaceGetType(connection, spaceID)
+    return ActiveSpaceSnapshot(spaceID: spaceID, rawType: rawType)
+}
+
+func activeSpaceFullscreenState() -> Bool? {
+    activeSpaceSnapshot().isFullscreen
+}
+
 // Returns the ordered list of spaces per managed display. Each element is
 // a dictionary with `Display Identifier` and `Spaces` keys; `Spaces` is
 // an ordered array of `{id64, uuid, type, …}` dicts. We use it to resolve
@@ -29,11 +49,78 @@ func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
 @_silgen_name("CGSCopyManagedDisplaySpaces")
 func CGSCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> Unmanaged<CFArray>?
 
+/// Returns the current Mission Control Space for the physical display backing
+/// `screen`. Unlike `CGSGetActiveSpace`, this does not accidentally report the
+/// focused display when Docky is configured for a different display.
+///
+/// `nil` fullscreen state is intentional when SkyLight's private schema cannot
+/// be mapped unambiguously. Callers should retain their geometry fallback.
+func activeSpaceSnapshot(for screen: NSScreen?) -> ActiveSpaceSnapshot {
+    guard let screen,
+          let displayID = screen.deviceDescription[
+              NSDeviceDescriptionKey("NSScreenNumber")
+          ] as? CGDirectDisplayID
+    else {
+        return .unknown
+    }
+
+    let connection = CGSMainConnectionID()
+    guard let rawDisplays = CGSCopyManagedDisplaySpaces(connection)?
+        .takeRetainedValue() as? [[String: Any]]
+    else {
+        return .unknown
+    }
+
+    let records = rawDisplays.compactMap(managedDisplaySpaceRecord)
+    let targetUUID = CGDisplayCreateUUIDFromDisplayID(displayID)
+        .map { CFUUIDCreateString(nil, $0.takeRetainedValue()) as String }
+    guard let resolved = DisplaySpaceSnapshotResolver.resolve(
+        records: records,
+        targetDisplayUUID: targetUUID,
+        targetIsMainDisplay: displayID == CGMainDisplayID()
+    ) else {
+        return .unknown
+    }
+
+    if resolved.rawType == nil, resolved.spaceID != 0 {
+        return ActiveSpaceSnapshot(
+            spaceID: resolved.spaceID,
+            rawType: CGSSpaceGetType(connection, resolved.spaceID)
+        )
+    }
+    return resolved
+}
+
+private func managedDisplaySpaceRecord(
+    _ display: [String: Any]
+) -> ManagedDisplaySpaceRecord? {
+    guard let displayIdentifier = display["Display Identifier"] as? String else {
+        return nil
+    }
+    let currentSpace = (display["Current Space"] as? [String: Any])
+        ?? (display["Collapsed Space"] as? [String: Any])
+    guard let currentSpace,
+          let spaceID = (currentSpace["id64"] as? NSNumber)?.uint64Value,
+          spaceID != 0
+    else {
+        return nil
+    }
+    let rawType = (currentSpace["type"] as? NSNumber)?.int32Value
+    return ManagedDisplaySpaceRecord(
+        displayIdentifier: displayIdentifier,
+        spaceID: spaceID,
+        rawType: rawType
+    )
+}
+
 // Returns the system CGWindowID backing an AX window element. Preferred over
 // the AXWindowNumber attribute, which some apps populate with their own
 // internal IDs rather than the system window number.
 @_silgen_name("_AXUIElementGetWindow") @discardableResult
-func _AXUIElementGetWindow(_ element: AXUIElement, _ wid: inout CGWindowID) -> AXError
+nonisolated func _AXUIElementGetWindow(
+    _ element: AXUIElement,
+    _ wid: inout CGWindowID
+) -> AXError
 
 @_silgen_name("CGSSetWindowBackgroundBlurRadius")
 func CGSSetWindowBackgroundBlurRadius(
@@ -96,15 +183,34 @@ func CGSSetWindowAlpha(
 
 // MARK: - SkyLight Process Switching (SLPS)
 
-struct ProcessSerialNumber {
+nonisolated struct ProcessSerialNumber {
     var highLongOfPSN: UInt32 = 0
     var lowLongOfPSN: UInt32 = 0
 }
 
 @_silgen_name("GetProcessForPID")
-func GetProcessForPID(_ pid: pid_t, _ psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+nonisolated func GetProcessForPID(
+    _ pid: pid_t,
+    _ psn: UnsafeMutablePointer<ProcessSerialNumber>
+) -> OSStatus
 
-enum SLPSMode: UInt32 {
+@_silgen_name("ShowHideProcess")
+private func ShowHideProcess(
+    _ psn: UnsafePointer<ProcessSerialNumber>,
+    _ visible: UInt8
+) -> Int16
+
+/// Process Manager fallback for visibility changes. `NSRunningApplication`
+/// can refuse `hide()` for another process when Docky's Accessibility grant
+/// is stale, even though the classic process-level operation still succeeds.
+@discardableResult
+func setProcessVisible(pid: pid_t, visible: Bool) -> Bool {
+    var psn = ProcessSerialNumber()
+    guard GetProcessForPID(pid, &psn) == noErr else { return false }
+    return ShowHideProcess(&psn, visible ? 1 : 0) == noErr
+}
+
+nonisolated enum SLPSMode: UInt32 {
     case allWindows = 0x100
     case userGenerated = 0x200
     case noWindows = 0x400
@@ -121,13 +227,15 @@ private typealias SLPSPostEventRecordToType = @convention(c) (
     UnsafeMutablePointer<UInt8>
 ) -> CGError
 
-private var skyLightHandle: UnsafeMutableRawPointer?
-private var setFrontProcessPtr: SLPSSetFrontProcessWithOptionsType?
-private var postEventRecordPtr: SLPSPostEventRecordToType?
+nonisolated(unsafe) private var skyLightHandle: UnsafeMutableRawPointer?
+nonisolated(unsafe) private var setFrontProcessPtr:
+    SLPSSetFrontProcessWithOptionsType?
+nonisolated(unsafe) private var postEventRecordPtr:
+    SLPSPostEventRecordToType?
 
-// Single-threaded-by-convention: focus paths run on main, so the lazy load
-// doesn't need a lock.
-private func loadSkyLightFunctions() {
+// Single-threaded-by-convention: window focus paths run on the serialized AX
+// worker, so the lazy load does not need a lock.
+nonisolated private func loadSkyLightFunctions() {
     guard skyLightHandle == nil else { return }
 
     let skyLightPath = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
@@ -143,7 +251,7 @@ private func loadSkyLightFunctions() {
 }
 
 @discardableResult
-func _SLPSSetFrontProcessWithOptions(
+nonisolated func _SLPSSetFrontProcessWithOptions(
     _ psn: UnsafeMutablePointer<ProcessSerialNumber>,
     _ wid: CGWindowID,
     _ mode: SLPSMode.RawValue
@@ -154,7 +262,7 @@ func _SLPSSetFrontProcessWithOptions(
 }
 
 @discardableResult
-func SLPSPostEventRecordTo(
+nonisolated func SLPSPostEventRecordTo(
     _ psn: UnsafeMutablePointer<ProcessSerialNumber>,
     _ bytes: UnsafeMutablePointer<UInt8>
 ) -> CGError {
@@ -193,7 +301,10 @@ func CoreDockSendNotification(_ message: String) {
     fn(message as CFString, 0)
 }
 
-func slpsMakeKeyWindow(psn: inout ProcessSerialNumber, windowID: CGWindowID) {
+nonisolated func slpsMakeKeyWindow(
+    psn: inout ProcessSerialNumber,
+    windowID: CGWindowID
+) {
     var bytes = [UInt8](repeating: 0, count: 0xF8)
     bytes[0x04] = 0xF8
     bytes[0x3A] = 0x10

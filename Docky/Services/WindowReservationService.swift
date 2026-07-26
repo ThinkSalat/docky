@@ -27,10 +27,32 @@ final class WindowReservationService {
 
     private var cancellables: Set<AnyCancellable> = []
     private var registrySubscription: AnyCancellable?
+    private var scanTask: Task<Void, Never>?
     private var windowCooldowns: [WindowID: Date] = [:]
+    private var inFlightWindowIDs: Set<WindowID> = []
+    private var activationState = WindowReservationActivationState()
+    private var lastActivationSignature: String?
+    private var lastScanGate: String?
+    private var lastScanSummary: String?
     private let cooldownInterval: TimeInterval = 0.25
     private let matchTolerance: CGFloat = 1
     private let edgeTolerance: CGFloat = 2
+
+    private lazy var accessibilityMonitor =
+        WindowReservationPermissionEventMonitor(
+            events:
+                NSWorkspace.shared.notificationCenter
+                .publisher(
+                    for: NSWorkspace.didActivateApplicationNotification
+                )
+                .receive(on: DispatchQueue.main)
+                .map { _ in () }
+                .eraseToAnyPublisher(),
+            onEvent: {
+                _ = PermissionsService.shared
+                    .refreshAccessibilityStatus()
+            }
+        )
 
     private enum DockSide { case top, bottom, left, right }
 
@@ -59,11 +81,42 @@ final class WindowReservationService {
     }
 
     private func updateActivation(mode: MaximizedWindowBehavior, status: PermissionStatus) {
-        let shouldBeActive = (mode == .resizeWindow) && (status == .granted)
-        if shouldBeActive {
-            attachIfNeeded()
-        } else {
+        let transition =
+            WindowReservationActivationPolicy.reduce(
+                current: activationState,
+                resizeWindowsSelected: mode == .resizeWindow,
+                accessibilityGranted: status == .granted
+            )
+        activationState = transition.state
+        let signature =
+            "\(mode)|\(status)|"
+            + "\(transition.state.reservationActive)|"
+            + "\(transition.state.accessibilityMonitorActive)"
+        if signature != lastActivationSignature {
+            lastActivationSignature = signature
+            DiagnosticsTrace.shared.record(.windows, "reservationActivationChanged", fields: [
+                "mode": String(describing: mode),
+                "accessibility": String(describing: status),
+                "active": transition.state.reservationActive,
+                "accessibilityMonitorActive":
+                    transition.state.accessibilityMonitorActive,
+            ])
+        }
+
+        // Stop obsolete work before starting its replacement. In particular,
+        // leaving Resize Windows drops its capability monitor before the
+        // AX-backed reservation subscription is detached.
+        if transition.accessibilityMonitorChange == .stop {
+            accessibilityMonitor.stop()
+        }
+        if transition.reservationChange == .stop {
             detach()
+        }
+        if transition.accessibilityMonitorChange == .start {
+            accessibilityMonitor.start()
+        }
+        if transition.reservationChange == .start {
+            attachIfNeeded()
         }
     }
 
@@ -72,31 +125,66 @@ final class WindowReservationService {
         registrySubscription = registry.$windows
             .receive(on: DispatchQueue.main)
             .sink { [weak self] windows in
-                self?.scan(windows: windows)
+                guard let self else { return }
+                scanTask?.cancel()
+                scanTask = Task { @MainActor [weak self] in
+                    await self?.scan(windows: windows)
+                }
             }
     }
 
     private func detach() {
         registrySubscription?.cancel()
         registrySubscription = nil
+        scanTask?.cancel()
+        scanTask = nil
         windowCooldowns.removeAll()
     }
 
-    private func scan(windows: [AppWindow]) {
-        guard let mainWindow = NSApp.windows.compactMap({ $0 as? MainWindow }).first,
-              let dockyScreen = mainWindow.screen,
-              let dockyFrame = mainWindow.currentReservationFrame,
-              let primaryScreenHeight = NSScreen.screens.first?.frame.height
-        else { return }
+    private func scan(windows: [AppWindow]) async {
+        guard !Task.isCancelled else { return }
+        guard let mainWindow = NSApp.windows.compactMap({ $0 as? MainWindow }).first else {
+            recordScanGate("mainWindowUnavailable", windowCount: windows.count)
+            return
+        }
+        guard let dockyScreen = mainWindow.screen else {
+            recordScanGate("dockyScreenUnavailable", windowCount: windows.count)
+            return
+        }
+        guard let dockyFrame = mainWindow.currentReservationFrame else {
+            recordScanGate("reservationFrameUnavailable", windowCount: windows.count)
+            return
+        }
+        guard let primaryScreenHeight = NSScreen.screens.first?.frame.height else {
+            recordScanGate("primaryScreenUnavailable", windowCount: windows.count)
+            return
+        }
 
         let visibleFrame = dockyScreen.visibleFrame
-        guard let dockySide = side(of: dockyFrame, on: visibleFrame) else { return }
+        guard let dockySide = side(of: dockyFrame, on: visibleFrame) else {
+            recordScanGate("dockyNotEdgeAnchored", windowCount: windows.count)
+            return
+        }
+        recordScanGate("ready", windowCount: windows.count)
 
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let now = Date()
+        var cooldownCount = 0
+        var sameScreenCount = 0
+        var intersectingCount = 0
+        var candidateCount = 0
+        var attemptedCount = 0
+        var succeededCount = 0
 
         for window in windows where window.processIdentifier != ownPID {
-            if let until = windowCooldowns[window.id], now < until { continue }
+            guard !Task.isCancelled else { return }
+            guard !inFlightWindowIDs.contains(window.id) else {
+                continue
+            }
+            if let until = windowCooldowns[window.id], now < until {
+                cooldownCount += 1
+                continue
+            }
 
             guard let axFrame = window.frame else { continue }
             // WindowRegistry returns AX-space frames (flipped Y, origin at the
@@ -106,13 +194,17 @@ final class WindowReservationService {
 
             // Only act on windows on the same screen as Docky.
             guard let windowScreen = screenContaining(nsFrame), windowScreen == dockyScreen else { continue }
+            sameScreenCount += 1
 
             // Tile/maximize signature: window intersects Docky AND is anchored
             // to ≥2 edges of the visible frame. This catches full maximize (4
             // flush edges), half tiles (3), and quarter tiles (2) without
             // resizing free-floating windows that happen to overlap Docky.
             guard nsFrame.intersects(dockyFrame) else { continue }
-            guard flushEdgeCount(of: nsFrame, against: visibleFrame) >= 2 else { continue }
+            intersectingCount += 1
+            let flushEdges = flushEdgeCount(of: nsFrame, against: visibleFrame)
+            guard flushEdges >= 2 else { continue }
+            candidateCount += 1
 
             // Push the window off Docky's strip.
             let nsTarget = pushAway(nsFrame, from: dockyFrame, on: dockySide)
@@ -123,11 +215,63 @@ final class WindowReservationService {
 
             // AX setters take flipped-Y coordinates; convert before applying.
             let axTarget = flipY(nsTarget, primaryHeight: primaryScreenHeight)
-            let succeeded = registry.resize(window, to: axTarget)
+            let diagnostics = DiagnosticsTrace.shared
+            diagnostics.record(.windows, "reservationResizeCandidate", fields: [
+                "windowToken": diagnostics.token(window.windowIdentifier),
+                "appToken": diagnostics.token(window.bundleIdentifier),
+                "dockSide": String(describing: dockySide),
+                "flushEdgeCount": flushEdges,
+                "windowFrame": NSStringFromRect(nsFrame),
+                "dockFrame": NSStringFromRect(dockyFrame),
+                "targetFrame": NSStringFromRect(nsTarget),
+            ])
+            attemptedCount += 1
+            inFlightWindowIDs.insert(window.id)
+            let succeeded = await registry.resize(window, to: axTarget)
+            inFlightWindowIDs.remove(window.id)
+            diagnostics.record(.windows, "reservationResizeResult", fields: [
+                "windowToken": diagnostics.token(window.windowIdentifier),
+                "succeeded": succeeded,
+            ])
             if succeeded {
-                windowCooldowns[window.id] = now.addingTimeInterval(cooldownInterval)
+                succeededCount += 1
+                windowCooldowns[window.id] = Date().addingTimeInterval(
+                    cooldownInterval
+                )
             }
+            guard !Task.isCancelled else { return }
         }
+
+        let summary = [
+            windows.count,
+            cooldownCount,
+            sameScreenCount,
+            intersectingCount,
+            candidateCount,
+            attemptedCount,
+            succeededCount,
+        ].map(String.init).joined(separator: "|")
+        if summary != lastScanSummary {
+            lastScanSummary = summary
+            DiagnosticsTrace.shared.record(.windows, "reservationScanSummary", fields: [
+                "windowCount": windows.count,
+                "cooldownCount": cooldownCount,
+                "sameScreenCount": sameScreenCount,
+                "intersectingCount": intersectingCount,
+                "candidateCount": candidateCount,
+                "attemptedCount": attemptedCount,
+                "succeededCount": succeededCount,
+            ])
+        }
+    }
+
+    private func recordScanGate(_ gate: String, windowCount: Int) {
+        guard gate != lastScanGate else { return }
+        lastScanGate = gate
+        DiagnosticsTrace.shared.record(.windows, "reservationScanGate", fields: [
+            "gate": gate,
+            "windowCount": windowCount,
+        ])
     }
 
     /// Flips a rect between AX (top-left origin, Y grows down) and NSScreen

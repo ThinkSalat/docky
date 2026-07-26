@@ -172,14 +172,20 @@ struct FolderFanView: View {
                     // animation modifier below.
                     .opacity(model.isExpanded ? 1 : 0)
 
-                // Use the same `previewIcon` path the grid popover
-                // and folder stack thumbnails go through — that's
-                // the one that returns a QuickLook content preview
-                // for documents/images and falls back to the system
-                // icon for everything else.
-                Image(nsImage: IconCacheService.shared.previewIcon(forFileURL: url))
-                    .resizable()
-                    .interpolation(.high)
+                // Show a generic document immediately and resolve a cold
+                // preview through the shared worker so opening a fan never
+                // blocks its animation on image/LaunchServices I/O.
+                CachedAsyncFileImage(
+                    url: url,
+                    placeholder: {
+                        Image(systemName: "doc.fill")
+                            .resizable()
+                    }
+                ) { image in
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                }
                     .aspectRatio(contentMode: .fit)
                     .frame(width: iconSize, height: iconSize)
                     // Shadow only renders in the expanded state. At
@@ -273,7 +279,10 @@ struct FolderFanView: View {
     }
 
     private func displayName(for url: URL) -> String {
-        (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? url.lastPathComponent
+        FolderAccessService.shared.cachedMetadata(
+            for: url,
+            in: folderURL
+        )?.displayName ?? url.lastPathComponent
     }
 
     /// Y offset for the fan's collapsed-onto-tile state. Matches the
@@ -337,9 +346,9 @@ struct FolderFanPresenter: NSViewRepresentable {
         )
 
         if isPresented {
-            DispatchQueue.main.async {
-                context.coordinator.present(relativeTo: nsView)
-            }
+            context.coordinator.schedulePresentation(
+                relativeTo: nsView
+            )
         } else {
             context.coordinator.dismiss()
         }
@@ -366,14 +375,14 @@ struct FolderFanPresenter: NSViewRepresentable {
         private var items: [URL] = []
         var isPresented: Binding<Bool>
         private weak var window: NSWindow?
-        // Weak reference to the dock window so we can pair
-        // `beginInteraction()` (in `present`) with `endInteraction()`
-        // (in `tearDown`) and keep auto-hide deferred while the fan
-        // is on screen — same behavior as the grid popover and the
-        // folder list menu.
-        private weak var dockMainWindow: MainWindow?
-        private var isHoldingDockVisible = false
+        // Independently owned RAII hold keeps auto-hide deferred while the fan
+        // is on screen, without relying on the anchor or dock window surviving
+        // until teardown.
+        private var mainWindowInteractionLease: MainWindowInteractionLease?
         private var animationModel: FanAnimationModel?
+        private var presentationGeneration = PresentationGeneration()
+        private var presentationIntentGeneration =
+            PresentationGeneration()
         private var isClosing = false
         private var closeWorkItem: DispatchWorkItem?
         private var globalMonitor: Any?
@@ -390,19 +399,48 @@ struct FolderFanPresenter: NSViewRepresentable {
             self.isPresented = isPresented
         }
 
-        func present(relativeTo anchor: NSView) {
-            guard window == nil, let anchorWindow = anchor.window else { return }
+        func schedulePresentation(relativeTo anchor: NSView) {
+            let intent = presentationIntentGeneration.advance()
+            DispatchQueue.main.async { [weak self, weak anchor] in
+                guard let self, let anchor,
+                      self.presentationIntentGeneration.isCurrent(intent),
+                      self.isPresented.wrappedValue else {
+                    return
+                }
+                self.present(relativeTo: anchor)
+            }
+        }
+
+        private func present(relativeTo anchor: NSView) {
+            if let window {
+                guard isClosing else { return }
+
+                closeWorkItem?.cancel()
+                closeWorkItem = nil
+                isClosing = false
+                window.ignoresMouseEvents = false
+                let presentation = presentationGeneration.advance()
+                installDismissMonitors(for: presentation)
+                animationModel?.isExpanded = true
+                return
+            }
+
+            // `tearDown` may have removed the window one run-loop turn before
+            // its binding update reaches SwiftUI. Do not recreate the fan
+            // from that stale `true` value.
+            guard !isClosing else { return }
+            guard let anchorWindow = anchor.window else { return }
+            let presentation = presentationGeneration.advance()
 
             // Tell the dock to defer auto-hide while the fan is on
-            // screen. Paired with the `endInteraction()` call in
-            // `tearDown`. Without this, dragging the cursor off the
+            // screen. The RAII lease is released in `tearDown`. Without this,
+            // dragging the cursor off the
             // tile (to click an item in the fan) lets the dock
             // start its auto-hide animation underneath, which both
             // looks wrong and breaks the click-through to the tile.
-            if let dockWindow = anchorWindow as? MainWindow, !isHoldingDockVisible {
-                dockWindow.beginInteraction()
-                dockMainWindow = dockWindow
-                isHoldingDockVisible = true
+            if let dockWindow = anchorWindow as? MainWindow,
+               mainWindowInteractionLease?.isActive != true {
+                mainWindowInteractionLease = dockWindow.acquireInteractionLease()
             }
 
             let anchorBoundsInWindow = anchor.convert(anchor.bounds, to: nil)
@@ -506,14 +544,20 @@ struct FolderFanPresenter: NSViewRepresentable {
             newWindow.orderFrontRegardless()
 
             window = newWindow
-            installDismissMonitors()
+            installDismissMonitors(for: presentation)
 
             // Toggle on the next runloop tick so SwiftUI renders the
             // initial (collapsed-onto-tile) state once before the
             // expand animation kicks in. Without the async hop the
             // view would skip the starting frame and snap to its
             // final positions.
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self, weak newWindow] in
+                guard let self,
+                      self.presentationGeneration.isCurrent(presentation),
+                      self.window === newWindow,
+                      !self.isClosing else {
+                    return
+                }
                 model.isExpanded = true
             }
         }
@@ -522,7 +566,21 @@ struct FolderFanPresenter: NSViewRepresentable {
         /// only after the per-item slide-back finishes. Idempotent
         /// — repeated calls while closing are no-ops.
         func dismiss() {
-            guard window != nil, !isClosing else { return }
+            _ = presentationIntentGeneration.advance()
+            // Record the close intent immediately. SwiftUI can re-render for
+            // unrelated reasons during the reverse animation; leaving this
+            // binding true made those renders look like a reopen request and
+            // cancel the close. A later false→true transition is now the only
+            // path that can legitimately re-expand the existing fan.
+            if isPresented.wrappedValue {
+                isPresented.wrappedValue = false
+            }
+            guard window != nil else {
+                isClosing = false
+                return
+            }
+            guard !isClosing else { return }
+            let dismissal = presentationGeneration.advance()
 
             // If we never expanded (e.g. dismiss arrived before the
             // initial async hop) just close immediately — there's
@@ -546,7 +604,12 @@ struct FolderFanPresenter: NSViewRepresentable {
                 + Double(max(0, items.count - 1)) * Self.perItemStagger
                 + Self.settleSafetyPad
             let workItem = DispatchWorkItem { [weak self] in
-                self?.tearDown()
+                guard let self,
+                      self.presentationGeneration.isCurrent(dismissal),
+                      self.isClosing else {
+                    return
+                }
+                self.tearDown()
             }
             closeWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + totalDuration, execute: workItem)
@@ -556,6 +619,8 @@ struct FolderFanPresenter: NSViewRepresentable {
         /// on `dismantleNSView` (SwiftUI tree going away) and as the
         /// final step of `dismiss()` after the reverse animation.
         func tearDown() {
+            _ = presentationIntentGeneration.advance()
+            let teardown = presentationGeneration.advance()
             closeWorkItem?.cancel()
             closeWorkItem = nil
             animationModel = nil
@@ -567,27 +632,37 @@ struct FolderFanPresenter: NSViewRepresentable {
             }
 
             // Release the dock auto-hide hold acquired in `present`.
-            if isHoldingDockVisible {
-                dockMainWindow?.endInteraction()
-                dockMainWindow = nil
-                isHoldingDockVisible = false
-            }
+            mainWindowInteractionLease = nil
 
-            isClosing = false
+            // If the close originated inside the presenter (selection,
+            // outside click, Escape), hold this gate until SwiftUI observes
+            // the asynchronously-cleared binding. Otherwise another render
+            // could recreate the just-dismissed window in that gap.
+            isClosing = isPresented.wrappedValue
 
             if isPresented.wrappedValue {
-                DispatchQueue.main.async { [isPresented] in
+                DispatchQueue.main.async { [weak self, isPresented] in
+                    guard let self,
+                          self.presentationGeneration.isCurrent(teardown) else {
+                        return
+                    }
                     isPresented.wrappedValue = false
                 }
             }
         }
 
-        private func installDismissMonitors() {
+        private func installDismissMonitors(
+            for presentation: PresentationGeneration.Token
+        ) {
             // Global: clicks anywhere outside the app.
             globalMonitor = NSEvent.addGlobalMonitorForEvents(
                 matching: [.leftMouseDown, .rightMouseDown]
             ) { [weak self] _ in
-                self?.dismiss()
+                guard let self,
+                      self.presentationGeneration.isCurrent(presentation) else {
+                    return
+                }
+                self.dismiss()
             }
             // Local: clicks inside the app but not on the fan window.
             // Returning `event` lets the click reach its real target
@@ -596,6 +671,9 @@ struct FolderFanPresenter: NSViewRepresentable {
                 matching: [.leftMouseDown, .rightMouseDown]
             ) { [weak self] event in
                 guard let self else { return event }
+                guard self.presentationGeneration.isCurrent(presentation) else {
+                    return event
+                }
                 if event.window !== self.window {
                     self.dismiss()
                 }
@@ -603,8 +681,12 @@ struct FolderFanPresenter: NSViewRepresentable {
             }
             // Escape always dismisses.
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+                guard let self,
+                      self.presentationGeneration.isCurrent(presentation) else {
+                    return event
+                }
                 if event.keyCode == 53 { // Escape
-                    self?.dismiss()
+                    self.dismiss()
                     return nil
                 }
                 return event
