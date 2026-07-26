@@ -10,6 +10,7 @@ import SwiftUI
 final class WindowSwitcherOverlayWindowController: NSWindowController {
     private weak var mainWindow: MainWindow?
     private var cancellables: Set<AnyCancellable> = []
+    private var presentationGeneration = PresentationGeneration()
     private let animationDuration: TimeInterval = 0.18
     private let preferences = DockyPreferences.shared
 
@@ -83,8 +84,9 @@ final class WindowSwitcherOverlayWindowController: NSWindowController {
     private func presentOverlay() {
         guard let window else { return }
 
+        _ = presentationGeneration.advance()
         guard showsOverlayUI else {
-            configureHiddenWindowState()
+            configureHiddenWindowState(invalidatingPendingTransitions: false)
             return
         }
 
@@ -96,13 +98,18 @@ final class WindowSwitcherOverlayWindowController: NSWindowController {
     }
 
     private func dismissOverlay() {
+        let dismissal = presentationGeneration.advance()
         guard showsOverlayUI else {
-            configureHiddenWindowState()
+            configureHiddenWindowState(invalidatingPendingTransitions: false)
             return
         }
 
         animateWindowAlpha(to: 0) { [weak self] in
             guard let self, let window = self.window else { return }
+            guard self.presentationGeneration.isCurrent(dismissal),
+                  !WindowSwitcherService.shared.isPresented else {
+                return
+            }
 
             window.ignoresMouseEvents = true
             window.orderOut(nil)
@@ -148,9 +155,14 @@ final class WindowSwitcherOverlayWindowController: NSWindowController {
             .store(in: &cancellables)
     }
 
-    private func configureHiddenWindowState() {
+    private func configureHiddenWindowState(
+        invalidatingPendingTransitions: Bool = true
+    ) {
         guard let window else { return }
 
+        if invalidatingPendingTransitions {
+            _ = presentationGeneration.advance()
+        }
         window.alphaValue = 0
         window.ignoresMouseEvents = true
         window.orderOut(nil)
@@ -421,6 +433,7 @@ private struct WindowSwitcherListRow: View {
 
     @ObservedObject private var switcher = WindowSwitcherService.shared
     @ObservedObject private var workspace = WorkspaceService.shared
+    @Bindable private var preferences = DockyPreferences.shared
 
     private let iconSize: CGFloat = 28
 
@@ -444,9 +457,23 @@ private struct WindowSwitcherListRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(nsImage: IconCacheService.shared.icon(forBundleIdentifier: window.bundleIdentifier))
-                .resizable()
-                .interpolation(.high)
+            CachedAsyncAppImage(
+                bundleIdentifier: window.bundleIdentifier,
+                overrideURL: preferences
+                    .effectiveAppIconOverrideURL(
+                        forBundleIdentifier: window.bundleIdentifier
+                    ),
+                placeholder: {
+                    Image(systemName: "app.fill")
+                        .resizable()
+                        .padding(4)
+                        .foregroundStyle(.secondary)
+                }
+            ) { image in
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+            }
                 .frame(width: iconSize, height: iconSize)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -500,7 +527,9 @@ private struct WindowSwitcherListRow: View {
         var actions: [ContextAction] = [
             .action(String(localized: "Focus Window")) {
                 dismiss()
-                _ = workspace.focus(window: window)
+                Task {
+                    _ = await workspace.focus(window: window)
+                }
             },
             .divider,
         ]
@@ -508,8 +537,12 @@ private struct WindowSwitcherListRow: View {
         actions.append(contentsOf: [
             .divider,
             .action(String(localized: "Close Window"), isDestructive: true) {
-                if workspace.close(window: window) {
-                    switcher.removeWindow(withIdentifier: window.windowIdentifier)
+                Task {
+                    if await workspace.close(window: window) {
+                        switcher.removeWindow(
+                            withIdentifier: window.windowIdentifier
+                        )
+                    }
                 }
             },
             .divider,
@@ -693,7 +726,9 @@ private struct WindowSwitcherCard: View {
         var actions: [ContextAction] = [
             .action(String(localized: "Focus Window")) {
                 dismiss()
-                _ = workspace.focus(window: window)
+                Task {
+                    _ = await workspace.focus(window: window)
+                }
             },
             .divider,
         ]
@@ -701,8 +736,12 @@ private struct WindowSwitcherCard: View {
         actions.append(contentsOf: [
             .divider,
             .action(String(localized: "Close Window"), isDestructive: true) {
-                if workspace.close(window: window) {
-                    switcher.removeWindow(withIdentifier: window.windowIdentifier)
+                Task {
+                    if await workspace.close(window: window) {
+                        switcher.removeWindow(
+                            withIdentifier: window.windowIdentifier
+                        )
+                    }
                 }
             },
             .divider,

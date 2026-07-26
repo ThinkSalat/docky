@@ -152,26 +152,14 @@ final class WorkspaceService: ObservableObject {
 
         guard let runningApp else {
             // Not running: launch it.
-            if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
-                markPendingActivation(
-                    bundleIdentifier: bundleIdentifier,
-                    decision: "launchNotRunning"
-                )
-                diagnostics.record(.actions, "activateOrOpenDecision", fields: [
-                    "appToken": diagnostics.token(bundleIdentifier),
-                    "decision": "launchNotRunning",
-                ])
-                openApplication(
-                    at: appURL,
-                    bundleIdentifier: bundleIdentifier,
-                    reason: "launchNotRunning"
-                )
-            } else {
-                diagnostics.record(.actions, "activateOrOpenDecision", fields: [
-                    "appToken": diagnostics.token(bundleIdentifier),
-                    "decision": "applicationURLUnavailable",
-                ])
-            }
+            diagnostics.record(.actions, "activateOrOpenDecision", fields: [
+                "appToken": diagnostics.token(bundleIdentifier),
+                "decision": "launchNotRunning",
+            ])
+            requestApplicationOpen(
+                bundleIdentifier: bundleIdentifier,
+                reason: "launchNotRunning"
+            )
             return
         }
 
@@ -208,21 +196,16 @@ final class WorkspaceService: ObservableObject {
         let visibleWindows = allWindows.filter { !$0.isMinimized }
 
         // Running but no AX windows: spawn a new window.
-        if accessibilityGranted, allWindows.isEmpty,
-           let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
-            markPendingActivation(
-                bundleIdentifier: bundleIdentifier,
-                decision: "openNewWindowNoAXWindows"
-            )
+        if accessibilityGranted, allWindows.isEmpty {
             diagnostics.record(.actions, "activateOrOpenDecision", fields: [
                 "appToken": diagnostics.token(bundleIdentifier),
                 "decision": "openNewWindowNoAXWindows",
                 "windowCount": allWindows.count,
             ])
-            openApplication(
-                at: appURL,
+            requestApplicationOpen(
                 bundleIdentifier: bundleIdentifier,
-                reason: "openNewWindowNoAXWindows"
+                reason: "openNewWindowNoAXWindows",
+                knownURL: runningApp.bundleURL
             )
             return
         }
@@ -230,14 +213,22 @@ final class WorkspaceService: ObservableObject {
         // Running but every window is minimized: restore the most-recently-minimized.
         if accessibilityGranted, visibleWindows.isEmpty, !allWindows.isEmpty,
            let lastMinimized = minimizedWindows.last(where: { $0.bundleIdentifier == bundleIdentifier }) {
-            let restored = restoreMinimizedWindow(lastMinimized)
-            diagnostics.record(.actions, "activateOrOpenDecision", fields: [
-                "appToken": diagnostics.token(bundleIdentifier),
-                "decision": "restoreLastMinimized",
-                "windowCount": allWindows.count,
-                "windowToken": diagnostics.token(lastMinimized.windowIdentifier),
-                "succeeded": restored,
-            ])
+            Task {
+                let restored = await restoreMinimizedWindow(lastMinimized)
+                diagnostics.record(
+                    .actions,
+                    "activateOrOpenDecision",
+                    fields: [
+                        "appToken": diagnostics.token(bundleIdentifier),
+                        "decision": "restoreLastMinimized",
+                        "windowCount": allWindows.count,
+                        "windowToken": diagnostics.token(
+                            lastMinimized.windowIdentifier
+                        ),
+                        "succeeded": restored,
+                    ]
+                )
+            }
             return
         }
 
@@ -287,20 +278,26 @@ final class WorkspaceService: ObservableObject {
         case .hide:
             hide(runningApp)
         case .cycleWindows:
-            cycleFrontmostAppWindows(visibleWindows)
+            Task { [weak self] in
+                await self?.cycleFrontmostAppWindows(visibleWindows)
+            }
         case .minimizeAll:
-            minimizeAllWindows(visibleWindows)
+            Task { [weak self] in
+                await self?.minimizeAllWindows(visibleWindows)
+            }
         }
     }
 
-    private func cycleFrontmostAppWindows(_ visibleWindows: [AppWindow]) {
+    private func cycleFrontmostAppWindows(
+        _ visibleWindows: [AppWindow]
+    ) async {
         guard visibleWindows.count > 1, let next = visibleWindows.last else {
             DiagnosticsTrace.shared.record(.actions, "cycleWindowsSkipped", fields: [
                 "visibleWindowCount": visibleWindows.count,
             ])
             return
         }
-        let focused = focus(window: next)
+        let focused = await focus(window: next)
         DiagnosticsTrace.shared.record(.actions, "cycleWindows", fields: [
             "visibleWindowCount": visibleWindows.count,
             "windowToken": DiagnosticsTrace.shared.token(next.windowIdentifier),
@@ -308,10 +305,12 @@ final class WorkspaceService: ObservableObject {
         ])
     }
 
-    private func minimizeAllWindows(_ visibleWindows: [AppWindow]) {
+    private func minimizeAllWindows(
+        _ visibleWindows: [AppWindow]
+    ) async {
         var succeededCount = 0
         for window in visibleWindows {
-            if minimize(window: window) {
+            if await minimize(window: window) {
                 succeededCount += 1
             }
         }
@@ -322,19 +321,31 @@ final class WorkspaceService: ObservableObject {
     }
 
     func open(fileURLs: [URL], withApplicationBundleIdentifier bundleIdentifier: String) {
-        guard !fileURLs.isEmpty,
-              let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
-            return
-        }
+        guard !fileURLs.isEmpty else { return }
 
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        NSWorkspace.shared.open(fileURLs, withApplicationAt: appURL, configuration: configuration) { _, error in
-            guard let error else {
+        Task {
+            guard !Task.isCancelled,
+                  let appURL = await ApplicationURLResolver.shared
+                    .applicationURL(for: bundleIdentifier),
+                  !Task.isCancelled else {
                 return
             }
 
-            NSLog("[Docky] Failed to open dropped files with app %@: %@ (%@)", bundleIdentifier, fileURLs.map(\.path).joined(separator: ", "), error.localizedDescription)
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            NSWorkspace.shared.open(
+                fileURLs,
+                withApplicationAt: appURL,
+                configuration: configuration
+            ) { _, error in
+                guard let error else { return }
+                NSLog(
+                    "[Docky] Failed to open dropped files with app %@: %@ (%@)",
+                    bundleIdentifier,
+                    fileURLs.map(\.path).joined(separator: ", "),
+                    error.localizedDescription
+                )
+            }
         }
     }
 
@@ -408,8 +419,8 @@ final class WorkspaceService: ObservableObject {
     }
 
     @discardableResult
-    func focus(window: AppWindow) -> Bool {
-        let didFocus = WindowRegistry.shared.focus(window)
+    func focus(window: AppWindow) async -> Bool {
+        let didFocus = await WindowRegistry.shared.focus(window)
         if didFocus {
             refreshPreviewAfterFocus(for: window)
         }
@@ -459,34 +470,34 @@ final class WorkspaceService: ObservableObject {
     }
 
     @discardableResult
-    func minimize(window: AppWindow) -> Bool {
-        WindowRegistry.shared.minimize(window)
+    func minimize(window: AppWindow) async -> Bool {
+        await WindowRegistry.shared.minimize(window)
     }
 
     @discardableResult
-    func close(window: AppWindow) -> Bool {
-        WindowRegistry.shared.close(window)
+    func close(window: AppWindow) async -> Bool {
+        await WindowRegistry.shared.close(window)
     }
 
     // MARK: - Window geometry actions
 
     @discardableResult
-    func zoom(window: AppWindow) -> Bool {
-        let ok = WindowRegistry.shared.zoom(window)
-        if ok { _ = focus(window: window) }
+    func zoom(window: AppWindow) async -> Bool {
+        let ok = await WindowRegistry.shared.zoom(window)
+        if ok { _ = await focus(window: window) }
         return ok
     }
 
     @discardableResult
-    func fill(window: AppWindow) -> Bool {
+    func fill(window: AppWindow) async -> Bool {
         guard let screen = currentScreen(for: window) else { return false }
-        let ok = resize(window, toNSFrame: screen.visibleFrame)
-        if ok { _ = focus(window: window) }
+        let ok = await resize(window, toNSFrame: screen.visibleFrame)
+        if ok { _ = await focus(window: window) }
         return ok
     }
 
     @discardableResult
-    func center(window: AppWindow) -> Bool {
+    func center(window: AppWindow) async -> Bool {
         guard let screen = currentScreen(for: window),
               let size = window.frame?.size, size.width > 0, size.height > 0 else {
             return false
@@ -498,72 +509,78 @@ final class WorkspaceService: ObservableObject {
             width: size.width,
             height: size.height
         )
-        let ok = resize(window, toNSFrame: target)
-        if ok { _ = focus(window: window) }
+        let ok = await resize(window, toNSFrame: target)
+        if ok { _ = await focus(window: window) }
         return ok
     }
 
     @discardableResult
-    func fillLeftHalf(window: AppWindow) -> Bool {
-        fillRect(of: window) { v in
+    func fillLeftHalf(window: AppWindow) async -> Bool {
+        await fillRect(of: window) { v in
             CGRect(x: v.minX, y: v.minY, width: v.width / 2, height: v.height)
         }
     }
 
     @discardableResult
-    func fillRightHalf(window: AppWindow) -> Bool {
-        fillRect(of: window) { v in
+    func fillRightHalf(window: AppWindow) async -> Bool {
+        await fillRect(of: window) { v in
             CGRect(x: v.midX, y: v.minY, width: v.width / 2, height: v.height)
         }
     }
 
     @discardableResult
-    func fillTopHalf(window: AppWindow) -> Bool {
+    func fillTopHalf(window: AppWindow) async -> Bool {
         // NSScreen Y grows upward; "top half" sits at higher Y.
-        fillRect(of: window) { v in
+        await fillRect(of: window) { v in
             CGRect(x: v.minX, y: v.midY, width: v.width, height: v.height / 2)
         }
     }
 
     @discardableResult
-    func fillBottomHalf(window: AppWindow) -> Bool {
-        fillRect(of: window) { v in
+    func fillBottomHalf(window: AppWindow) async -> Bool {
+        await fillRect(of: window) { v in
             CGRect(x: v.minX, y: v.minY, width: v.width, height: v.height / 2)
         }
     }
 
     @discardableResult
-    func fillTopLeftQuarter(window: AppWindow) -> Bool {
-        fillRect(of: window) { v in
+    func fillTopLeftQuarter(window: AppWindow) async -> Bool {
+        await fillRect(of: window) { v in
             CGRect(x: v.minX, y: v.midY, width: v.width / 2, height: v.height / 2)
         }
     }
 
     @discardableResult
-    func fillTopRightQuarter(window: AppWindow) -> Bool {
-        fillRect(of: window) { v in
+    func fillTopRightQuarter(window: AppWindow) async -> Bool {
+        await fillRect(of: window) { v in
             CGRect(x: v.midX, y: v.midY, width: v.width / 2, height: v.height / 2)
         }
     }
 
     @discardableResult
-    func fillBottomLeftQuarter(window: AppWindow) -> Bool {
-        fillRect(of: window) { v in
+    func fillBottomLeftQuarter(window: AppWindow) async -> Bool {
+        await fillRect(of: window) { v in
             CGRect(x: v.minX, y: v.minY, width: v.width / 2, height: v.height / 2)
         }
     }
 
     @discardableResult
-    func fillBottomRightQuarter(window: AppWindow) -> Bool {
-        fillRect(of: window) { v in
+    func fillBottomRightQuarter(window: AppWindow) async -> Bool {
+        await fillRect(of: window) { v in
             CGRect(x: v.midX, y: v.minY, width: v.width / 2, height: v.height / 2)
         }
     }
 
-    private func fillRect(of window: AppWindow, _ make: (CGRect) -> CGRect) -> Bool {
+    private func fillRect(
+        of window: AppWindow,
+        _ make: (CGRect) -> CGRect
+    ) async -> Bool {
         guard let screen = currentScreen(for: window) else { return false }
-        let ok = resize(window, toNSFrame: make(screen.visibleFrame))
-        if ok { _ = focus(window: window) }
+        let ok = await resize(
+            window,
+            toNSFrame: make(screen.visibleFrame)
+        )
+        if ok { _ = await focus(window: window) }
         return ok
     }
 
@@ -573,7 +590,10 @@ final class WorkspaceService: ObservableObject {
     /// is the left half). Caller is expected to pass windows in the order
     /// the user understands as "first" (typically WindowRegistry MRU).
     @discardableResult
-    func tile(windows: [AppWindow], layout: AppFolderTileLayout) -> Bool {
+    func tile(
+        windows: [AppWindow],
+        layout: AppFolderTileLayout
+    ) async -> Bool {
         guard windows.count >= 2,
               let screen = currentScreen(for: windows[0]) else { return false }
         let v = screen.visibleFrame
@@ -605,13 +625,14 @@ final class WorkspaceService: ObservableObject {
 
         var allOk = true
         for (window, frame) in placements {
-            allOk = resize(window, toNSFrame: frame) && allOk
+            let resized = await resize(window, toNSFrame: frame)
+            allOk = resized && allOk
         }
         // Surface every tiled window, windows on inactive Spaces won't be
         // visible after resize until SLPS pulls them forward. Focus in order
         // so the first-in-the-layout-name window ends up frontmost / key.
         for (window, _) in placements.reversed() {
-            _ = focus(window: window)
+            _ = await focus(window: window)
         }
         return allOk
     }
@@ -619,7 +640,10 @@ final class WorkspaceService: ObservableObject {
     /// Routes an NSScreen-space target rect through the AX-space (Y-flipped
     /// against the primary display) coordinates that `WindowRegistry.resize`
     /// expects. Same flip used by `WindowReservationService`.
-    private func resize(_ window: AppWindow, toNSFrame nsFrame: CGRect) -> Bool {
+    private func resize(
+        _ window: AppWindow,
+        toNSFrame nsFrame: CGRect
+    ) async -> Bool {
         guard let primaryHeight = NSScreen.screens.first?.frame.height else { return false }
         let axFrame = CGRect(
             x: nsFrame.minX,
@@ -627,7 +651,7 @@ final class WorkspaceService: ObservableObject {
             width: nsFrame.width,
             height: nsFrame.height
         )
-        return WindowRegistry.shared.resize(window, to: axFrame)
+        return await WindowRegistry.shared.resize(window, to: axFrame)
     }
 
     /// Picks the NSScreen the window mostly occupies. Falls back to the main
@@ -713,12 +737,66 @@ final class WorkspaceService: ObservableObject {
         )
     }
 
-    func revealApplicationInFinder(bundleIdentifier: String) {
-        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
+    private func requestApplicationOpen(
+        bundleIdentifier: String,
+        reason: String,
+        knownURL: URL? = nil
+    ) {
+        markPendingActivation(
+            bundleIdentifier: bundleIdentifier,
+            decision: reason
+        )
+        guard let pending = pendingActivations[bundleIdentifier] else {
+            return
+        }
+        if let knownURL {
+            openApplication(
+                at: knownURL,
+                bundleIdentifier: bundleIdentifier,
+                reason: reason
+            )
             return
         }
 
-        NSWorkspace.shared.activateFileViewerSelecting([appURL])
+        Task { [weak self] in
+            let appURL = await ApplicationURLResolver.shared
+                .applicationURL(for: bundleIdentifier)
+            guard let self,
+                  self.pendingActivations[bundleIdentifier]?.requestID
+                    == pending.requestID else {
+                return
+            }
+            guard let appURL else {
+                self.pendingActivations.removeValue(
+                    forKey: bundleIdentifier
+                )
+                let diagnostics = DiagnosticsTrace.shared
+                diagnostics.record(
+                    .actions,
+                    "activateOrOpenDecision",
+                    fields: [
+                        "appToken": diagnostics.token(bundleIdentifier),
+                        "decision": "applicationURLUnavailable",
+                    ]
+                )
+                return
+            }
+            self.openApplication(
+                at: appURL,
+                bundleIdentifier: bundleIdentifier,
+                reason: reason
+            )
+        }
+    }
+
+    func revealApplicationInFinder(bundleIdentifier: String) {
+        Task {
+            guard let appURL = await ApplicationURLResolver.shared
+                .applicationURL(for: bundleIdentifier) else {
+                return
+            }
+            NSWorkspace.shared.activateFileViewerSelecting([appURL])
+        }
     }
 
     func showAllWindows(bundleIdentifier: String) {
@@ -737,15 +815,15 @@ final class WorkspaceService: ObservableObject {
     }
 
     @discardableResult
-    func restoreMinimizedWindow(_ window: AppWindow) -> Bool {
-        let requestAccepted = WindowRegistry.shared.focus(window)
+    func restoreMinimizedWindow(_ window: AppWindow) async -> Bool {
+        let succeeded = await WindowRegistry.shared.focus(window)
         let windowIdentifier = window.windowIdentifier
         let bundleIdentifier = window.bundleIdentifier
         let diagnostics = DiagnosticsTrace.shared
-        diagnostics.record(.actions, "restoreMinimizedWindowRequested", fields: [
+        diagnostics.record(.actions, "restoreMinimizedWindowResult", fields: [
             "windowToken": diagnostics.token(windowIdentifier),
             "appToken": diagnostics.token(bundleIdentifier),
-            "requestAccepted": requestAccepted,
+            "succeeded": succeeded,
         ])
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(750))
@@ -757,15 +835,15 @@ final class WorkspaceService: ObservableObject {
                 "appToken": diagnostics.token(bundleIdentifier),
                 "windowObserved": observed != nil,
                 "observedMinimized": observed?.isMinimized ?? false,
-                "requestAccepted": requestAccepted,
+                "succeeded": succeeded,
             ])
         }
-        return requestAccepted
+        return succeeded
     }
 
     @discardableResult
-    func closeMinimizedWindow(_ window: AppWindow) -> Bool {
-        WindowRegistry.shared.close(window)
+    func closeMinimizedWindow(_ window: AppWindow) async -> Bool {
+        await WindowRegistry.shared.close(window)
     }
 
     func hide(bundleIdentifier: String) {
@@ -919,6 +997,19 @@ final class WorkspaceService: ObservableObject {
             ) { [weak self] notification in
                 if name == NSWorkspace.didHideApplicationNotification {
                     self?.recordHideApplicationNotification(notification)
+                }
+                if name == NSWorkspace.didLaunchApplicationNotification
+                    || name
+                        == NSWorkspace.didTerminateApplicationNotification,
+                   let app = notification.userInfo?[
+                       NSWorkspace.applicationUserInfoKey
+                   ] as? NSRunningApplication,
+                   let bundleIdentifier = app.bundleIdentifier {
+                    Task {
+                        await ApplicationURLResolver.shared.invalidate(
+                            bundleIdentifier: bundleIdentifier
+                        )
+                    }
                 }
                 self?.refresh()
             }

@@ -9,10 +9,18 @@
 import AppKit
 import Foundation
 
+@MainActor
 final class AppleScriptService {
     static let shared = AppleScriptService()
 
-    private init() {}
+    private let executionWorker: AppleScriptExecutionWorker
+
+    private init(
+        executionWorker: AppleScriptExecutionWorker =
+            AppleScriptExecutionWorker()
+    ) {
+        self.executionWorker = executionWorker
+    }
 
     @discardableResult
     func requestFinderAutomationPermission() async -> Bool {
@@ -24,17 +32,12 @@ final class AppleScriptService {
         await runSystemEventsPermissionProbe()
     }
 
-    func executeDescriptor(source: String) throws -> NSAppleEventDescriptor? {
-        guard let script = NSAppleScript(source: source) else {
-            throw AppleScriptServiceError.compilationFailed
-        }
+    func execute(source: String) async throws {
+        try await executionWorker.execute(source: source)
+    }
 
-        var errorInfo: NSDictionary?
-        let result = script.executeAndReturnError(&errorInfo)
-        if let error = scriptError(from: errorInfo) {
-            throw error
-        }
-        return result
+    func executeBoolean(source: String) async throws -> Bool {
+        try await executionWorker.executeBoolean(source: source)
     }
 
     @discardableResult
@@ -45,7 +48,7 @@ final class AppleScriptService {
         targetApp: String?
     ) async -> Result<Void, AppleScriptServiceError> {
         do {
-            try execute(source: source)
+            try await executionWorker.execute(source: source)
             permissionRequirements.forEach { permission in
                 updateGrantedPermission(permission)
             }
@@ -111,7 +114,7 @@ final class AppleScriptService {
 
     private func runFinderScript(_ command: FinderCommand) async -> Bool {
         do {
-            try await MainActor.run { try execute(source: command.source) }
+            try await executionWorker.execute(source: command.source)
             PermissionsService.shared.updateFinderAutomation(status: .granted)
             return true
         } catch let error as AppleScriptServiceError {
@@ -125,7 +128,9 @@ final class AppleScriptService {
 
     private func runSystemEventsPermissionProbe() async -> Bool {
         do {
-            try await MainActor.run { try execute(source: SystemEventsCommand.permissionProbe.source) }
+            try await executionWorker.execute(
+                source: SystemEventsCommand.permissionProbe.source
+            )
             PermissionsService.shared.updateSystemEventsAutomation(status: .granted)
             return true
         } catch let error as AppleScriptServiceError {
@@ -135,24 +140,6 @@ final class AppleScriptService {
             handleSystemEventsPermissionProbe(.executionFailed(error.localizedDescription))
             return false
         }
-    }
-
-    private func execute(source: String) throws {
-        _ = try executeDescriptor(source: source)
-    }
-
-    private func scriptError(from errorInfo: NSDictionary?) -> AppleScriptServiceError? {
-        guard let errorInfo else { return nil }
-        let number = errorInfo[NSAppleScript.errorNumber] as? Int
-        let message = (errorInfo[NSAppleScript.errorMessage] as? String) ?? "AppleScript execution failed."
-
-        if number == -1743 {
-            return .permissionDenied
-        }
-        if number == 1002 {
-            return .accessibilityDenied
-        }
-        return .executionFailed(message)
     }
 
     private func handle(_ error: AppleScriptServiceError) {
@@ -175,6 +162,13 @@ final class AppleScriptService {
                 title: "Finder action failed",
                 body: message
             )
+        case .timedOut:
+            presentAlert(
+                title: "Finder action timed out",
+                body: "The target application did not answer Docky’s request."
+            )
+        case .cancelled:
+            break
         }
     }
 
@@ -229,6 +223,13 @@ final class AppleScriptService {
                 title: "Script action failed",
                 body: message
             )
+        case .timedOut:
+            presentAlert(
+                title: "Script action timed out",
+                body: "\(actionTitle) did not finish because the target application stopped responding."
+            )
+        case .cancelled:
+            break
         }
     }
 
@@ -302,6 +303,13 @@ final class AppleScriptService {
                 title: "System Events action failed",
                 body: message
             )
+        case .timedOut:
+            presentAlert(
+                title: "System Events action timed out",
+                body: "System Events did not answer Docky’s request."
+            )
+        case .cancelled:
+            break
         }
     }
 
@@ -375,13 +383,6 @@ private enum FinderCommand {
             """
         }
     }
-}
-
-enum AppleScriptServiceError: Error {
-    case permissionDenied
-    case accessibilityDenied
-    case compilationFailed
-    case executionFailed(String)
 }
 
 private enum SystemEventsCommand {

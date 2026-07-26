@@ -117,7 +117,10 @@ private func managedDisplaySpaceRecord(
 // the AXWindowNumber attribute, which some apps populate with their own
 // internal IDs rather than the system window number.
 @_silgen_name("_AXUIElementGetWindow") @discardableResult
-func _AXUIElementGetWindow(_ element: AXUIElement, _ wid: inout CGWindowID) -> AXError
+nonisolated func _AXUIElementGetWindow(
+    _ element: AXUIElement,
+    _ wid: inout CGWindowID
+) -> AXError
 
 @_silgen_name("CGSSetWindowBackgroundBlurRadius")
 func CGSSetWindowBackgroundBlurRadius(
@@ -180,13 +183,16 @@ func CGSSetWindowAlpha(
 
 // MARK: - SkyLight Process Switching (SLPS)
 
-struct ProcessSerialNumber {
+nonisolated struct ProcessSerialNumber {
     var highLongOfPSN: UInt32 = 0
     var lowLongOfPSN: UInt32 = 0
 }
 
 @_silgen_name("GetProcessForPID")
-func GetProcessForPID(_ pid: pid_t, _ psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+nonisolated func GetProcessForPID(
+    _ pid: pid_t,
+    _ psn: UnsafeMutablePointer<ProcessSerialNumber>
+) -> OSStatus
 
 @_silgen_name("ShowHideProcess")
 private func ShowHideProcess(
@@ -204,7 +210,7 @@ func setProcessVisible(pid: pid_t, visible: Bool) -> Bool {
     return ShowHideProcess(&psn, visible ? 1 : 0) == noErr
 }
 
-enum SLPSMode: UInt32 {
+nonisolated enum SLPSMode: UInt32 {
     case allWindows = 0x100
     case userGenerated = 0x200
     case noWindows = 0x400
@@ -221,13 +227,15 @@ private typealias SLPSPostEventRecordToType = @convention(c) (
     UnsafeMutablePointer<UInt8>
 ) -> CGError
 
-private var skyLightHandle: UnsafeMutableRawPointer?
-private var setFrontProcessPtr: SLPSSetFrontProcessWithOptionsType?
-private var postEventRecordPtr: SLPSPostEventRecordToType?
+nonisolated(unsafe) private var skyLightHandle: UnsafeMutableRawPointer?
+nonisolated(unsafe) private var setFrontProcessPtr:
+    SLPSSetFrontProcessWithOptionsType?
+nonisolated(unsafe) private var postEventRecordPtr:
+    SLPSPostEventRecordToType?
 
-// Single-threaded-by-convention: focus paths run on main, so the lazy load
-// doesn't need a lock.
-private func loadSkyLightFunctions() {
+// Single-threaded-by-convention: window focus paths run on the serialized AX
+// worker, so the lazy load does not need a lock.
+nonisolated private func loadSkyLightFunctions() {
     guard skyLightHandle == nil else { return }
 
     let skyLightPath = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
@@ -243,7 +251,7 @@ private func loadSkyLightFunctions() {
 }
 
 @discardableResult
-func _SLPSSetFrontProcessWithOptions(
+nonisolated func _SLPSSetFrontProcessWithOptions(
     _ psn: UnsafeMutablePointer<ProcessSerialNumber>,
     _ wid: CGWindowID,
     _ mode: SLPSMode.RawValue
@@ -254,7 +262,7 @@ func _SLPSSetFrontProcessWithOptions(
 }
 
 @discardableResult
-func SLPSPostEventRecordTo(
+nonisolated func SLPSPostEventRecordTo(
     _ psn: UnsafeMutablePointer<ProcessSerialNumber>,
     _ bytes: UnsafeMutablePointer<UInt8>
 ) -> CGError {
@@ -293,7 +301,10 @@ func CoreDockSendNotification(_ message: String) {
     fn(message as CFString, 0)
 }
 
-func slpsMakeKeyWindow(psn: inout ProcessSerialNumber, windowID: CGWindowID) {
+nonisolated func slpsMakeKeyWindow(
+    psn: inout ProcessSerialNumber,
+    windowID: CGWindowID
+) {
     var bytes = [UInt8](repeating: 0, count: 0xF8)
     bytes[0x04] = 0xF8
     bytes[0x3A] = 0x10

@@ -27,7 +27,9 @@ final class WindowReservationService {
 
     private var cancellables: Set<AnyCancellable> = []
     private var registrySubscription: AnyCancellable?
+    private var scanTask: Task<Void, Never>?
     private var windowCooldowns: [WindowID: Date] = [:]
+    private var inFlightWindowIDs: Set<WindowID> = []
     private var lastActivationSignature: String?
     private var lastScanGate: String?
     private var lastScanSummary: String?
@@ -84,17 +86,24 @@ final class WindowReservationService {
         registrySubscription = registry.$windows
             .receive(on: DispatchQueue.main)
             .sink { [weak self] windows in
-                self?.scan(windows: windows)
+                guard let self else { return }
+                scanTask?.cancel()
+                scanTask = Task { @MainActor [weak self] in
+                    await self?.scan(windows: windows)
+                }
             }
     }
 
     private func detach() {
         registrySubscription?.cancel()
         registrySubscription = nil
+        scanTask?.cancel()
+        scanTask = nil
         windowCooldowns.removeAll()
     }
 
-    private func scan(windows: [AppWindow]) {
+    private func scan(windows: [AppWindow]) async {
+        guard !Task.isCancelled else { return }
         guard let mainWindow = NSApp.windows.compactMap({ $0 as? MainWindow }).first else {
             recordScanGate("mainWindowUnavailable", windowCount: windows.count)
             return
@@ -129,6 +138,10 @@ final class WindowReservationService {
         var succeededCount = 0
 
         for window in windows where window.processIdentifier != ownPID {
+            guard !Task.isCancelled else { return }
+            guard !inFlightWindowIDs.contains(window.id) else {
+                continue
+            }
             if let until = windowCooldowns[window.id], now < until {
                 cooldownCount += 1
                 continue
@@ -174,15 +187,20 @@ final class WindowReservationService {
                 "targetFrame": NSStringFromRect(nsTarget),
             ])
             attemptedCount += 1
-            let succeeded = registry.resize(window, to: axTarget)
+            inFlightWindowIDs.insert(window.id)
+            let succeeded = await registry.resize(window, to: axTarget)
+            inFlightWindowIDs.remove(window.id)
             diagnostics.record(.windows, "reservationResizeResult", fields: [
                 "windowToken": diagnostics.token(window.windowIdentifier),
                 "succeeded": succeeded,
             ])
             if succeeded {
                 succeededCount += 1
-                windowCooldowns[window.id] = now.addingTimeInterval(cooldownInterval)
+                windowCooldowns[window.id] = Date().addingTimeInterval(
+                    cooldownInterval
+                )
             }
+            guard !Task.isCancelled else { return }
         }
 
         let summary = [
