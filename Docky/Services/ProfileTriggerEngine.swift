@@ -33,6 +33,10 @@ final class ProfileTriggerEngine {
         currentFrontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
         currentExactSpaceID = ProfileTriggerEngine.activeSpaceID()
+        // Treat the profile that survived launch as the automation baseline.
+        // This lets a later manual choice be recognized as an override even
+        // when the launch profile already matched and no switch was needed.
+        lastAutoActivatedProfileID = profileService.activeProfileID
         observeFrontmostApp()
         observeActiveSpace()
         scheduleMinuteTick()
@@ -92,8 +96,16 @@ final class ProfileTriggerEngine {
             .publisher(for: NSWorkspace.activeSpaceDidChangeNotification)
             .sink { [weak self] _ in
                 guard let self else { return }
+                let previousExactSpaceID = self.currentExactSpaceID
                 self.currentSpaceApps = ProfileTriggerEngine.appsOnActiveSpace()
                 self.currentExactSpaceID = ProfileTriggerEngine.activeSpaceID()
+                if self.currentExactSpaceID != 0,
+                   self.currentExactSpaceID != previousExactSpaceID {
+                    // A manual profile selection is an override for the
+                    // current desktop, not a permanent opt-out. Moving to a
+                    // different desktop re-enables its automatic mapping.
+                    self.lastAutoActivatedProfileID = self.profileService.activeProfileID
+                }
                 self.evaluate()
             }
             .store(in: &cancellables)
