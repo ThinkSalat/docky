@@ -10,6 +10,11 @@
 		11051E012F929079005CE09D /* Frameworks/MediaRemoteAdapter.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 11051E002F929079005CE09D /* Frameworks/MediaRemoteAdapter.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		113717682FA17B980012480C /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 113717672FA17B980012480C /* Sparkle */; };
 		D0C1000C2FA400000000000C /* DockyDockWatchdog.app in Embed Watchdog */ = {isa = PBXBuildFile; fileRef = D0C100012FA4000000000001 /* DockyDockWatchdog.app */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		D0C2A0012FB0000000000001 /* ProfileTriggerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0042FB0000000000004 /* ProfileTriggerTests.swift */; };
+		D0C2A0022FB0000000000002 /* ProfileTrigger.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0052FB0000000000005 /* ProfileTrigger.swift */; };
+		D0C2A0032FB0000000000003 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D0C2A0072FB0000000000007 /* XCTest.framework */; };
+		D0C2A0102FB0000000000010 /* ExternalWidgetRuntimePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0122FB0000000000012 /* ExternalWidgetRuntimePolicyTests.swift */; };
+		D0C2A0112FB0000000000011 /* ExternalWidgetRuntimePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A0132FB0000000000013 /* ExternalWidgetRuntimePolicy.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -51,6 +56,12 @@
 		11051DE72F929079005CE09D /* Docky.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Docky.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		11051E002F929079005CE09D /* Frameworks/MediaRemoteAdapter.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = Frameworks/MediaRemoteAdapter.framework; sourceTree = "<group>"; };
 		D0C100012FA4000000000001 /* DockyDockWatchdog.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DockyDockWatchdog.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D0C2A0042FB0000000000004 /* ProfileTriggerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileTriggerTests.swift; sourceTree = "<group>"; };
+		D0C2A0052FB0000000000005 /* ProfileTrigger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ProfileTrigger.swift; path = Docky/Models/ProfileTrigger.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A0062FB0000000000006 /* DockyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DockyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D0C2A0072FB0000000000007 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
+		D0C2A0122FB0000000000012 /* ExternalWidgetRuntimePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExternalWidgetRuntimePolicyTests.swift; sourceTree = "<group>"; };
+		D0C2A0132FB0000000000013 /* ExternalWidgetRuntimePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ExternalWidgetRuntimePolicy.swift; path = Docky/Models/ExternalWidgetRuntimePolicy.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -82,6 +93,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D0C2A00A2FB000000000000A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D0C2A0032FB0000000000003 /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -90,6 +109,7 @@
 			children = (
 				11051DE92F929079005CE09D /* Docky */,
 				D0C100022FA4000000000002 /* DockyDockWatchdog */,
+				D0C2A0082FB0000000000008 /* DockyTests */,
 				11051E032F929079005CE09D /* Frameworks */,
 				11051DE82F929079005CE09D /* Products */,
 			);
@@ -100,6 +120,7 @@
 			children = (
 				11051DE72F929079005CE09D /* Docky.app */,
 				D0C100012FA4000000000001 /* DockyDockWatchdog.app */,
+				D0C2A0062FB0000000000006 /* DockyTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -108,8 +129,20 @@
 			isa = PBXGroup;
 			children = (
 				11051E002F929079005CE09D /* Frameworks/MediaRemoteAdapter.framework */,
+				D0C2A0072FB0000000000007 /* XCTest.framework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		D0C2A0082FB0000000000008 /* DockyTests */ = {
+			isa = PBXGroup;
+			children = (
+				D0C2A0042FB0000000000004 /* ProfileTriggerTests.swift */,
+				D0C2A0052FB0000000000005 /* ProfileTrigger.swift */,
+				D0C2A0122FB0000000000012 /* ExternalWidgetRuntimePolicyTests.swift */,
+				D0C2A0132FB0000000000013 /* ExternalWidgetRuntimePolicy.swift */,
+			);
+			path = DockyTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -164,6 +197,25 @@
 			productReference = D0C100012FA4000000000001 /* DockyDockWatchdog.app */;
 			productType = "com.apple.product-type.application";
 		};
+		D0C2A00C2FB000000000000C /* DockyTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D0C2A00F2FB000000000000F /* Build configuration list for PBXNativeTarget "DockyTests" */;
+			buildPhases = (
+				D0C2A0092FB0000000000009 /* Sources */,
+				D0C2A00A2FB000000000000A /* Frameworks */,
+				D0C2A00B2FB000000000000B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DockyTests;
+			packageProductDependencies = (
+			);
+			productName = DockyTests;
+			productReference = D0C2A0062FB0000000000006 /* DockyTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -178,6 +230,9 @@
 						CreatedOnToolsVersion = 26.4;
 					};
 					D0C100062FA4000000000006 = {
+						CreatedOnToolsVersion = 26.4;
+					};
+					D0C2A00C2FB000000000000C = {
 						CreatedOnToolsVersion = 26.4;
 					};
 				};
@@ -202,6 +257,7 @@
 			targets = (
 				11051DE62F929079005CE09D /* Docky */,
 				D0C100062FA4000000000006 /* DockyDockWatchdog */,
+				D0C2A00C2FB000000000000C /* DockyTests */,
 			);
 		};
 /* End PBXProject section */
@@ -215,6 +271,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		D0C100052FA4000000000005 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D0C2A00B2FB000000000000B /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -253,6 +316,17 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D0C2A0092FB0000000000009 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D0C2A0022FB0000000000002 /* ProfileTrigger.swift in Sources */,
+				D0C2A0012FB0000000000001 /* ProfileTriggerTests.swift in Sources */,
+				D0C2A0112FB0000000000011 /* ExternalWidgetRuntimePolicy.swift in Sources */,
+				D0C2A0102FB0000000000010 /* ExternalWidgetRuntimePolicyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -445,8 +519,8 @@
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
 				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
 				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
-				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = YES;
-				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -514,8 +588,8 @@
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
 				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
 				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
-				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = YES;
-				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = NO;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -584,6 +658,42 @@
 			};
 			name = Release;
 		};
+		D0C2A00D2FB000000000000D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = gt.quintero.DockyTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "";
+			};
+			name = Debug;
+		};
+		D0C2A00E2FB000000000000E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = gt.quintero.DockyTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -610,6 +720,15 @@
 			buildConfigurations = (
 				D0C100082FA4000000000008 /* Debug */,
 				D0C100092FA4000000000009 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D0C2A00F2FB000000000000F /* Build configuration list for PBXNativeTarget "DockyTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D0C2A00D2FB000000000000D /* Debug */,
+				D0C2A00E2FB000000000000E /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

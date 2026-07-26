@@ -26,6 +26,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         DiagnosticsTrace.shared.start()
+        DiagnosticsTrace.shared.record(.widgets, "runtimeDisabled")
 
         // Bound every AX call to 1s so a hung app can't stall the main run loop.
         // Must precede any other AX work — applies process-wide.
@@ -46,12 +47,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         AppUpdateService.shared.checkForUpdatesInBackground()
         WindowReservationService.shared.start()
         DockBadgeService.shared.start()
-
-        // Must precede TileStore.syncPreferencesFromSystemDockIfNeeded
-        // below: persisted dock contents may reference external widget
-        // identifiers, and TileStore filters out unknown widgets when
-        // rehydrating.
-        ExternalWidgetLoader.shared.discoverAndLoad()
 
         DockyPreferences.shared.applySystemDockVisibilityPreference()
         DockyPreferences.shared.applyOpenAtLoginPreference()
@@ -127,7 +122,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Routes a `docky://` URL to the matching handler.
     ///
     /// Routing table:
-    ///  - `docky://install-widget?url=<https://...>` — Widget Store install.
     ///  - `docky://launchpad[/show|/hide|/toggle]` — launchpad overlay.
     ///  - `docky://start-menu[/show|/hide|/toggle]` — start menu overlay.
     ///  - `docky://dock[/show|/hide|/toggle]` — flips `autohidesWindow`.
@@ -145,7 +139,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         switch action {
         case "install-widget":
-            handleInstallWidgetURL(url)
+            if !ExternalWidgetRuntimePolicy.acceptsInstallDeepLink(
+                host: action
+            ) {
+                DiagnosticsTrace.shared.record(
+                    .widgets,
+                    "installDeepLinkRejected",
+                    fields: ["reason": "runtimeDisabled"]
+                )
+                return
+            }
         case "launchpad":
             applyOverlayAction(
                 path: path,
@@ -233,55 +236,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 service.setActiveProfile(id: nameMatch.id)
             }
         }
-    }
-
-    /// `docky://install-widget?url=<downloadURL>` from the marketplace
-    /// website. Gated on Pro tier; surfaces an alert with the install
-    /// outcome so the user knows whether to restart Docky.
-    private func handleInstallWidgetURL(_ url: URL) {
-        guard
-            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-            let downloadString = components.queryItems?.first(where: { $0.name == "url" })?.value,
-            let downloadURL = URL(string: downloadString),
-            let scheme = downloadURL.scheme?.lowercased(),
-            scheme == "https"
-        else {
-            presentInstallAlert(title: "Invalid widget install link", message: "The link did not include a valid HTTPS download URL.", style: .warning)
-            return
-        }
-
-        Task { @MainActor in
-            do {
-                let staged = try await MarketplaceClient.shared.downloadBundle(from: downloadURL)
-                _ = try ExternalWidgetLoader.shared.installBundle(from: staged)
-                try? FileManager.default.removeItem(at: staged.deletingLastPathComponent())
-
-                let alert = NSAlert()
-                alert.messageText = "Widget installed"
-                alert.informativeText = "Restart Docky to start using \(downloadURL.lastPathComponent)."
-                alert.alertStyle = .informational
-                alert.addButton(withTitle: "Restart Docky")
-                alert.addButton(withTitle: "Later")
-                if alert.runModal() == .alertFirstButtonReturn {
-                    NSApp.terminate(nil)
-                }
-            } catch {
-                presentInstallAlert(
-                    title: "Couldn't install widget",
-                    message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
-                    style: .warning
-                )
-            }
-        }
-    }
-
-    private func presentInstallAlert(title: String, message: String, style: NSAlert.Style) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = style
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {

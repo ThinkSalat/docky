@@ -270,6 +270,7 @@ final class DiagnosticsTrace {
         case visibility
         case preferences
         case systemDock
+        case widgets
     }
 
     private let writer: DiagnosticTraceWriter

@@ -110,10 +110,8 @@ enum WidgetKind: Codable, Identifiable, Hashable {
     case weather
     case search
     case photoFrame
-    /// Widget supplied by a community bundle loaded at startup. The
-    /// associated value is the plugin's stable identifier (e.g.
-    /// "com.example.MyWidget"); the live registration is owned by
-    /// ExternalWidgetRegistry.
+    /// Inert persistence marker for a legacy community widget. The associated
+    /// identifier is preserved so profiles round-trip without executing code.
     case external(String)
 
     nonisolated static let builtInCases: [WidgetKind] = [
@@ -207,8 +205,8 @@ enum WidgetKind: Codable, Identifiable, Hashable {
             String(localized: "Search")
         case .photoFrame:
             String(localized: "Photo Frame")
-        case .external(let identifier):
-            ExternalWidgetRegistry.shared.metadata(for: identifier)?.displayName ?? identifier
+        case .external:
+            String(localized: "External Widget")
         }
     }
 
@@ -218,8 +216,8 @@ enum WidgetKind: Codable, Identifiable, Hashable {
             [.one]
         case .calendar, .reminders, .batteries, .systemStatus, .nowPlaying, .weather, .search, .photoFrame:
             TileSpan.allCases
-        case .external(let identifier):
-            ExternalWidgetRegistry.shared.metadata(for: identifier)?.supportedSpans ?? TileSpan.allCases
+        case .external:
+            TileSpan.allCases
         }
     }
 
@@ -229,8 +227,8 @@ enum WidgetKind: Codable, Identifiable, Hashable {
             WidgetExpansionExtent(widthTiles: 5, heightTiles: 2)
         case .calendar, .calendarDate, .reminders, .batteries, .systemStatus, .weather, .search, .photoFrame:
             .standard
-        case .external(let identifier):
-            ExternalWidgetRegistry.shared.metadata(for: identifier)?.expansionExtent ?? .standard
+        case .external:
+            .standard
         }
     }
 
@@ -245,8 +243,8 @@ enum WidgetKind: Codable, Identifiable, Hashable {
             true
         case .calendarDate, .search:
             false
-        case .external(let identifier):
-            ExternalWidgetRegistry.shared.metadata(for: identifier)?.isExpandable ?? false
+        case .external:
+            false
         }
     }
 }

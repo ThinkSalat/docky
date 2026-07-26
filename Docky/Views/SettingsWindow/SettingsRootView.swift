@@ -57,7 +57,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
         case .startMenu: "Start Menu"
         case .windowManagement: "Window Management"
         case .actions: "Actions"
-        case .externalWidgets: "Widget Store"
+        case .externalWidgets: "External Widgets"
         case .behaviorLaunch: "Launch"
         case .behaviorSystemDock: "System Dock"
         case .permissions: "Permissions"

@@ -126,12 +126,10 @@ enum WidgetCatalog {
         photoFrame,
     ]
 
-    /// All available widget registrations, built-ins plus any external
-    /// bundles that ExternalWidgetLoader has registered. Computed (not
-    /// cached) so registrations discovered after first access still show
-    /// up the next time the palette refreshes.
+    /// Only built-in registrations are executable. Legacy external-widget
+    /// records remain in profiles but are never added to the palette.
     static var staticRegistrations: [WidgetRegistration] {
-        builtInRegistrations + externalRegistrations()
+        builtInRegistrations
     }
 
     static var paletteRegistrations: [WidgetRegistration] {
@@ -140,19 +138,6 @@ enum WidgetCatalog {
 
     static var smartStackRegistrations: [WidgetRegistration] {
         staticRegistrations.filter(\.includesInSmartStack)
-    }
-
-    private static func externalRegistrations() -> [WidgetRegistration] {
-        ExternalWidgetRegistry.shared.registrations.map { registration in
-            let metadata = registration.metadata
-            return WidgetRegistration(
-                kind: .external(metadata.identifier),
-                ownerBundleIdentifier: metadata.identifier,
-                defaultSpan: metadata.defaultSpan,
-                includesInPalette: metadata.includesInPalette,
-                includesInSmartStack: metadata.includesInSmartStack
-            )
-        }
     }
 
     /// Owner bundle identifiers that are *visible* in a freshly-inserted
