@@ -9,7 +9,6 @@ import SwiftUI
 struct FolderTileView: View {
     let tile: FolderTile
     let isOpen: Bool
-    @ObservedObject private var permissions = PermissionsService.shared
     @ObservedObject private var folderAccess = FolderAccessService.shared
     @Bindable private var preferences = DockyPreferences.shared
     @State private var preview: [URL] = []
@@ -18,13 +17,20 @@ struct FolderTileView: View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .task(id: reloadKey) {
+                guard tile.displayMode != .folder else {
+                    preview = []
+                    return
+                }
                 preview = FolderAccessService.shared.recentContents(of: tile.url, sortMode: tile.sortMode, limit: 3)
             }
             .onAppear {
-                folderAccess.beginWatching(tile.url, ownerID: watcherOwnerID)
+                updateFolderWatcher(for: tile.displayMode)
             }
             .onDisappear {
                 folderAccess.endWatching(tile.url, ownerID: watcherOwnerID)
+            }
+            .onChange(of: tile.displayMode) { _, displayMode in
+                updateFolderWatcher(for: displayMode)
             }
     }
 
@@ -128,12 +134,18 @@ struct FolderTileView: View {
     }
 
     private var reloadKey: String {
-        "\(tile.url.path)|\(permissions.userFolders)|\(tile.displayMode.rawValue)|\(tile.sortMode.rawValue)|\(folderAccess.changeToken)"
+        "\(tile.url.path)|\(tile.displayMode.rawValue)|\(tile.sortMode.rawValue)|\(folderAccess.changeToken)"
     }
 
     private var watcherOwnerID: String {
         "folder-tile:\(tile.url.standardizedFileURL.path)"
     }
-}
 
-extension PermissionStatus: Hashable {}
+    private func updateFolderWatcher(for displayMode: FolderTileDisplayMode) {
+        if displayMode == .folder {
+            folderAccess.endWatching(tile.url, ownerID: watcherOwnerID)
+        } else {
+            folderAccess.beginWatching(tile.url, ownerID: watcherOwnerID)
+        }
+    }
+}

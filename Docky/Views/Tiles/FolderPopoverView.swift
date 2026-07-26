@@ -14,7 +14,6 @@ struct FolderPopoverView: View {
     @Binding var isPresented: Bool
     let onPopoverSizeChange: (CGSize) -> Void
 
-    @ObservedObject private var permissions = PermissionsService.shared
     @ObservedObject private var folderAccess = FolderAccessService.shared
     @State private var currentEntry: FolderPopoverEntry
     @State private var backHistory: [FolderPopoverEntry]
@@ -227,6 +226,23 @@ struct FolderPopoverView: View {
             Text(currentEntry.displayName)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+
+            Text("Docky checks access to each pinned folder directly. If macOS blocked this folder, review Docky under Files & Folders and then try again.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Button("Review Files & Folders") {
+                    folderAccess.openFilesAndFoldersSettings()
+                }
+
+                Button("Try Again") {
+                    folderAccess.invalidateCache()
+                    currentEntry = refreshedEntry(for: currentEntry)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(20)
@@ -281,7 +297,7 @@ struct FolderPopoverView: View {
 
     private var popoverWidth: CGFloat {
         if case .unreadable = currentEntry.snapshot {
-            return 360
+            return 420
         }
 
         if items.isEmpty {
@@ -294,7 +310,7 @@ struct FolderPopoverView: View {
 
     private var popoverHeight: CGFloat {
         if case .unreadable = currentEntry.snapshot {
-            return 258
+            return 340
         }
 
         if items.isEmpty {
@@ -311,7 +327,7 @@ struct FolderPopoverView: View {
     }
 
     private var reloadKey: String {
-        "\(currentEntry.url.path)|\(permissions.userFolders)|\(folderAccess.changeToken)|\(isPresented)"
+        "\(currentEntry.url.path)|\(folderAccess.changeToken)|\(isPresented)"
     }
 
     private var watcherOwnerID: String {
