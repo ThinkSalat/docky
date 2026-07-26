@@ -10,7 +10,7 @@ import SwiftUI
 final class DockEditorHintWindowController: NSWindowController {
     private weak var mainWindow: MainWindow?
     private var cancellables: Set<AnyCancellable> = []
-    private var isInterruptingMainWindow = false
+    private var mainWindowInteractionLease: MainWindowInteractionLease?
     private var presentationWorkItem: DispatchWorkItem?
     private let animationDuration: TimeInterval = 0.16
     private let chipGap: CGFloat = 10
@@ -199,15 +199,12 @@ final class DockEditorHintWindowController: NSWindowController {
     }
 
     private func beginMainWindowInteraction() {
-        guard !isInterruptingMainWindow else { return }
-        mainWindow?.beginInteraction()
-        isInterruptingMainWindow = true
+        guard mainWindowInteractionLease?.isActive != true else { return }
+        mainWindowInteractionLease = mainWindow?.acquireInteractionLease()
     }
 
     private func endMainWindowInteraction() {
-        guard isInterruptingMainWindow else { return }
-        mainWindow?.endInteraction()
-        isInterruptingMainWindow = false
+        mainWindowInteractionLease = nil
     }
 }
 

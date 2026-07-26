@@ -366,13 +366,10 @@ struct FolderFanPresenter: NSViewRepresentable {
         private var items: [URL] = []
         var isPresented: Binding<Bool>
         private weak var window: NSWindow?
-        // Weak reference to the dock window so we can pair
-        // `beginInteraction()` (in `present`) with `endInteraction()`
-        // (in `tearDown`) and keep auto-hide deferred while the fan
-        // is on screen — same behavior as the grid popover and the
-        // folder list menu.
-        private weak var dockMainWindow: MainWindow?
-        private var isHoldingDockVisible = false
+        // Independently owned RAII hold keeps auto-hide deferred while the fan
+        // is on screen, without relying on the anchor or dock window surviving
+        // until teardown.
+        private var mainWindowInteractionLease: MainWindowInteractionLease?
         private var animationModel: FanAnimationModel?
         private var isClosing = false
         private var closeWorkItem: DispatchWorkItem?
@@ -394,15 +391,14 @@ struct FolderFanPresenter: NSViewRepresentable {
             guard window == nil, let anchorWindow = anchor.window else { return }
 
             // Tell the dock to defer auto-hide while the fan is on
-            // screen. Paired with the `endInteraction()` call in
-            // `tearDown`. Without this, dragging the cursor off the
+            // screen. The RAII lease is released in `tearDown`. Without this,
+            // dragging the cursor off the
             // tile (to click an item in the fan) lets the dock
             // start its auto-hide animation underneath, which both
             // looks wrong and breaks the click-through to the tile.
-            if let dockWindow = anchorWindow as? MainWindow, !isHoldingDockVisible {
-                dockWindow.beginInteraction()
-                dockMainWindow = dockWindow
-                isHoldingDockVisible = true
+            if let dockWindow = anchorWindow as? MainWindow,
+               mainWindowInteractionLease?.isActive != true {
+                mainWindowInteractionLease = dockWindow.acquireInteractionLease()
             }
 
             let anchorBoundsInWindow = anchor.convert(anchor.bounds, to: nil)
@@ -567,11 +563,7 @@ struct FolderFanPresenter: NSViewRepresentable {
             }
 
             // Release the dock auto-hide hold acquired in `present`.
-            if isHoldingDockVisible {
-                dockMainWindow?.endInteraction()
-                dockMainWindow = nil
-                isHoldingDockVisible = false
-            }
+            mainWindowInteractionLease = nil
 
             isClosing = false
 

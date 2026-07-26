@@ -24,10 +24,8 @@ final class ProfileSwitcherWindowController: NSWindowController {
     private let dockSettings = DockSettingsService.shared
     private let hostingController: NSHostingController<ProfileSwitcherButtonView>
     private let chromeGap: CGFloat = 8
-    /// Whether we've called `mainWindow.beginInteraction()` without a
-    /// matching `endInteraction()` yet. Keeps the count balanced when
-    /// the switcher's hover state flips repeatedly.
-    private var isHoldingMainInteraction = false
+    /// Independent RAII hold for the switcher's hover interaction.
+    private var mainWindowInteractionLease: MainWindowInteractionLease?
     /// Tracks the last visibility decision so we don't redundantly
     /// orderFront/orderOut the companion window on every observation
     /// tick. Driven by `applyStripVisibility`.
@@ -63,12 +61,6 @@ final class ProfileSwitcherWindowController: NSWindowController {
         observePositionChanges()
         observeSpaceBehavior()
         observeStripVisibility()
-    }
-
-    deinit {
-        if isHoldingMainInteraction {
-            mainWindow?.endInteraction()
-        }
     }
 
     @available(*, unavailable)
@@ -120,10 +112,7 @@ final class ProfileSwitcherWindowController: NSWindowController {
             window.orderOut(nil)
             // Drop the interaction hold so the dock can autohide if the
             // strip was active when it disappeared.
-            if isHoldingMainInteraction {
-                mainWindow?.endInteraction()
-                isHoldingMainInteraction = false
-            }
+            mainWindowInteractionLease = nil
         }
     }
 
@@ -137,14 +126,12 @@ final class ProfileSwitcherWindowController: NSWindowController {
     }
 
     private func applySwitcherActive(_ active: Bool) {
-        guard let mainWindow else { return }
-        if active, !isHoldingMainInteraction {
-            mainWindow.beginInteraction()
-            isHoldingMainInteraction = true
-        } else if !active, isHoldingMainInteraction {
-            mainWindow.endInteraction()
-            isHoldingMainInteraction = false
+        guard active else {
+            mainWindowInteractionLease = nil
+            return
         }
+        guard let mainWindow, mainWindowInteractionLease?.isActive != true else { return }
+        mainWindowInteractionLease = mainWindow.acquireInteractionLease()
     }
 
     private func observeMainWindow() {

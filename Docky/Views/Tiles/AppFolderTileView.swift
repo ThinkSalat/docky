@@ -821,8 +821,8 @@ struct AppFolderPopoverView: View {
         let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier)
         DockDragService.shared.sourceFolderTileID = tileID
         DockDragService.shared.sourceFolderBundleIdentifier = app.bundleIdentifier
-        // Set kind synchronously so the dock's autohide gate ([[shouldRemainVisible]])
-        // engages before the popover would otherwise close. draggingEntered
+        // Set kind synchronously so the dock's drag visibility hold engages
+        // before the popover would otherwise close. draggingEntered
         // overwrites kind with the same value once the cursor reaches the
         // dock window.
         if let url {
@@ -876,9 +876,8 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
         private var tileID: String
         private var isPresented: Binding<Bool>
         private var preferredEdge: NSRectEdge
-        private weak var anchorView: NSView?
         private var isShowing = false
-        private var isInterruptingAutohide = false
+        private var mainWindowInteractionLease: MainWindowInteractionLease?
 
         init(tile: AppFolderTile, tileID: String, isPresented: Binding<Bool>, preferredEdge: NSRectEdge) {
             self.tile = tile
@@ -898,7 +897,6 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
         func show(relativeTo view: NSView) {
             guard view.window != nil, !isShowing else { return }
 
-            anchorView = view
             isShowing = true
             beginAutohideInterruption(for: view)
             popUp(menu: buildMenu(), in: view)
@@ -1019,15 +1017,13 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
         }
 
         private func beginAutohideInterruption(for view: NSView) {
-            guard !isInterruptingAutohide else { return }
-            (view.window as? MainWindow)?.beginInteraction()
-            isInterruptingAutohide = true
+            guard mainWindowInteractionLease?.isActive != true else { return }
+            mainWindowInteractionLease =
+                (view.window as? MainWindow)?.acquireInteractionLease()
         }
 
         private func endAutohideInterruption() {
-            guard isInterruptingAutohide else { return }
-            (anchorView?.window as? MainWindow)?.endInteraction()
-            isInterruptingAutohide = false
+            mainWindowInteractionLease = nil
         }
     }
 }
@@ -1073,8 +1069,7 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
         private var tileID: String
         private var isPresented: Binding<Bool>
         private var preferredEdge: NSRectEdge
-        private weak var anchorView: NSView?
-        private var isInterruptingAutohide = false
+        private var mainWindowInteractionLease: MainWindowInteractionLease?
         private var globalClickMonitor: Any?
         private var localClickMonitor: Any?
         private var dragEndSubscription: AnyCancellable?
@@ -1109,7 +1104,6 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
 
         func show(relativeTo view: NSView) {
             guard view.window != nil, !popover.isShown else { return }
-            anchorView = view
             beginAutohideInterruption(for: view)
             // Size the popover for the current tile BEFORE showing.
             // Why: relying on SwiftUI's .onAppear to resize after show left the
@@ -1215,15 +1209,13 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
         }
 
         private func beginAutohideInterruption(for view: NSView) {
-            guard !isInterruptingAutohide else { return }
-            (view.window as? MainWindow)?.beginInteraction()
-            isInterruptingAutohide = true
+            guard mainWindowInteractionLease?.isActive != true else { return }
+            mainWindowInteractionLease =
+                (view.window as? MainWindow)?.acquireInteractionLease()
         }
 
         private func endAutohideInterruption() {
-            guard isInterruptingAutohide else { return }
-            (anchorView?.window as? MainWindow)?.endInteraction()
-            isInterruptingAutohide = false
+            mainWindowInteractionLease = nil
         }
 
         private func updateContentSize(_ size: CGSize) {

@@ -156,7 +156,7 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
         private var actionProvider: (NSEvent.ModifierFlags) -> [ContextAction]
         private var preferredEdge: NSRectEdge
         private var onPresentationChanged: (Bool) -> Void
-        private var isInterruptingAutohide = false
+        private var mainWindowInteractionLease: MainWindowInteractionLease?
 
         init(
             actionProvider: @escaping (NSEvent.ModifierFlags) -> [ContextAction],
@@ -259,15 +259,13 @@ struct ContextActionMenuPresenter: NSViewRepresentable {
         }
 
         private func beginAutohideInterruption(for view: NSView) {
-            guard !isInterruptingAutohide else { return }
-            (view.window as? MainWindow)?.beginInteraction()
-            isInterruptingAutohide = true
+            guard mainWindowInteractionLease?.isActive != true else { return }
+            mainWindowInteractionLease =
+                (view.window as? MainWindow)?.acquireInteractionLease()
         }
 
         private func endAutohideInterruption() {
-            guard isInterruptingAutohide else { return }
-            (anchorView?.window as? MainWindow)?.endInteraction()
-            isInterruptingAutohide = false
+            mainWindowInteractionLease = nil
         }
 
         private func buildMenu(actions: [ContextAction]) -> NSMenu {

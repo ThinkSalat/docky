@@ -2597,9 +2597,8 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
         private var tile: FolderTile
         private var isPresented: Binding<Bool>
         private var preferredEdge: NSRectEdge
-        private weak var anchorView: NSView?
         private var isShowing = false
-        private var isInterruptingAutohide = false
+        private var mainWindowInteractionLease: MainWindowInteractionLease?
         private var folderURLByMenuID: [ObjectIdentifier: URL] = [:]
         private var inlineItemLimit: Int = 60
 
@@ -2619,7 +2618,6 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
         func show(relativeTo view: NSView) {
             guard view.window != nil, !isShowing else { return }
 
-            anchorView = view
             isShowing = true
             beginAutohideInterruption(for: view)
             folderURLByMenuID.removeAll()
@@ -2681,6 +2679,14 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
                 let unreadableItem = NSMenuItem(title: "Can't read folder contents", action: nil, keyEquivalent: "")
                 unreadableItem.isEnabled = false
                 menu.addItem(unreadableItem)
+
+                let privacyItem = NSMenuItem(
+                    title: "Review Files & Folders Access…",
+                    action: #selector(openFilesAndFoldersSettings(_:)),
+                    keyEquivalent: ""
+                )
+                privacyItem.target = self
+                menu.addItem(privacyItem)
             }
 
             if !menu.items.isEmpty {
@@ -2744,6 +2750,10 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
             }
         }
 
+        @objc private func openFilesAndFoldersSettings(_ sender: NSMenuItem) {
+            FolderAccessService.shared.openFilesAndFoldersSettings()
+        }
+
         private func displayName(for itemURL: URL) -> String {
             (try? itemURL.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? itemURL.lastPathComponent
         }
@@ -2788,15 +2798,13 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
         }
 
         private func beginAutohideInterruption(for view: NSView) {
-            guard !isInterruptingAutohide else { return }
-            (view.window as? MainWindow)?.beginInteraction()
-            isInterruptingAutohide = true
+            guard mainWindowInteractionLease?.isActive != true else { return }
+            mainWindowInteractionLease =
+                (view.window as? MainWindow)?.acquireInteractionLease()
         }
 
         private func endAutohideInterruption() {
-            guard isInterruptingAutohide else { return }
-            (anchorView?.window as? MainWindow)?.endInteraction()
-            isInterruptingAutohide = false
+            mainWindowInteractionLease = nil
         }
     }
 }
@@ -2862,8 +2870,7 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
         private var isPresented: Binding<Bool>
         private var preferredEdge: NSRectEdge
         private var lastContentSize = NSSize(width: 320, height: 240)
-        private weak var anchorView: NSView?
-        private var isInterruptingAutohide = false
+        private var mainWindowInteractionLease: MainWindowInteractionLease?
         private var globalClickMonitor: Any?
         private var localClickMonitor: Any?
         private var dragEndSubscription: AnyCancellable?
@@ -2909,7 +2916,6 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
 
         func show(relativeTo view: NSView) {
             guard view.window != nil, !popover.isShown else { return }
-            anchorView = view
             beginAutohideInterruption(for: view)
             updateContentSize(lastContentSize)
             popover.show(relativeTo: anchorRect(in: view.bounds), of: view, preferredEdge: preferredEdge)
@@ -3003,15 +3009,13 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
         }
 
         private func beginAutohideInterruption(for view: NSView) {
-            guard !isInterruptingAutohide else { return }
-            (view.window as? MainWindow)?.beginInteraction()
-            isInterruptingAutohide = true
+            guard mainWindowInteractionLease?.isActive != true else { return }
+            mainWindowInteractionLease =
+                (view.window as? MainWindow)?.acquireInteractionLease()
         }
 
         private func endAutohideInterruption() {
-            guard isInterruptingAutohide else { return }
-            (anchorView?.window as? MainWindow)?.endInteraction()
-            isInterruptingAutohide = false
+            mainWindowInteractionLease = nil
         }
 
         private func updateContentSize(_ size: CGSize) {

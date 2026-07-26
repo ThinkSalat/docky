@@ -27,43 +27,15 @@ func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
 @_silgen_name("CGSSpaceGetType")
 private func CGSSpaceGetType(_ connection: CGSConnectionID, _ space: UInt64) -> Int32
 
-/// Whether the focused Mission Control Space is a native fullscreen Space.
-///
-/// `nil` deliberately means SkyLight returned an unknown/system Space type,
-/// allowing callers to fall back to window inspection. This is runtime-only:
-/// it never rewrites Docky's persisted autohide preference.
-struct ActiveSpaceSnapshot {
-    let spaceID: UInt64
-    let rawType: Int32?
-    let isFullscreen: Bool?
-}
-
 func activeSpaceSnapshot() -> ActiveSpaceSnapshot {
     let connection = CGSMainConnectionID()
     let spaceID = CGSGetActiveSpace(connection)
     guard spaceID != 0 else {
-        return ActiveSpaceSnapshot(
-            spaceID: 0,
-            rawType: nil,
-            isFullscreen: nil
-        )
+        return .unknown
     }
 
     let rawType = CGSSpaceGetType(connection, spaceID)
-    let isFullscreen: Bool?
-    switch rawType {
-    case 0:
-        isFullscreen = false
-    case 4:
-        isFullscreen = true
-    default:
-        isFullscreen = nil
-    }
-    return ActiveSpaceSnapshot(
-        spaceID: spaceID,
-        rawType: rawType,
-        isFullscreen: isFullscreen
-    )
+    return ActiveSpaceSnapshot(spaceID: spaceID, rawType: rawType)
 }
 
 func activeSpaceFullscreenState() -> Bool? {
@@ -76,6 +48,70 @@ func activeSpaceFullscreenState() -> Bool? {
 // the active space's 1-based positional index.
 @_silgen_name("CGSCopyManagedDisplaySpaces")
 func CGSCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> Unmanaged<CFArray>?
+
+/// Returns the current Mission Control Space for the physical display backing
+/// `screen`. Unlike `CGSGetActiveSpace`, this does not accidentally report the
+/// focused display when Docky is configured for a different display.
+///
+/// `nil` fullscreen state is intentional when SkyLight's private schema cannot
+/// be mapped unambiguously. Callers should retain their geometry fallback.
+func activeSpaceSnapshot(for screen: NSScreen?) -> ActiveSpaceSnapshot {
+    guard let screen,
+          let displayID = screen.deviceDescription[
+              NSDeviceDescriptionKey("NSScreenNumber")
+          ] as? CGDirectDisplayID
+    else {
+        return .unknown
+    }
+
+    let connection = CGSMainConnectionID()
+    guard let rawDisplays = CGSCopyManagedDisplaySpaces(connection)?
+        .takeRetainedValue() as? [[String: Any]]
+    else {
+        return .unknown
+    }
+
+    let records = rawDisplays.compactMap(managedDisplaySpaceRecord)
+    let targetUUID = CGDisplayCreateUUIDFromDisplayID(displayID)
+        .map { CFUUIDCreateString(nil, $0.takeRetainedValue()) as String }
+    guard let resolved = DisplaySpaceSnapshotResolver.resolve(
+        records: records,
+        targetDisplayUUID: targetUUID,
+        targetIsMainDisplay: displayID == CGMainDisplayID()
+    ) else {
+        return .unknown
+    }
+
+    if resolved.rawType == nil, resolved.spaceID != 0 {
+        return ActiveSpaceSnapshot(
+            spaceID: resolved.spaceID,
+            rawType: CGSSpaceGetType(connection, resolved.spaceID)
+        )
+    }
+    return resolved
+}
+
+private func managedDisplaySpaceRecord(
+    _ display: [String: Any]
+) -> ManagedDisplaySpaceRecord? {
+    guard let displayIdentifier = display["Display Identifier"] as? String else {
+        return nil
+    }
+    let currentSpace = (display["Current Space"] as? [String: Any])
+        ?? (display["Collapsed Space"] as? [String: Any])
+    guard let currentSpace,
+          let spaceID = (currentSpace["id64"] as? NSNumber)?.uint64Value,
+          spaceID != 0
+    else {
+        return nil
+    }
+    let rawType = (currentSpace["type"] as? NSNumber)?.int32Value
+    return ManagedDisplaySpaceRecord(
+        displayIdentifier: displayIdentifier,
+        spaceID: spaceID,
+        rawType: rawType
+    )
+}
 
 // Returns the system CGWindowID backing an AX window element. Preferred over
 // the AXWindowNumber attribute, which some apps populate with their own

@@ -10,7 +10,7 @@ import SwiftUI
 final class LaunchpadOverlayWindowController: NSWindowController {
     private weak var mainWindow: MainWindow?
     private var cancellables: Set<AnyCancellable> = []
-    private var isInterruptingMainWindow = false
+    private var mainWindowInteractionLease: MainWindowInteractionLease?
     private let animationDuration: TimeInterval = 0.18
     private let preferences = DockyPreferences.shared
     /// The screen the launchpad is currently anchored to. Resolved at present
@@ -167,15 +167,12 @@ final class LaunchpadOverlayWindowController: NSWindowController {
     }
 
     private func beginMainWindowInteraction() {
-        guard !isInterruptingMainWindow else { return }
-        mainWindow?.beginInteraction()
-        isInterruptingMainWindow = true
+        guard mainWindowInteractionLease?.isActive != true else { return }
+        mainWindowInteractionLease = mainWindow?.acquireInteractionLease()
     }
 
     private func endMainWindowInteraction() {
-        guard isInterruptingMainWindow else { return }
-        mainWindow?.endInteraction()
-        isInterruptingMainWindow = false
+        mainWindowInteractionLease = nil
     }
 }
 
@@ -2217,4 +2214,3 @@ private struct LaunchpadOverlayKeyMonitor: NSViewRepresentable {
         }
     }
 }
-

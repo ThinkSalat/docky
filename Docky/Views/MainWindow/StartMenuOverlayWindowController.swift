@@ -22,7 +22,7 @@ import SwiftUI
 final class StartMenuOverlayWindowController: NSWindowController {
     private weak var mainWindow: MainWindow?
     private var cancellables: Set<AnyCancellable> = []
-    private var isInterruptingMainWindow = false
+    private var mainWindowInteractionLease: MainWindowInteractionLease?
     private var isAttachedToParent = false
     private var localDismissMonitor: Any?
     private var globalDismissMonitor: Any?
@@ -127,13 +127,14 @@ final class StartMenuOverlayWindowController: NSWindowController {
     private func dismiss() {
         removeDismissMonitors()
         animateAlpha(to: 0) { [weak self] in
-            guard let self, let panel = self.window as? StartMenuPanel else { return }
+            guard let self else { return }
+            defer { self.endMainInteraction() }
+            guard let panel = self.window as? StartMenuPanel else { return }
             if self.isAttachedToParent, let main = self.mainWindow {
                 main.removeChildWindow(panel)
                 self.isAttachedToParent = false
             }
             panel.orderOut(nil)
-            self.endMainInteraction()
         }
     }
 
@@ -191,15 +192,12 @@ final class StartMenuOverlayWindowController: NSWindowController {
     }
 
     private func beginMainInteraction() {
-        guard !isInterruptingMainWindow else { return }
-        mainWindow?.beginInteraction()
-        isInterruptingMainWindow = true
+        guard mainWindowInteractionLease?.isActive != true else { return }
+        mainWindowInteractionLease = mainWindow?.acquireInteractionLease()
     }
 
     private func endMainInteraction() {
-        guard isInterruptingMainWindow else { return }
-        mainWindow?.endInteraction()
-        isInterruptingMainWindow = false
+        mainWindowInteractionLease = nil
     }
 
     /// Click-outside-to-dismiss. Local monitor fires when the click

@@ -176,11 +176,6 @@ final class MainWindow: NSPanel {
 
     override var level: NSWindow.Level { get { .mainMenu } set {} }
 
-    private enum VisibilityState {
-        case visible
-        case hidden
-    }
-
     private let backgroundBlurRadius = 10
     private let hiddenRevealThickness: CGFloat = 2
     private let tileMutationAnimationDuration: TimeInterval = 0.18
@@ -199,8 +194,10 @@ final class MainWindow: NSPanel {
     private var globalDragRevealMonitor: Any?
     private var localDragRevealMonitor: Any?
     private var isPointerInsideWindow = false
-    private var activeInteractionCount = 0
-    private var visibilityState: VisibilityState
+    private var pointerRevealAuthorized = false
+    private var isDragActiveForVisibility = false
+    private var activeInteractionLeaseIDs: Set<UUID> = []
+    private var visibilityState: DockVisibility
     private var hasCompletedSetup = false
     private var hasResolvedInitialFrame = false
     private var lastPointerScreenFrame: CGRect?
@@ -213,15 +210,33 @@ final class MainWindow: NSPanel {
         isFullscreenActiveOnTargetScreen && preferences.hidesDuringFullscreen
     }
 
+    private var maximizedHidingActive: Bool {
+        isMaximizedActiveOnTargetScreen && preferences.maximizedWindowBehavior == .hideDocky
+    }
+
+    private var visibilityInputs: DockVisibilityInputs {
+        DockVisibilityInputs(
+            autohidePreferenceEnabled: preferences.autohidesWindow,
+            fullscreenHidingActive: fullscreenHidingActive,
+            maximizedHidingActive: maximizedHidingActive,
+            pointerInside: isPointerInsideWindow,
+            pointerRevealAuthorized: pointerRevealAuthorized,
+            activeInteractionLeaseIDs: activeInteractionLeaseIDs,
+            editModeActive: editMode.isActive,
+            dragActive: isDragActiveForVisibility
+        )
+    }
+
+    private var visibilityDecision: DockVisibilityDecision {
+        DockVisibilityReducer.reduce(visibilityInputs)
+    }
+
     private var effectivelyAutohides: Bool {
-        preferences.autohidesWindow
-            || fullscreenHidingActive
-            || (isMaximizedActiveOnTargetScreen && preferences.maximizedWindowBehavior == .hideDocky)
+        visibilityDecision.effectivelyAutohides
     }
 
     private var isContentOverlapActive: Bool {
-        fullscreenHidingActive
-            || (isMaximizedActiveOnTargetScreen && preferences.maximizedWindowBehavior == .hideDocky)
+        visibilityDecision.contentOverlapHidingActive
     }
 
     /// The frame Docky claims for content reservation, or nil when Docky is
@@ -307,9 +322,7 @@ final class MainWindow: NSPanel {
             previousMaximized: false,
             previousEffectiveAutohide: preferences.autohidesWindow
         )
-        if isContentOverlapActive {
-            visibilityState = shouldRemainVisible ? .visible : .hidden
-        }
+        visibilityState = visibilityDecision.visibility
     }
 
     deinit {
@@ -350,7 +363,7 @@ final class MainWindow: NSPanel {
                 "occlusionState": occlusionState.rawValue,
                 "frame": NSStringFromRect(frame),
                 "pointerInside": isPointerInsideWindow,
-                "interactionCount": activeInteractionCount,
+                "interactionCount": activeInteractionLeaseIDs.count,
             ])
         }
         super.sendEvent(event)
@@ -411,12 +424,13 @@ final class MainWindow: NSPanel {
             .store(in: &cancellables)
 
         editMode.$isActive
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isActive in
                 guard let self else { return }
                 if isActive {
                     self.hideWorkItem?.cancel()
-                    self.setVisibility(.visible, animated: true)
+                    self.applyEffectiveVisibility(animated: true)
                 } else {
                     self.scheduleHideIfNeeded()
                 }
@@ -433,9 +447,10 @@ final class MainWindow: NSPanel {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] hasDrag in
                 guard let self else { return }
+                self.isDragActiveForVisibility = hasDrag
                 if hasDrag {
                     self.hideWorkItem?.cancel()
-                    self.setVisibility(.visible, animated: true)
+                    self.applyEffectiveVisibility(animated: true)
                 } else {
                     self.scheduleHideIfNeeded()
                 }
@@ -448,10 +463,13 @@ final class MainWindow: NSPanel {
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.applyCurrentFrame(animated: false)
-                self?.updateFullscreenStateAndApply(
+                guard let self else { return }
+                self.reconcileTransientVisibilityState(reason: "screenParametersChanged")
+                self.applyCurrentFrame(animated: false)
+                self.updateFullscreenStateAndApply(
                     animated: false,
-                    reason: "screenParametersChanged"
+                    reason: "screenParametersChanged",
+                    forceVisibilityApply: true
                 )
             }
             .store(in: &cancellables)
@@ -461,15 +479,18 @@ final class MainWindow: NSPanel {
         workspaceCenter.publisher(for: NSWorkspace.activeSpaceDidChangeNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.applyCurrentFrame(animated: false)
-                self?.updateFullscreenStateAndApply(
+                guard let self else { return }
+                self.reconcileTransientVisibilityState(reason: "activeSpaceNotification")
+                self.applyCurrentFrame(animated: false)
+                self.updateFullscreenStateAndApply(
                     animated: true,
-                    reason: "activeSpaceNotification"
+                    reason: "activeSpaceNotification",
+                    forceVisibilityApply: true
                 )
                 // The space change fires during the fullscreen exit animation
                 // while the fullscreen window is still on-screen. Re-check once
                 // the animation has had time to complete.
-                self?.scheduleFullscreenRecheck()
+                self.scheduleFullscreenRecheck()
             }
             .store(in: &cancellables)
 
@@ -488,17 +509,27 @@ final class MainWindow: NSPanel {
     private func observeWindowPlacementInputs() {
         observeChanges { [weak self] in
             _ = DockyPreferences.shared.windowSpaceBehavior
-            self?.applyCollectionBehavior()
+            guard let self else { return }
+            self.applyCollectionBehavior()
+            self.reconcileTransientVisibilityState(reason: "spaceBehaviorPreferenceChanged")
+            self.updateFullscreenStateAndApply(
+                animated: false,
+                reason: "spaceBehaviorPreferenceChanged",
+                forceVisibilityApply: true
+            )
         }
         .store(in: &cancellables)
 
         observeChanges { [weak self] in
             _ = DockyPreferences.shared.windowDisplayTarget
-            self?.lastPointerScreenFrame = nil
-            self?.updatePointerScreenMonitoring()
-            self?.updateFullscreenStateAndApply(
+            guard let self else { return }
+            self.lastPointerScreenFrame = nil
+            self.reconcileTransientVisibilityState(reason: "displayTargetPreferenceChanged")
+            self.updatePointerScreenMonitoring()
+            self.updateFullscreenStateAndApply(
                 animated: true,
-                reason: "displayTargetPreferenceChanged"
+                reason: "displayTargetPreferenceChanged",
+                forceVisibilityApply: true
             )
         }
         .store(in: &cancellables)
@@ -537,9 +568,12 @@ final class MainWindow: NSPanel {
         observeChanges { [weak self] in
             _ = DockyPreferences.shared.maximizedWindowBehavior
             _ = DockyPreferences.shared.hidesDuringFullscreen
-            self?.updateFullscreenStateAndApply(
+            guard let self else { return }
+            self.reconcileTransientVisibilityState(reason: "overlapPreferenceChanged")
+            self.updateFullscreenStateAndApply(
                 animated: true,
-                reason: "overlapPreferenceChanged"
+                reason: "overlapPreferenceChanged",
+                forceVisibilityApply: true
             )
         }
         .store(in: &cancellables)
@@ -599,66 +633,86 @@ final class MainWindow: NSPanel {
         guard nextScreenFrame != lastPointerScreenFrame else { return }
         lastPointerScreenFrame = nextScreenFrame
         DispatchQueue.main.async { [weak self] in
-            self?.applyCurrentFrame(animated: false)
-            self?.updateFullscreenStateAndApply(
+            guard let self else { return }
+            self.reconcileTransientVisibilityState(reason: "pointerDisplayChanged")
+            self.applyCurrentFrame(animated: false)
+            self.updateFullscreenStateAndApply(
                 animated: true,
-                reason: "pointerDisplayChanged"
+                reason: "pointerDisplayChanged",
+                forceVisibilityApply: true
             )
         }
     }
 
     func pointerDidEnterWindow() {
         isPointerInsideWindow = true
+        pointerRevealAuthorized = false
         hideWorkItem?.cancel()
         DiagnosticsTrace.shared.record(.input, "pointerEnteredMainWindow", fields: [
             "visibilityState": String(describing: visibilityState),
             "effectivelyAutohides": effectivelyAutohides,
             "fullscreen": isFullscreenActiveOnTargetScreen,
             "maximized": isMaximizedActiveOnTargetScreen,
+            "requiresRevealAuthorization": visibilityDecision.requiresPointerRevealAuthorization,
+            "leaseBlocksRevealAuthorization":
+                visibilityDecision.interactionLeaseBlocksPointerRevealAuthorization,
         ])
 
-        guard effectivelyAutohides else { return }
-
-        if shouldDwellBeforeReveal {
-            scheduleFullscreenReveal()
+        if visibilityDecision.requiresPointerRevealAuthorization {
+            applyEffectiveVisibility(animated: true)
+            guard !visibilityDecision.interactionLeaseBlocksPointerRevealAuthorization else {
+                fullscreenRevealWorkItem?.cancel()
+                fullscreenRevealWorkItem = nil
+                return
+            }
+            if preferences.fullscreenRevealDelay > 0 {
+                scheduleFullscreenReveal()
+            } else {
+                pointerRevealAuthorized = true
+                applyEffectiveVisibility(animated: true)
+            }
             return
         }
 
-        setVisibility(.visible, animated: true)
+        pointerRevealAuthorized = isContentOverlapActive
+        applyEffectiveVisibility(animated: true)
     }
 
     func pointerDidExitWindow() {
         isPointerInsideWindow = false
+        pointerRevealAuthorized = false
         fullscreenRevealWorkItem?.cancel()
         fullscreenRevealWorkItem = nil
         DiagnosticsTrace.shared.record(.input, "pointerExitedMainWindow", fields: [
             "visibilityState": String(describing: visibilityState),
             "effectivelyAutohides": effectivelyAutohides,
-            "interactionCount": activeInteractionCount,
+            "interactionCount": activeInteractionLeaseIDs.count,
         ])
         scheduleHideIfNeeded()
-    }
-
-    private var shouldDwellBeforeReveal: Bool {
-        isContentOverlapActive
-            && visibilityState == .hidden
-            && preferences.fullscreenRevealDelay > 0
     }
 
     private func scheduleFullscreenReveal() {
         fullscreenRevealWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
-            guard let self,
-                  self.isPointerInsideWindow,
-                  self.effectivelyAutohides
+            guard let self else { return }
+            self.fullscreenRevealWorkItem = nil
+            guard self.isPointerInsideWindow,
+                  self.isContentOverlapActive
             else { return }
-            self.setVisibility(.visible, animated: true)
+            self.pointerRevealAuthorized = true
+            self.applyEffectiveVisibility(animated: true)
         }
         fullscreenRevealWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + preferences.fullscreenRevealDelay, execute: workItem)
     }
 
     private func syncPointerPresenceForDragSession() {
+        let hasDrag = DockDragService.shared.kind != nil
+        if hasDrag != isDragActiveForVisibility {
+            isDragActiveForVisibility = hasDrag
+            applyEffectiveVisibility(animated: true)
+        }
+
         let containsPointer = frame.contains(NSEvent.mouseLocation)
         if containsPointer, !isPointerInsideWindow {
             pointerDidEnterWindow()
@@ -667,86 +721,173 @@ final class MainWindow: NSPanel {
         }
     }
 
-    func beginInteraction() {
-        activeInteractionCount += 1
+    func acquireInteractionLease() -> MainWindowInteractionLease {
+        precondition(
+            Thread.isMainThread,
+            "MainWindow interaction leases must be acquired on the main thread"
+        )
+        let id = UUID()
+        activeInteractionLeaseIDs.insert(id)
         hideWorkItem?.cancel()
+        // A lease can reveal Docky before the edge-dwell timer completes.
+        // Do not let that now-hidden timer authorize the pointer while the
+        // presenter is holding visibility; once the presenter closes, an
+        // unauthorized pointer must reduce back to hidden.
+        if isContentOverlapActive, !pointerRevealAuthorized {
+            fullscreenRevealWorkItem?.cancel()
+            fullscreenRevealWorkItem = nil
+        }
         DiagnosticsTrace.shared.record(.input, "interactionBegan", fields: [
-            "interactionCount": activeInteractionCount,
+            "interactionCount": activeInteractionLeaseIDs.count,
             "visibilityState": String(describing: visibilityState),
         ])
+        applyEffectiveVisibility(animated: true)
 
-        guard effectivelyAutohides else { return }
-        setVisibility(.visible, animated: true)
+        return MainWindowInteractionLease(
+            id: id,
+            onRelease: { [weak self] leaseID in
+                self?.releaseInteractionLease(leaseID)
+            },
+            isActive: { [weak self] in
+                self?.activeInteractionLeaseIDs.contains(id) == true
+            }
+        )
     }
 
-    func endInteraction() {
-        activeInteractionCount = max(0, activeInteractionCount - 1)
+    private func releaseInteractionLease(_ id: UUID) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.releaseInteractionLease(id)
+            }
+            return
+        }
+
+        guard activeInteractionLeaseIDs.remove(id) != nil else { return }
         DiagnosticsTrace.shared.record(.input, "interactionEnded", fields: [
-            "interactionCount": activeInteractionCount,
+            "interactionCount": activeInteractionLeaseIDs.count,
             "visibilityState": String(describing: visibilityState),
         ])
+
+        // If this was the last hold and the pointer entered while a presenter
+        // was open, hide first and start a new dwell from the release boundary.
+        // Time spent visible only because of a lease never earns edge reveal.
+        let decision = visibilityDecision
+        if activeInteractionLeaseIDs.isEmpty,
+           decision.requiresPointerRevealAuthorization,
+           decision.visibility == .hidden {
+            fullscreenRevealWorkItem?.cancel()
+            fullscreenRevealWorkItem = nil
+            if preferences.fullscreenRevealDelay > 0 {
+                applyEffectiveVisibility(animated: true)
+                scheduleFullscreenReveal()
+            } else {
+                pointerRevealAuthorized = true
+                applyEffectiveVisibility(animated: true)
+            }
+            return
+        }
         scheduleHideIfNeeded()
+    }
+
+    /// Space/display/fullscreen changes can strand AppKit tracking areas and
+    /// presenters without their matching exit/close callback. Reset transient
+    /// claims at the boundary; existing lease objects become inert and their
+    /// eventual RAII release remains idempotent.
+    private func reconcileTransientVisibilityState(reason: String) {
+        let previousLeaseCount = activeInteractionLeaseIDs.count
+        let hadTransientState =
+            isPointerInsideWindow
+            || pointerRevealAuthorized
+            || isDragActiveForVisibility
+            || previousLeaseCount > 0
+        if hadTransientState {
+            DiagnosticsTrace.shared.record(
+                .visibility,
+                "transientVisibilityStateReconciled",
+                fields: [
+                    "reason": reason,
+                    "pointerInside": isPointerInsideWindow,
+                    "pointerRevealAuthorized": pointerRevealAuthorized,
+                    "interactionCount": previousLeaseCount,
+                    "dragActive": isDragActiveForVisibility,
+                ]
+            )
+        }
+        hideWorkItem?.cancel()
+        hideWorkItem = nil
+        fullscreenRevealWorkItem?.cancel()
+        fullscreenRevealWorkItem = nil
+        isPointerInsideWindow = false
+        pointerRevealAuthorized = false
+        isDragActiveForVisibility = false
+        activeInteractionLeaseIDs.removeAll()
+        DockMagnificationService.shared.clearPointer()
+        // A still-live drag reasserts itself through the next drag event or
+        // DockDragService publication. A stranded pre-transition value cannot
+        // keep Docky visible indefinitely.
     }
 
     private func applyEffectiveVisibility(animated: Bool) {
         hideWorkItem?.cancel()
-
-        if effectivelyAutohides {
-            let nextState: VisibilityState = shouldRemainVisible ? .visible : .hidden
-            DiagnosticsTrace.shared.record(.visibility, "effectiveVisibilityApplied", fields: [
-                "effectiveAutohide": true,
-                "nextState": String(describing: nextState),
-                "pointerInside": isPointerInsideWindow,
-                "interactionCount": activeInteractionCount,
-                "editMode": editMode.isActive,
-                "dragActive": DockDragService.shared.kind != nil,
-                "animated": animated,
-            ])
-            setVisibility(nextState, animated: animated)
-            return
-        }
-
+        hideWorkItem = nil
+        let decision = visibilityDecision
         DiagnosticsTrace.shared.record(.visibility, "effectiveVisibilityApplied", fields: [
-            "effectiveAutohide": false,
-            "nextState": "visible",
+            "effectiveAutohide": decision.effectivelyAutohides,
+            "nextState": String(describing: decision.visibility),
+            "pointerInside": isPointerInsideWindow,
+            "pointerRevealAuthorized": pointerRevealAuthorized,
+            "interactionCount": activeInteractionLeaseIDs.count,
+            "editMode": editMode.isActive,
+            "dragActive": isDragActiveForVisibility,
             "animated": animated,
         ])
-        setVisibility(.visible, animated: animated)
+        setVisibility(decision.visibility, animated: animated)
     }
 
     private func scheduleHideIfNeeded() {
         hideWorkItem?.cancel()
+        hideWorkItem = nil
 
+        let decision = visibilityDecision
         let decisionSignature = [
-            String(effectivelyAutohides),
+            String(decision.effectivelyAutohides),
+            String(describing: decision.visibility),
             String(isPointerInsideWindow),
-            String(activeInteractionCount),
+            String(pointerRevealAuthorized),
+            String(activeInteractionLeaseIDs.count),
             String(editMode.isActive),
-            String(DockDragService.shared.kind != nil),
+            String(isDragActiveForVisibility),
         ].joined(separator: "|")
         if decisionSignature != lastHideDecisionSignature {
             lastHideDecisionSignature = decisionSignature
             DiagnosticsTrace.shared.record(.visibility, "hideSchedulingEvaluated", fields: [
-                "effectiveAutohide": effectivelyAutohides,
-                "shouldRemainVisible": shouldRemainVisible,
+                "effectiveAutohide": decision.effectivelyAutohides,
+                "shouldRemainVisible": decision.visibility == .visible,
                 "pointerInside": isPointerInsideWindow,
-                "interactionCount": activeInteractionCount,
+                "pointerRevealAuthorized": pointerRevealAuthorized,
+                "interactionCount": activeInteractionLeaseIDs.count,
                 "editMode": editMode.isActive,
-                "dragActive": DockDragService.shared.kind != nil,
+                "dragActive": isDragActiveForVisibility,
                 "delaySeconds": preferences.autohideWindowDelay,
             ])
         }
 
-        guard effectivelyAutohides, !shouldRemainVisible else { return }
+        guard decision.visibility == .hidden else {
+            applyEffectiveVisibility(animated: true)
+            return
+        }
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            guard !self.shouldRemainVisible else {
+            self.hideWorkItem = nil
+            let latestDecision = self.visibilityDecision
+            guard latestDecision.visibility == .hidden else {
                 DiagnosticsTrace.shared.record(.visibility, "hideTimerBlocked", fields: [
                     "pointerInside": self.isPointerInsideWindow,
-                    "interactionCount": self.activeInteractionCount,
+                    "pointerRevealAuthorized": self.pointerRevealAuthorized,
+                    "interactionCount": self.activeInteractionLeaseIDs.count,
                     "editMode": self.editMode.isActive,
-                    "dragActive": DockDragService.shared.kind != nil,
+                    "dragActive": self.isDragActiveForVisibility,
                 ])
                 return
             }
@@ -757,16 +898,7 @@ final class MainWindow: NSPanel {
         DispatchQueue.main.asyncAfter(deadline: .now() + preferences.autohideWindowDelay, execute: workItem)
     }
 
-    private var shouldRemainVisible: Bool {
-        isPointerInsideWindow || activeInteractionCount > 0 || editMode.isActive || DockDragService.shared.kind != nil
-    }
-
-    private func setVisibility(_ state: VisibilityState, animated: Bool) {
-        if state == .visible {
-            fullscreenRevealWorkItem?.cancel()
-            fullscreenRevealWorkItem = nil
-        }
-
+    private func setVisibility(_ state: DockVisibility, animated: Bool) {
         guard visibilityState != state else {
             applyCurrentFrame(animated: false)
             return
@@ -787,9 +919,10 @@ final class MainWindow: NSPanel {
             "fullscreen": isFullscreenActiveOnTargetScreen,
             "maximized": isMaximizedActiveOnTargetScreen,
             "pointerInside": isPointerInsideWindow,
-            "interactionCount": activeInteractionCount,
+            "pointerRevealAuthorized": pointerRevealAuthorized,
+            "interactionCount": activeInteractionLeaseIDs.count,
             "editMode": editMode.isActive,
-            "dragActive": DockDragService.shared.kind != nil,
+            "dragActive": isDragActiveForVisibility,
         ])
     }
 
@@ -1104,7 +1237,7 @@ final class MainWindow: NSPanel {
         in screenBounds: CGRect,
         size: CGSize,
         position: ResolvedDockWindowPosition,
-        visibilityState: VisibilityState
+        visibilityState: DockVisibility
     ) -> CGPoint {
         let hidden = visibilityState == .hidden
 
@@ -1147,12 +1280,14 @@ final class MainWindow: NSPanel {
 
     private func updateFullscreenStateAndApply(
         animated: Bool,
-        reason: String
+        reason: String,
+        forceVisibilityApply: Bool = false
     ) {
         let observation = computeContentOverlapStateOnTargetScreen()
         let previousFullscreen = isFullscreenActiveOnTargetScreen
         let previousMaximized = isMaximizedActiveOnTargetScreen
         let previousEffectiveAutohide = effectivelyAutohides
+        let contentOverlapWasActive = isContentOverlapActive
         let fullscreenChanged = observation.isFullscreen != previousFullscreen
         let maximizedChanged = observation.isMaximized != previousMaximized
         isFullscreenActiveOnTargetScreen = observation.isFullscreen
@@ -1168,14 +1303,19 @@ final class MainWindow: NSPanel {
                 previousEffectiveAutohide: previousEffectiveAutohide
             )
         }
-        guard fullscreenChanged || maximizedChanged else { return }
+        guard fullscreenChanged || maximizedChanged || forceVisibilityApply else { return }
+        if fullscreenChanged || contentOverlapWasActive != isContentOverlapActive {
+            reconcileTransientVisibilityState(reason: "contentOverlapChanged:\(reason)")
+        }
         applyEffectiveVisibility(animated: animated)
     }
 
     private func scheduleFullscreenRecheck() {
         fullscreenRecheckWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
-            self?.updateFullscreenStateAndApply(
+            guard let self else { return }
+            self.fullscreenRecheckWorkItem = nil
+            self.updateFullscreenStateAndApply(
                 animated: true,
                 reason: "delayedFullscreenRecheck"
             )
@@ -1222,32 +1362,43 @@ final class MainWindow: NSPanel {
             "previousEffectiveAutohide": previousEffectiveAutohide,
             "effectiveAutohide": effectivelyAutohides,
             "pointerInside": isPointerInsideWindow,
-            "interactionCount": activeInteractionCount,
+            "interactionCount": activeInteractionLeaseIDs.count,
             "editMode": editMode.isActive,
-            "dragActive": DockDragService.shared.kind != nil,
+            "dragActive": isDragActiveForVisibility,
             "visibilityState": String(describing: visibilityState),
         ])
     }
 
     private func computeContentOverlapStateOnTargetScreen() -> ContentOverlapObservation {
-        // Native fullscreen is a property of the active Mission Control
-        // Space. Prefer that direct signal over window geometry so entering
-        // and leaving fullscreen toggles Docky's transient autohide state
-        // with the Space itself. Unknown Space types retain the existing
-        // CGWindow + Accessibility fallback below.
-        let spaceSnapshot = activeSpaceSnapshot()
+        guard let screen = targetScreen() else {
+            return ContentOverlapObservation(
+                isFullscreen: false,
+                isMaximized: false,
+                spaceID: 0,
+                spaceType: nil,
+                fullscreenSource: "screenUnavailable",
+                inspectedWindowCount: 0,
+                fullscreenCandidateCount: 0,
+                maximizedCandidateCount: 0
+            )
+        }
+
+        // Native fullscreen is a property of the current Mission Control
+        // Space on the display Docky actually targets. Prefer that direct
+        // per-display signal over window geometry so a fullscreen Space on
+        // another monitor cannot hide or reveal this Docky window. Unknown
+        // Space data retains the CGWindow + Accessibility fallback below.
+        let spaceSnapshot = activeSpaceSnapshot(for: screen)
         let fullscreenSpaceState = spaceSnapshot.isFullscreen
 
-        guard let screen = targetScreen(),
-              let primaryScreenHeight = NSScreen.screens.first?.frame.height
-        else {
+        guard let primaryScreenHeight = NSScreen.screens.first?.frame.height else {
             return ContentOverlapObservation(
                 isFullscreen: fullscreenSpaceState ?? false,
                 isMaximized: false,
                 spaceID: spaceSnapshot.spaceID,
                 spaceType: spaceSnapshot.rawType,
                 fullscreenSource: fullscreenSpaceState == nil
-                    ? "screenUnavailable"
+                    ? "primaryScreenUnavailable"
                     : "spaceType",
                 inspectedWindowCount: 0,
                 fullscreenCandidateCount: 0,

@@ -28,8 +28,7 @@ final class WindowPreviewWindowController: NSWindowController, ObservableObject 
     private var currentTileID: String?
     private var currentBundleIdentifier: String?
     private var isPreviewHovered = false
-    private var isHoldingDockVisible = false
-    private weak var heldMainWindow: MainWindow?
+    private var mainWindowInteractionLease: MainWindowInteractionLease?
     private var pendingDismissTask: Task<Void, Never>?
     private var dismissAnimationTask: Task<Void, Never>?
 
@@ -94,6 +93,7 @@ final class WindowPreviewWindowController: NSWindowController, ObservableObject 
             activeSourceTileID = sourceTileID
             pendingDismissTask?.cancel()
             pendingDismissTask = nil
+            beginDockVisibilityHoldIfNeeded()
             return true
         }
 
@@ -230,18 +230,13 @@ final class WindowPreviewWindowController: NSWindowController, ObservableObject 
     var presentedSourceTileID: String? { currentTileID }
 
     private func beginDockVisibilityHoldIfNeeded() {
-        guard !isHoldingDockVisible else { return }
+        guard mainWindowInteractionLease?.isActive != true else { return }
         guard let mainWindow = NSApp.windows.compactMap({ $0 as? MainWindow }).first else { return }
-        mainWindow.beginInteraction()
-        heldMainWindow = mainWindow
-        isHoldingDockVisible = true
+        mainWindowInteractionLease = mainWindow.acquireInteractionLease()
     }
 
     private func endDockVisibilityHoldIfNeeded() {
-        guard isHoldingDockVisible else { return }
-        heldMainWindow?.endInteraction()
-        heldMainWindow = nil
-        isHoldingDockVisible = false
+        mainWindowInteractionLease = nil
     }
 
     /// Positions the preview window against the inward edge of the dock so

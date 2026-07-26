@@ -24,7 +24,7 @@ final class WidgetSettingsPanelController: NSObject {
     private var currentTileID: String?
     private var globalClickMonitor: Any?
     private var localEventMonitor: Any?
-    private weak var heldMainWindow: MainWindow?
+    private var mainWindowInteractionLease: MainWindowInteractionLease?
 
     private override init() { super.init() }
 
@@ -127,17 +127,15 @@ final class WidgetSettingsPanelController: NSObject {
     }
 
     private func beginDockVisibilityHoldIfNeeded() {
-        guard heldMainWindow == nil,
+        guard mainWindowInteractionLease?.isActive != true,
               let mainWindow = NSApp.windows.compactMap({ $0 as? MainWindow }).first else {
             return
         }
-        mainWindow.beginInteraction()
-        heldMainWindow = mainWindow
+        mainWindowInteractionLease = mainWindow.acquireInteractionLease()
     }
 
     private func endDockVisibilityHoldIfNeeded() {
-        heldMainWindow?.endInteraction()
-        heldMainWindow = nil
+        mainWindowInteractionLease = nil
     }
 
     private func frameOrigin(for size: CGSize, sourceFrame originalSourceFrame: CGRect) -> CGPoint {
