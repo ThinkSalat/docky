@@ -1403,6 +1403,13 @@ struct TileView: View {
 
     private func handleTap() {
         Self.logger.info("handleTap tileID=\(tile.id, privacy: .public) contentKind=\(tileContentKindDescription, privacy: .public)")
+        let currentEvent = NSApp.currentEvent
+        DiagnosticsTrace.shared.record(.actions, "tileTapReachedSwiftUI", fields: [
+            "tileToken": DiagnosticsTrace.shared.token(tile.id),
+            "contentKind": tileContentKindDescription,
+            "eventNumber": currentEvent?.eventNumber ?? -1,
+            "eventType": currentEvent.map { String(describing: $0.type) } ?? "none",
+        ])
         // Tap-to-act always supersedes the hover preview.
         windowPreviewDelayTask?.cancel()
         windowPreviewDelayTask = nil
@@ -1439,13 +1446,22 @@ struct TileView: View {
             if app.bundleIdentifier == "com.apple.finder",
                preferences.opensStartMenuFromFinderTile,
                preferences.enablesStartMenuOverlay {
+                DiagnosticsTrace.shared.record(.actions, "tileTapDecision", fields: [
+                    "decision": "toggleStartMenuFromFinder",
+                    "appToken": DiagnosticsTrace.shared.token(app.bundleIdentifier),
+                ])
                 StartMenuService.shared.toggle()
                 return
             }
             WorkspaceService.shared.activateOrOpen(bundleIdentifier: app.bundleIdentifier)
         case .minimizedWindow(let window):
             isTooltipPresented = false
-            _ = WorkspaceService.shared.restoreMinimizedWindow(window)
+            let restored = WorkspaceService.shared.restoreMinimizedWindow(window)
+            DiagnosticsTrace.shared.record(.actions, "restoreMinimizedWindow", fields: [
+                "windowToken": DiagnosticsTrace.shared.token(window.windowIdentifier),
+                "appToken": DiagnosticsTrace.shared.token(window.bundleIdentifier),
+                "succeeded": restored,
+            ])
         case .appFolder:
             isTooltipPresented = false
 
@@ -1472,17 +1488,36 @@ struct TileView: View {
             isAppFolderPopoverPresented = true
         case .launchpad:
             isTooltipPresented = false
-            guard preferences.enablesLaunchpadOverlay else { return }
+            guard preferences.enablesLaunchpadOverlay else {
+                DiagnosticsTrace.shared.record(.actions, "tileTapDecision", fields: [
+                    "decision": "launchpadDisabled",
+                ])
+                return
+            }
+            DiagnosticsTrace.shared.record(.actions, "tileTapDecision", fields: [
+                "decision": "toggleLaunchpad",
+            ])
             LaunchpadOverlayService.shared.toggle()
         case .startMenu:
             isTooltipPresented = false
-            guard preferences.enablesStartMenuOverlay else { return }
+            guard preferences.enablesStartMenuOverlay else {
+                DiagnosticsTrace.shared.record(.actions, "tileTapDecision", fields: [
+                    "decision": "startMenuDisabled",
+                ])
+                return
+            }
+            DiagnosticsTrace.shared.record(.actions, "tileTapDecision", fields: [
+                "decision": "toggleStartMenu",
+            ])
             StartMenuService.shared.toggle()
         case .widget(let widget):
             isTooltipPresented = false
             handleWidgetTap(widget)
         case .smartStack:
             isTooltipPresented = false
+            DiagnosticsTrace.shared.record(.actions, "tileTapDecision", fields: [
+                "decision": "smartStackNoPrimaryAction",
+            ])
             return
         case .folder(let folder):
             isTooltipPresented = false
@@ -1533,6 +1568,9 @@ struct TileView: View {
                 _ = await AppleScriptService.shared.openTrash()
             }
         case .spacer, .flexibleSpacer, .divider:
+            DiagnosticsTrace.shared.record(.actions, "tileTapDecision", fields: [
+                "decision": "nonInteractiveTile",
+            ])
             return
         }
     }

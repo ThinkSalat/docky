@@ -204,6 +204,7 @@ final class WindowRegistry: ObservableObject {
     /// after a burst of AX updates settles. See
     /// `scheduleScreenCaptureReconciliation` for details.
     private var screenCaptureReconciliationTask: Task<Void, Never>?
+    private var resizePostCheckGeneration: [WindowID: UUID] = [:]
 
     private init() {
         permissionsCancellable = PermissionsService.shared.$accessibility
@@ -381,18 +382,81 @@ final class WindowRegistry: ObservableObject {
     /// services) want a silent failure when permission is missing.
     @discardableResult
     func resize(_ window: AppWindow, to frame: CGRect) -> Bool {
-        guard PermissionsService.shared.accessibility == .granted else { return false }
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(.windows, "axResizeRequested", fields: [
+            "windowToken": diagnostics.token(window.windowIdentifier),
+            "appToken": diagnostics.token(window.bundleIdentifier),
+            "targetFrame": NSStringFromRect(frame),
+            "accessibility": String(describing: PermissionsService.shared.accessibility),
+        ])
+
+        guard PermissionsService.shared.accessibility == .granted else {
+            diagnostics.record(.windows, "axResizeResult", fields: [
+                "windowToken": diagnostics.token(window.windowIdentifier),
+                "result": "accessibilityNotGranted",
+                "succeeded": false,
+            ])
+            return false
+        }
 
         var origin = frame.origin
         var size = frame.size
         guard let positionValue = AXValueCreate(.cgPoint, &origin),
               let sizeValue = AXValueCreate(.cgSize, &size)
-        else { return false }
+        else {
+            diagnostics.record(.windows, "axResizeResult", fields: [
+                "windowToken": diagnostics.token(window.windowIdentifier),
+                "result": "couldNotCreateAXValues",
+                "succeeded": false,
+            ])
+            return false
+        }
 
-        guard let element = liveElement(for: window) else { return false }
+        guard let element = liveElement(for: window) else {
+            diagnostics.record(.windows, "axResizeResult", fields: [
+                "windowToken": diagnostics.token(window.windowIdentifier),
+                "result": "liveElementUnavailable",
+                "succeeded": false,
+            ])
+            return false
+        }
         let posResult = AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, positionValue)
         let sizeResult = AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeValue)
-        return posResult == .success && sizeResult == .success
+        let succeeded = posResult == .success && sizeResult == .success
+        diagnostics.record(.windows, "axResizeResult", fields: [
+            "windowToken": diagnostics.token(window.windowIdentifier),
+            "positionAXError": posResult.rawValue,
+            "sizeAXError": sizeResult.rawValue,
+            "succeeded": succeeded,
+        ])
+        let postCheckGeneration = UUID()
+        resizePostCheckGeneration[window.id] = postCheckGeneration
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard let self,
+                  self.resizePostCheckGeneration[window.id]
+                    == postCheckGeneration
+            else { return }
+            self.resizePostCheckGeneration.removeValue(forKey: window.id)
+            // Diagnostics must not invoke liveElement(for:): its self-healing
+            // path can rescan and publish the registry. Read the element used
+            // for this setter attempt directly so verification is observational.
+            let observedFrame = self.frameAttribute(of: window.element)
+            let matchesTarget = observedFrame.map {
+                abs($0.origin.x - frame.origin.x) <= 2
+                    && abs($0.origin.y - frame.origin.y) <= 2
+                    && abs($0.size.width - frame.size.width) <= 2
+                    && abs($0.size.height - frame.size.height) <= 2
+            } ?? false
+            diagnostics.record(.windows, "axResizePostCheck", fields: [
+                "windowToken": diagnostics.token(window.windowIdentifier),
+                "targetFrame": NSStringFromRect(frame),
+                "observedFrame": observedFrame.map(NSStringFromRect) ?? "unavailable",
+                "matchesTarget": matchesTarget,
+                "setterSucceeded": succeeded,
+            ])
+        }
+        return succeeded
     }
 
     /// Returns a live `AXUIElement` for the window's logical identity, or nil

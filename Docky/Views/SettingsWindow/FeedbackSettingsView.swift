@@ -4,8 +4,9 @@
 //
 //  Lets the user submit a textual report along with a self-contained
 //  diagnostic zip. The zip bundles every `docky.*` UserDefaults key,
-//  the live `com.apple.dock` plist, basic system specs, and an
-//  optional user-picked asset (screenshot / screen recording).
+//  the live `com.apple.dock` plist, basic system specs, the bounded
+//  privacy-safe diagnostics trace, and an optional user-picked asset
+//  (screenshot / screen recording).
 //
 //  Delivery is via macOS's built-in share sheet, `NSSharingService`
 //  composed for email when Mail.app is configured, otherwise a
@@ -84,9 +85,12 @@ struct FeedbackSettingsView: View {
                     Label("Docky preferences (every `docky.*` UserDefaults key)", systemImage: "doc.text")
                     Label("Live macOS Dock prefs (`com.apple.dock`)", systemImage: "dock.rectangle")
                     Label("Basic system info (macOS version, screens, Docky build)", systemImage: "info.circle")
+                    Label("Recent Docky event trace (bounded; identifiers pseudonymized)", systemImage: "waveform.path.ecg")
                     if attachmentURL != nil {
                         Label("Your attachment", systemImage: "paperclip")
                     }
+                    Text("The preference snapshots can include profile names, app identifiers, and file bookmarks. Nothing is shared until you choose a destination or complete the system share flow.")
+                        .font(.caption)
                 }
                 .foregroundStyle(.secondary)
                 .font(.callout)
@@ -101,6 +105,8 @@ struct FeedbackSettingsView: View {
                             .font(.caption)
                     }
                     Spacer()
+                    Button("Save Diagnostic Bundle…") { saveDiagnosticBundle() }
+                        .disabled(isPreparing)
                     Button("Send Feedback") { sendFeedback() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(isPreparing || feedbackText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -132,8 +138,42 @@ struct FeedbackSettingsView: View {
                 attachmentURL: attachmentURL
             )
             present(items: [feedbackText as NSString, bundleURL as NSURL])
+            FeedbackBundle.scheduleCleanup(of: bundleURL)
         } catch {
             errorMessage = "Could not build feedback bundle: \(error.localizedDescription)"
+        }
+    }
+
+    private func saveDiagnosticBundle() {
+        errorMessage = nil
+        isPreparing = true
+        defer { isPreparing = false }
+
+        do {
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [.zip]
+            panel.nameFieldStringValue = FeedbackBundle.suggestedFileName()
+            panel.canCreateDirectories = true
+            panel.prompt = "Save"
+            guard panel.runModal() == .OK, let destination = panel.url else {
+                return
+            }
+
+            let bundleURL = try FeedbackBundle.build(
+                feedbackText: feedbackText,
+                attachmentURL: attachmentURL
+            )
+            defer {
+                FeedbackBundle.removeTemporaryBundle(at: bundleURL)
+            }
+
+            let fileManager = FileManager.default
+            if fileManager.fileExists(atPath: destination.path) {
+                try fileManager.removeItem(at: destination)
+            }
+            try fileManager.copyItem(at: bundleURL, to: destination)
+        } catch {
+            errorMessage = "Could not save diagnostic bundle: \(error.localizedDescription)"
         }
     }
 
@@ -168,13 +208,30 @@ private extension Bundle {
 /// nothing in the view code needs to know about plist serialization,
 /// zipping, etc.
 private enum FeedbackBundle {
+    static func suggestedFileName() -> String {
+        "docky-diagnostics-\(timestamp()).zip"
+    }
+
     static func build(feedbackText: String, attachmentURL: URL?) throws -> URL {
         let fileManager = FileManager.default
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-            .replacingOccurrences(of: ":", with: "-")
+        cleanupStaleTemporaryArtifacts()
+        let identifier = "\(timestamp())-\(UUID().uuidString)"
         let stagingRoot = fileManager.temporaryDirectory
-            .appending(path: "docky-feedback-\(timestamp)", directoryHint: .isDirectory)
-        try fileManager.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
+            .appending(path: "docky-feedback-\(identifier)", directoryHint: .isDirectory)
+        let zipURL = stagingRoot.deletingLastPathComponent()
+            .appending(path: stagingRoot.lastPathComponent + ".zip")
+        var completedArchive = false
+        defer {
+            try? fileManager.removeItem(at: stagingRoot)
+            if !completedArchive {
+                try? fileManager.removeItem(at: zipURL)
+            }
+        }
+        try fileManager.createDirectory(
+            at: stagingRoot,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
 
         // 1. docky-defaults.plist, filtered to our namespace so we
         //    don't leak unrelated UserDefaults from other domains.
@@ -193,23 +250,67 @@ private enum FeedbackBundle {
         let system = systemSnapshot()
         try writeJSON(system, to: stagingRoot.appending(path: "system.json"))
 
-        // 4. feedback.txt, verbatim user message.
-        try feedbackText
-            .write(to: stagingRoot.appending(path: "feedback.txt"), atomically: true, encoding: .utf8)
+        // 4. Bounded structural event trace. This contains state transitions,
+        //    decisions, counts, and geometry, but never paths, window titles,
+        //    profile names, or raw app identifiers.
+        let diagnosticsDirectory = stagingRoot
+            .appending(path: "diagnostics", directoryHint: .isDirectory)
+        try DiagnosticsTrace.shared.copyRetainedLogs(to: diagnosticsDirectory)
+        try """
+        Docky diagnostics trace
 
-        // 5. Optional asset, copied alongside (preserves original name).
+        Format: newline-delimited JSON, one event per line.
+        Retention: at most two 2 MiB generations.
+        Privacy: no window titles, filenames, file paths, profile names, or raw app identifiers.
+        Identifier tokens are scoped to one Docky launch and are useful only for correlation.
+        """
+        .write(
+            to: diagnosticsDirectory.appending(path: "README.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try secureFile(
+            at: diagnosticsDirectory.appending(path: "README.txt")
+        )
+
+        // 5. feedback.txt, verbatim user message.
+        let feedbackURL = stagingRoot.appending(path: "feedback.txt")
+        try feedbackText.write(
+            to: feedbackURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        try secureFile(at: feedbackURL)
+
+        // 6. Optional asset, copied alongside (preserves original name).
         if let attachmentURL {
             let dest = stagingRoot.appending(path: attachmentURL.lastPathComponent)
             try fileManager.copyItem(at: attachmentURL, to: dest)
+            try secureFile(at: dest)
         }
 
-        // Zip the staging directory in place so the share sheet has
-        // one cohesive attachment rather than a directory tree.
-        let zipURL = stagingRoot.deletingLastPathComponent()
-            .appending(path: stagingRoot.lastPathComponent + ".zip")
-        try fileManager.removeItemIfExists(at: zipURL)
+        // Zip into one cohesive attachment. The unzipped staging tree is
+        // removed by defer on both success and failure.
         try ditto(source: stagingRoot, destination: zipURL)
+        try secureFile(at: zipURL)
+        completedArchive = true
         return zipURL
+    }
+
+    static func scheduleCleanup(of bundleURL: URL) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3_600))
+            removeTemporaryBundle(at: bundleURL)
+        }
+    }
+
+    static func removeTemporaryBundle(at bundleURL: URL) {
+        guard bundleURL.deletingLastPathComponent()
+                == FileManager.default.temporaryDirectory,
+              bundleURL.lastPathComponent.hasPrefix("docky-feedback-"),
+              bundleURL.pathExtension == "zip"
+        else { return }
+        try? FileManager.default.removeItem(at: bundleURL)
     }
 
     private static func writePlist(_ value: Any, to url: URL) throws {
@@ -219,11 +320,46 @@ private enum FeedbackBundle {
             options: 0
         )
         try data.write(to: url)
+        try secureFile(at: url)
     }
 
     private static func writeJSON(_ value: [String: Any], to url: URL) throws {
         let data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url)
+        try secureFile(at: url)
+    }
+
+    private static func secureFile(at url: URL) throws {
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: url.path
+        )
+    }
+
+    private static func timestamp() -> String {
+        ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+    }
+
+    private static func cleanupStaleTemporaryArtifacts() {
+        let fileManager = FileManager.default
+        let temporaryDirectory = fileManager.temporaryDirectory
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: temporaryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let cutoff = Date().addingTimeInterval(-86_400)
+        for entry in entries
+            where entry.lastPathComponent.hasPrefix("docky-feedback-") {
+            let modified = try? entry.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate
+            if let modified, modified < cutoff {
+                try? fileManager.removeItem(at: entry)
+            }
+        }
     }
 
     private static func systemSnapshot() -> [String: Any] {
@@ -263,14 +399,6 @@ private enum FeedbackBundle {
             throw NSError(domain: "FeedbackBundle", code: Int(process.terminationStatus), userInfo: [
                 NSLocalizedDescriptionKey: "ditto exited with status \(process.terminationStatus)"
             ])
-        }
-    }
-}
-
-private extension FileManager {
-    func removeItemIfExists(at url: URL) throws {
-        if fileExists(atPath: url.path) {
-            try removeItem(at: url)
         }
     }
 }

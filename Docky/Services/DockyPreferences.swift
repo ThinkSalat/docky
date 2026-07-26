@@ -1694,6 +1694,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var windowSpaceBehavior: DockWindowSpaceBehavior {
         didSet {
             guard windowSpaceBehavior != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.windowSpaceBehavior,
+                "old": String(describing: oldValue),
+                "new": String(describing: windowSpaceBehavior),
+            ])
             defaults.set(windowSpaceBehavior.rawValue, forKey: Keys.windowSpaceBehavior)
         }
     }
@@ -1702,6 +1707,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var autohidesWindow: Bool {
         didSet {
             guard autohidesWindow != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.autohidesWindow,
+                "old": oldValue,
+                "new": autohidesWindow,
+            ])
             defaults.set(autohidesWindow, forKey: Keys.autohidesWindow)
         }
     }
@@ -1799,6 +1809,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var maximizedWindowBehavior: MaximizedWindowBehavior {
         didSet {
             guard maximizedWindowBehavior != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.maximizedWindowBehavior,
+                "old": String(describing: oldValue),
+                "new": String(describing: maximizedWindowBehavior),
+            ])
             defaults.set(maximizedWindowBehavior.rawValue, forKey: Keys.maximizedWindowBehavior)
         }
     }
@@ -1987,6 +2002,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var hidesDuringFullscreen: Bool {
         didSet {
             guard hidesDuringFullscreen != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.hidesDuringFullscreen,
+                "old": oldValue,
+                "new": hidesDuringFullscreen,
+            ])
             defaults.set(hidesDuringFullscreen, forKey: Keys.hidesDuringFullscreen)
         }
     }
@@ -1999,6 +2019,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var enablesShelveMode: Bool {
         didSet {
             guard enablesShelveMode != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.enablesShelveMode,
+                "old": oldValue,
+                "new": enablesShelveMode,
+            ])
             defaults.set(enablesShelveMode, forKey: Keys.enablesShelveMode)
         }
     }
@@ -2027,6 +2052,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var hidesRecentApps: Bool {
         didSet {
             guard hidesRecentApps != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.hidesRecentApps,
+                "old": oldValue,
+                "new": hidesRecentApps,
+            ])
             defaults.set(hidesRecentApps, forKey: Keys.hidesRecentApps)
         }
     }
@@ -2039,6 +2069,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var hidesProfileStrip: Bool {
         didSet {
             guard hidesProfileStrip != oldValue else { return }
+            DiagnosticsTrace.shared.record(.preferences, "propertyDidSet", fields: [
+                "key": Keys.hidesProfileStrip,
+                "old": oldValue,
+                "new": hidesProfileStrip,
+            ])
             defaults.set(hidesProfileStrip, forKey: Keys.hidesProfileStrip)
         }
     }
@@ -2691,8 +2726,29 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// active profile) but skip mirroring back to `ProfileService` while
     /// `isApplyingProfile` is set.
     func applyProfile(_ profile: DockProfile) {
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(.profiles, "preferenceProfileApplyBegan", fields: [
+            "profileToken": diagnostics.token(profile.id),
+            "pinnedItemCountBefore": pinnedItems.count,
+            "pinnedItemCount": profile.pinnedItems.count,
+            "trailingItemCountBefore": trailingItems.count,
+            "trailingItemCount": profile.trailingItems.count,
+            "widgetPlacementCountBefore": widgetPlacements.count,
+            "widgetPlacementCount": profile.widgetPlacements.count,
+            "hiddenAppCountBefore": hiddenAppBundleIdentifiers.count,
+            "hiddenAppCount": profile.hiddenAppBundleIdentifiers.count,
+        ])
         isApplyingProfile = true
-        defer { isApplyingProfile = false }
+        defer {
+            isApplyingProfile = false
+            diagnostics.record(.profiles, "preferenceProfileApplyCompleted", fields: [
+                "profileToken": diagnostics.token(profile.id),
+                "pinnedItemCount": pinnedItems.count,
+                "trailingItemCount": trailingItems.count,
+                "widgetPlacementCount": widgetPlacements.count,
+                "hiddenAppCount": hiddenAppBundleIdentifiers.count,
+            ])
+        }
         pinnedItems = profile.pinnedItems
         trailingItems = profile.trailingItems
         widgetPlacements = profile.widgetPlacements

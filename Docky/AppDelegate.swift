@@ -25,6 +25,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var debugSnapshotCancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
+        DiagnosticsTrace.shared.start()
+
         // Bound every AX call to 1s so a hung app can't stall the main run loop.
         // Must precede any other AX work — applies process-wide.
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
@@ -283,9 +285,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {
+        DiagnosticsTrace.shared.record(.lifecycle, "willTerminate")
         if SystemDockVisibilityService.shared.hasSnapshot {
             SystemDockVisibilityService.shared.restore()
         }
+        DiagnosticsTrace.shared.flush()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {

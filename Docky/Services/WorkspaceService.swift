@@ -56,6 +56,25 @@ final class WorkspaceService: ObservableObject {
     private var attemptedMinimizedWindowPreviewIDs: Set<String> = []
     private var attemptedAppWindowPreviewIDs: Set<String> = []
     private var liveFocusPreviewSession: LiveWindowPreviewSession?
+    private struct PendingActivation {
+        let requestID: UUID
+        let requestedAtUptime: TimeInterval
+        let decision: String
+    }
+    private final class PendingHide {
+        let requestID: UUID
+        let requestedAtUptime: TimeInterval
+        var immediateRequestAccepted: Bool?
+        var observedHidden: Bool?
+        var observedAtUptime: TimeInterval?
+
+        init(requestID: UUID, requestedAtUptime: TimeInterval) {
+            self.requestID = requestID
+            self.requestedAtUptime = requestedAtUptime
+        }
+    }
+    private var pendingActivations: [String: PendingActivation] = [:]
+    private var pendingHides: [String: PendingHide] = [:]
 
     /// A minimized-window capture can miss on its first try — the genie
     /// animation leaves the offscreen content briefly unavailable, or the
@@ -113,17 +132,45 @@ final class WorkspaceService: ObservableObject {
     }
 
     func activateOrOpen(bundleIdentifier: String) {
+        let diagnostics = DiagnosticsTrace.shared
         let frontmostApp = NSWorkspace.shared.frontmostApplication
         let runningApp = if frontmostApp?.bundleIdentifier == bundleIdentifier {
             frontmostApp
         } else {
             NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first
         }
+        diagnostics.record(.actions, "activateOrOpenRequested", fields: [
+            "appToken": diagnostics.token(bundleIdentifier),
+            "frontmostAppToken": diagnostics.token(frontmostApp?.bundleIdentifier),
+            "isRunning": runningApp != nil,
+            "isHidden": runningApp?.isHidden ?? false,
+            "accessibility": String(describing: PermissionsService.shared.accessibility),
+            "frontmostClickBehavior": String(
+                describing: DockyPreferences.shared.appTileFrontmostClickBehavior
+            ),
+        ])
 
         guard let runningApp else {
             // Not running: launch it.
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
-                openApplication(at: appURL)
+                markPendingActivation(
+                    bundleIdentifier: bundleIdentifier,
+                    decision: "launchNotRunning"
+                )
+                diagnostics.record(.actions, "activateOrOpenDecision", fields: [
+                    "appToken": diagnostics.token(bundleIdentifier),
+                    "decision": "launchNotRunning",
+                ])
+                openApplication(
+                    at: appURL,
+                    bundleIdentifier: bundleIdentifier,
+                    reason: "launchNotRunning"
+                )
+            } else {
+                diagnostics.record(.actions, "activateOrOpenDecision", fields: [
+                    "appToken": diagnostics.token(bundleIdentifier),
+                    "decision": "applicationURLUnavailable",
+                ])
             }
             return
         }
@@ -138,9 +185,18 @@ final class WorkspaceService: ObservableObject {
         if isFrontmost {
             switch DockyPreferences.shared.appTileFrontmostClickBehavior {
             case .none:
+                diagnostics.record(.actions, "activateOrOpenDecision", fields: [
+                    "appToken": diagnostics.token(bundleIdentifier),
+                    "decision": "frontmostNoAction",
+                ])
                 return
             case .hide:
-                hide(runningApp)
+                let hidden = hide(runningApp)
+                diagnostics.record(.actions, "activateOrOpenDecision", fields: [
+                    "appToken": diagnostics.token(bundleIdentifier),
+                    "decision": "hideFrontmost",
+                    "requestAccepted": hidden,
+                ])
                 return
             case .cycleWindows, .minimizeAll:
                 break
@@ -154,19 +210,44 @@ final class WorkspaceService: ObservableObject {
         // Running but no AX windows: spawn a new window.
         if accessibilityGranted, allWindows.isEmpty,
            let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
-            openApplication(at: appURL)
+            markPendingActivation(
+                bundleIdentifier: bundleIdentifier,
+                decision: "openNewWindowNoAXWindows"
+            )
+            diagnostics.record(.actions, "activateOrOpenDecision", fields: [
+                "appToken": diagnostics.token(bundleIdentifier),
+                "decision": "openNewWindowNoAXWindows",
+                "windowCount": allWindows.count,
+            ])
+            openApplication(
+                at: appURL,
+                bundleIdentifier: bundleIdentifier,
+                reason: "openNewWindowNoAXWindows"
+            )
             return
         }
 
         // Running but every window is minimized: restore the most-recently-minimized.
         if accessibilityGranted, visibleWindows.isEmpty, !allWindows.isEmpty,
            let lastMinimized = minimizedWindows.last(where: { $0.bundleIdentifier == bundleIdentifier }) {
-            _ = restoreMinimizedWindow(lastMinimized)
+            let restored = restoreMinimizedWindow(lastMinimized)
+            diagnostics.record(.actions, "activateOrOpenDecision", fields: [
+                "appToken": diagnostics.token(bundleIdentifier),
+                "decision": "restoreLastMinimized",
+                "windowCount": allWindows.count,
+                "windowToken": diagnostics.token(lastMinimized.windowIdentifier),
+                "succeeded": restored,
+            ])
             return
         }
 
         // Already frontmost with at least one visible window: apply user preference.
         if isFrontmost, !visibleWindows.isEmpty {
+            diagnostics.record(.actions, "activateOrOpenDecision", fields: [
+                "appToken": diagnostics.token(bundleIdentifier),
+                "decision": "applyFrontmostBehavior",
+                "visibleWindowCount": visibleWindows.count,
+            ])
             applyFrontmostAppTileClickBehavior(
                 runningApp: runningApp,
                 visibleWindows: visibleWindows
@@ -175,8 +256,23 @@ final class WorkspaceService: ObservableObject {
         }
 
         // Default: bring the app forward.
+        markPendingActivation(
+            bundleIdentifier: bundleIdentifier,
+            decision: "activateRunning"
+        )
         runningApp.unhide()
-        runningApp.activate(options: [.activateAllWindows])
+        let activated = runningApp.activate(options: [.activateAllWindows])
+        diagnostics.record(.actions, "activateOrOpenDecision", fields: [
+            "appToken": diagnostics.token(bundleIdentifier),
+            "decision": "activateRunning",
+            "accessibility": String(describing: PermissionsService.shared.accessibility),
+            "windowCount": allWindows.count,
+            "visibleWindowCount": visibleWindows.count,
+            "activateReturned": activated,
+        ])
+        if !activated {
+            pendingActivations.removeValue(forKey: bundleIdentifier)
+        }
     }
 
     private func applyFrontmostAppTileClickBehavior(
@@ -198,14 +294,31 @@ final class WorkspaceService: ObservableObject {
     }
 
     private func cycleFrontmostAppWindows(_ visibleWindows: [AppWindow]) {
-        guard visibleWindows.count > 1, let next = visibleWindows.last else { return }
-        _ = focus(window: next)
+        guard visibleWindows.count > 1, let next = visibleWindows.last else {
+            DiagnosticsTrace.shared.record(.actions, "cycleWindowsSkipped", fields: [
+                "visibleWindowCount": visibleWindows.count,
+            ])
+            return
+        }
+        let focused = focus(window: next)
+        DiagnosticsTrace.shared.record(.actions, "cycleWindows", fields: [
+            "visibleWindowCount": visibleWindows.count,
+            "windowToken": DiagnosticsTrace.shared.token(next.windowIdentifier),
+            "succeeded": focused,
+        ])
     }
 
     private func minimizeAllWindows(_ visibleWindows: [AppWindow]) {
+        var succeededCount = 0
         for window in visibleWindows {
-            _ = minimize(window: window)
+            if minimize(window: window) {
+                succeededCount += 1
+            }
         }
+        DiagnosticsTrace.shared.record(.actions, "minimizeAllWindows", fields: [
+            "requestedCount": visibleWindows.count,
+            "succeededCount": succeededCount,
+        ])
     }
 
     func open(fileURLs: [URL], withApplicationBundleIdentifier bundleIdentifier: String) {
@@ -541,13 +654,62 @@ final class WorkspaceService: ObservableObject {
         return best?.screen ?? NSScreen.main
     }
 
-    private func openApplication(at appURL: URL) {
+    private func markPendingActivation(
+        bundleIdentifier: String,
+        decision: String
+    ) {
+        let pending = PendingActivation(
+            requestID: UUID(),
+            requestedAtUptime: ProcessInfo.processInfo.systemUptime,
+            decision: decision
+        )
+        pendingActivations[bundleIdentifier] = pending
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard let self,
+                  self.pendingActivations[bundleIdentifier]?.requestID == pending.requestID
+            else { return }
+            self.pendingActivations.removeValue(forKey: bundleIdentifier)
+            let diagnostics = DiagnosticsTrace.shared
+            diagnostics.record(.actions, "requestedActivationNotObserved", fields: [
+                "appToken": diagnostics.token(bundleIdentifier),
+                "decision": pending.decision,
+                "elapsedMilliseconds": Int(
+                    (ProcessInfo.processInfo.systemUptime - pending.requestedAtUptime) * 1_000
+                ),
+            ])
+        }
+    }
+
+    private func openApplication(
+        at appURL: URL,
+        bundleIdentifier: String,
+        reason: String
+    ) {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         NSWorkspace.shared.openApplication(
             at: appURL,
             configuration: configuration,
-            completionHandler: nil
+            completionHandler: { [weak self] application, error in
+                let returnedApplication = application != nil
+                let errorType = error.map {
+                    String(describing: type(of: $0))
+                } ?? "none"
+                let failed = error != nil
+                Task { @MainActor [weak self] in
+                    let diagnostics = DiagnosticsTrace.shared
+                    diagnostics.record(.actions, "openApplicationCompleted", fields: [
+                        "appToken": diagnostics.token(bundleIdentifier),
+                        "reason": reason,
+                        "returnedApplication": returnedApplication,
+                        "error": errorType,
+                    ])
+                    if failed {
+                        self?.pendingActivations.removeValue(forKey: bundleIdentifier)
+                    }
+                }
+            }
         )
     }
 
@@ -576,7 +738,29 @@ final class WorkspaceService: ObservableObject {
 
     @discardableResult
     func restoreMinimizedWindow(_ window: AppWindow) -> Bool {
-        WindowRegistry.shared.focus(window)
+        let requestAccepted = WindowRegistry.shared.focus(window)
+        let windowIdentifier = window.windowIdentifier
+        let bundleIdentifier = window.bundleIdentifier
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(.actions, "restoreMinimizedWindowRequested", fields: [
+            "windowToken": diagnostics.token(windowIdentifier),
+            "appToken": diagnostics.token(bundleIdentifier),
+            "requestAccepted": requestAccepted,
+        ])
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(750))
+            let observed = WindowRegistry.shared.windows.first {
+                $0.windowIdentifier == windowIdentifier
+            }
+            diagnostics.record(.actions, "restoreMinimizedWindowPostCheck", fields: [
+                "windowToken": diagnostics.token(windowIdentifier),
+                "appToken": diagnostics.token(bundleIdentifier),
+                "windowObserved": observed != nil,
+                "observedMinimized": observed?.isMinimized ?? false,
+                "requestAccepted": requestAccepted,
+            ])
+        }
+        return requestAccepted
     }
 
     @discardableResult
@@ -594,6 +778,19 @@ final class WorkspaceService: ObservableObject {
 
     @discardableResult
     private func hide(_ runningApp: NSRunningApplication) -> Bool {
+        let bundleIdentifier = runningApp.bundleIdentifier
+        let requestID = UUID()
+        let requestedAtUptime = ProcessInfo.processInfo.systemUptime
+        var pendingHide: PendingHide?
+        if let bundleIdentifier {
+            let pending = PendingHide(
+                requestID: requestID,
+                requestedAtUptime: requestedAtUptime
+            )
+            pendingHides[bundleIdentifier] = pending
+            pendingHide = pending
+        }
+
         // `NSRunningApplication.hide()` can report success while the target
         // remains visible. Always issue the process-level operation as well
         // instead of short-circuiting when AppKit returns true.
@@ -602,7 +799,49 @@ final class WorkspaceService: ObservableObject {
             pid: runningApp.processIdentifier,
             visible: false
         )
-        return appKitResult || processManagerResult
+        let requestAccepted = appKitResult || processManagerResult
+        if let bundleIdentifier, let pendingHide {
+            pendingHide.immediateRequestAccepted = requestAccepted
+            if pendingHides[bundleIdentifier] === pendingHide,
+               let observedHidden = pendingHide.observedHidden,
+               let observedAtUptime = pendingHide.observedAtUptime {
+                pendingHides.removeValue(forKey: bundleIdentifier)
+                recordHideObserved(
+                    bundleIdentifier: bundleIdentifier,
+                    pending: pendingHide,
+                    observedHidden: observedHidden,
+                    observedAtUptime: observedAtUptime
+                )
+            }
+            let diagnostics = DiagnosticsTrace.shared
+            diagnostics.record(.actions, "hideApplicationRequested", fields: [
+                "appToken": diagnostics.token(bundleIdentifier),
+                "appKitAccepted": appKitResult,
+                "processManagerAccepted": processManagerResult,
+                "requestAccepted": requestAccepted,
+            ])
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard let self,
+                      let pending = self.pendingHides[bundleIdentifier],
+                      pending === pendingHide
+                else { return }
+                self.pendingHides.removeValue(forKey: bundleIdentifier)
+                let observedApp = NSRunningApplication
+                    .runningApplications(withBundleIdentifier: bundleIdentifier)
+                    .first
+                diagnostics.record(.actions, "hideApplicationPostCheck", fields: [
+                    "appToken": diagnostics.token(bundleIdentifier),
+                    "applicationRunning": observedApp != nil,
+                    "observedHidden": observedApp?.isHidden ?? false,
+                    "requestAccepted": pending.immediateRequestAccepted ?? false,
+                    "elapsedMilliseconds": Int(
+                        (ProcessInfo.processInfo.systemUptime - pending.requestedAtUptime) * 1_000
+                    ),
+                ])
+            }
+        }
+        return requestAccepted
     }
 
     func quit(bundleIdentifier: String, force: Bool = false) {
@@ -677,7 +916,10 @@ final class WorkspaceService: ObservableObject {
                 forName: name,
                 object: nil,
                 queue: .main
-            ) { [weak self] _ in
+            ) { [weak self] notification in
+                if name == NSWorkspace.didHideApplicationNotification {
+                    self?.recordHideApplicationNotification(notification)
+                }
                 self?.refresh()
             }
             observers.append(token)
@@ -701,10 +943,69 @@ final class WorkspaceService: ObservableObject {
         updateFrontmost(NSWorkspace.shared.frontmostApplication)
     }
 
+    private func recordHideApplicationNotification(_ notification: Notification) {
+        guard let app = notification.userInfo?[
+            NSWorkspace.applicationUserInfoKey
+        ] as? NSRunningApplication,
+        let bundleIdentifier = app.bundleIdentifier,
+        let pending = pendingHides[bundleIdentifier]
+        else { return }
+
+        let observedAtUptime = ProcessInfo.processInfo.systemUptime
+        guard pending.immediateRequestAccepted != nil else {
+            // A synchronous/reentrant notification can arrive while hide()
+            // is still returning its immediate result. Preserve it and emit
+            // the correlated event once the issuing call completes.
+            pending.observedHidden = app.isHidden
+            pending.observedAtUptime = observedAtUptime
+            return
+        }
+        pendingHides.removeValue(forKey: bundleIdentifier)
+        recordHideObserved(
+            bundleIdentifier: bundleIdentifier,
+            pending: pending,
+            observedHidden: app.isHidden,
+            observedAtUptime: observedAtUptime
+        )
+    }
+
+    private func recordHideObserved(
+        bundleIdentifier: String,
+        pending: PendingHide,
+        observedHidden: Bool,
+        observedAtUptime: TimeInterval
+    ) {
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(.actions, "hideApplicationObserved", fields: [
+            "appToken": diagnostics.token(bundleIdentifier),
+            "observedHidden": observedHidden,
+            "requestAccepted": pending.immediateRequestAccepted ?? false,
+            "elapsedMilliseconds": Int(
+                (observedAtUptime - pending.requestedAtUptime) * 1_000
+            ),
+        ])
+    }
+
     private func updateFrontmost(_ app: NSRunningApplication?) {
         let next = app?.bundleIdentifier
         guard next != frontmostBundleIdentifier else { return }
+        let previous = frontmostBundleIdentifier
         frontmostBundleIdentifier = next
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(.actions, "frontmostApplicationChanged", fields: [
+            "previousAppToken": diagnostics.token(previous),
+            "appToken": diagnostics.token(next),
+        ])
+        if let next,
+           let pending = pendingActivations.removeValue(forKey: next) {
+            diagnostics.record(.actions, "requestedActivationObserved", fields: [
+                "appToken": diagnostics.token(next),
+                "decision": pending.decision,
+                "elapsedMilliseconds": Int(
+                    (ProcessInfo.processInfo.systemUptime - pending.requestedAtUptime) * 1_000
+                ),
+            ])
+        }
     }
 
     private func subscribeToPermissions() {

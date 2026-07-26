@@ -32,19 +32,42 @@ private func CGSSpaceGetType(_ connection: CGSConnectionID, _ space: UInt64) -> 
 /// `nil` deliberately means SkyLight returned an unknown/system Space type,
 /// allowing callers to fall back to window inspection. This is runtime-only:
 /// it never rewrites Docky's persisted autohide preference.
-func activeSpaceFullscreenState() -> Bool? {
+struct ActiveSpaceSnapshot {
+    let spaceID: UInt64
+    let rawType: Int32?
+    let isFullscreen: Bool?
+}
+
+func activeSpaceSnapshot() -> ActiveSpaceSnapshot {
     let connection = CGSMainConnectionID()
     let spaceID = CGSGetActiveSpace(connection)
-    guard spaceID != 0 else { return nil }
-
-    switch CGSSpaceGetType(connection, spaceID) {
-    case 0:
-        return false
-    case 4:
-        return true
-    default:
-        return nil
+    guard spaceID != 0 else {
+        return ActiveSpaceSnapshot(
+            spaceID: 0,
+            rawType: nil,
+            isFullscreen: nil
+        )
     }
+
+    let rawType = CGSSpaceGetType(connection, spaceID)
+    let isFullscreen: Bool?
+    switch rawType {
+    case 0:
+        isFullscreen = false
+    case 4:
+        isFullscreen = true
+    default:
+        isFullscreen = nil
+    }
+    return ActiveSpaceSnapshot(
+        spaceID: spaceID,
+        rawType: rawType,
+        isFullscreen: isFullscreen
+    )
+}
+
+func activeSpaceFullscreenState() -> Bool? {
+    activeSpaceSnapshot().isFullscreen
 }
 
 // Returns the ordered list of spaces per managed display. Each element is

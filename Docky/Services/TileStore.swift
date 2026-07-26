@@ -262,8 +262,20 @@ final class TileStore: ObservableObject {
 
     func setPinnedTileOrder(ids: [String]) {
         TileStore.logger.info("setPinnedTileOrder called with ids.count=\(ids.count) pinnedTiles.count=\(self.pinnedTiles.count)")
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(.profiles, "pinnedTileReorderRequested", fields: [
+            "requestedCount": ids.count,
+            "currentCount": pinnedTiles.count,
+            "requestedOrderTokens": ids.map(diagnostics.token),
+            "activeProfileToken": diagnostics.token(ProfileService.shared.activeProfileID),
+        ])
         guard ids.count == pinnedTiles.count else {
             TileStore.logger.warning("setPinnedTileOrder early return: count mismatch ids=\(ids.count) pinnedTiles=\(self.pinnedTiles.count)")
+            diagnostics.record(.profiles, "pinnedTileReorderRejected", fields: [
+                "reason": "tileCountMismatch",
+                "requestedCount": ids.count,
+                "currentCount": pinnedTiles.count,
+            ])
             return
         }
 
@@ -271,6 +283,11 @@ final class TileStore: ObservableObject {
         let reorderedTiles = ids.compactMap { tilesByID[$0] }
         guard reorderedTiles.count == pinnedTiles.count else {
             TileStore.logger.warning("setPinnedTileOrder: reorderedTiles count mismatch: \(reorderedTiles.count) vs \(self.pinnedTiles.count)")
+            diagnostics.record(.profiles, "pinnedTileReorderRejected", fields: [
+                "reason": "unknownTileIDs",
+                "resolvedCount": reorderedTiles.count,
+                "currentCount": pinnedTiles.count,
+            ])
             return
         }
 
@@ -285,6 +302,11 @@ final class TileStore: ObservableObject {
         pinnedTiles = reorderedTiles
         preferences.pinnedItems = reorderedItems
         rebuildTiles()
+        diagnostics.record(.profiles, "pinnedTileReorderApplied", fields: [
+            "itemCount": reorderedItems.count,
+            "orderTokens": ids.map(diagnostics.token),
+            "activeProfileToken": diagnostics.token(ProfileService.shared.activeProfileID),
+        ])
     }
 
     @discardableResult

@@ -17,6 +17,13 @@
 import Foundation
 import Observation
 
+enum ProfileActivationSource: String {
+    case manual
+    case trigger
+    case launchReapply
+    case deleteFallback
+}
+
 @Observable
 final class ProfileService {
     static let shared = ProfileService()
@@ -50,6 +57,11 @@ final class ProfileService {
             self.activeProfileID = loaded.contains(where: { $0.id == storedActive })
                 ? storedActive
                 : loaded[0].id
+            DiagnosticsTrace.shared.record(.profiles, "profilesLoaded", fields: [
+                "profileCount": loaded.count,
+                "activeProfileToken": DiagnosticsTrace.shared.token(activeProfileID),
+                "storedActiveWasValid": loaded.contains(where: { $0.id == storedActive }),
+            ])
         } else {
             migrateFromLegacyTileStore()
         }
@@ -68,31 +80,96 @@ final class ProfileService {
         )
         self.profiles = [initial]
         self.activeProfileID = initial.id
+        DiagnosticsTrace.shared.record(.profiles, "legacyProfileMigrated", fields: [
+            "activeProfileToken": DiagnosticsTrace.shared.token(initial.id),
+            "pinnedItemCount": initial.pinnedItems.count,
+            "trailingItemCount": initial.trailingItems.count,
+        ])
         persist()
     }
 
-    func setActiveProfile(id: String) {
-        guard activeProfileID != id,
-              let profile = profiles.first(where: { $0.id == id })
-        else { return }
+    func setActiveProfile(
+        id: String,
+        source: ProfileActivationSource = .manual
+    ) {
+        let diagnostics = DiagnosticsTrace.shared
+        guard activeProfileID != id else {
+            diagnostics.record(.profiles, "profileActivationSkipped", fields: [
+                "reason": "alreadyActive",
+                "source": source.rawValue,
+                "profileToken": diagnostics.token(id),
+            ])
+            return
+        }
+        guard let profile = profiles.first(where: { $0.id == id }) else {
+            diagnostics.record(.profiles, "profileActivationSkipped", fields: [
+                "reason": "profileNotFound",
+                "source": source.rawValue,
+                "profileToken": diagnostics.token(id),
+            ])
+            return
+        }
+        let previousID = activeProfileID
+        diagnostics.record(.profiles, "profileActivationBegan", fields: [
+            "source": source.rawValue,
+            "previousProfileToken": diagnostics.token(previousID),
+            "profileToken": diagnostics.token(id),
+            "pinnedItemCount": profile.pinnedItems.count,
+            "trailingItemCount": profile.trailingItems.count,
+            "widgetPlacementCount": profile.widgetPlacements.count,
+            "hiddenAppCount": profile.hiddenAppBundleIdentifiers.count,
+        ])
         activeProfileID = id
         defaults.set(id, forKey: Keys.activeProfileID)
         DockyPreferences.shared.applyProfile(profile)
+        diagnostics.record(.profiles, "profileActivationCompleted", fields: [
+            "source": source.rawValue,
+            "previousProfileToken": diagnostics.token(previousID),
+            "profileToken": diagnostics.token(id),
+        ])
     }
 
     /// Reconciles the legacy top-level tile snapshot with the profile that
     /// owns it. This is required at launch because an interrupted profile
     /// switch can persist the active ID before every snapshot field lands.
     func reapplyActiveProfile() {
-        guard let profile = activeProfile else { return }
+        guard let profile = activeProfile else {
+            DiagnosticsTrace.shared.record(.profiles, "profileReapplySkipped", fields: [
+                "reason": "activeProfileUnavailable",
+                "activeProfileToken": DiagnosticsTrace.shared.token(activeProfileID),
+            ])
+            return
+        }
+        DiagnosticsTrace.shared.record(.profiles, "profileReapplyBegan", fields: [
+            "source": ProfileActivationSource.launchReapply.rawValue,
+            "profileToken": DiagnosticsTrace.shared.token(profile.id),
+            "pinnedItemCount": profile.pinnedItems.count,
+            "trailingItemCount": profile.trailingItems.count,
+        ])
         DockyPreferences.shared.applyProfile(profile)
+        DiagnosticsTrace.shared.record(.profiles, "profileReapplyCompleted", fields: [
+            "source": ProfileActivationSource.launchReapply.rawValue,
+            "profileToken": DiagnosticsTrace.shared.token(profile.id),
+        ])
     }
 
     /// Apply a mutation to the active profile and persist. Used by
     /// `DockyPreferences` to mirror tile-store edits into the profile.
     func updateActiveProfile(_ mutate: (inout DockProfile) -> Void) {
         guard let idx = profiles.firstIndex(where: { $0.id == activeProfileID }) else { return }
+        let before = profiles[idx]
         mutate(&profiles[idx])
+        DiagnosticsTrace.shared.record(.profiles, "activeProfileMutated", fields: [
+            "profileToken": DiagnosticsTrace.shared.token(activeProfileID),
+            "pinnedItemCountBefore": before.pinnedItems.count,
+            "pinnedItemCount": profiles[idx].pinnedItems.count,
+            "trailingItemCountBefore": before.trailingItems.count,
+            "trailingItemCount": profiles[idx].trailingItems.count,
+            "widgetPlacementCountBefore": before.widgetPlacements.count,
+            "widgetPlacementCount": profiles[idx].widgetPlacements.count,
+            "hiddenAppCountBefore": before.hiddenAppBundleIdentifiers.count,
+            "hiddenAppCount": profiles[idx].hiddenAppBundleIdentifiers.count,
+        ])
         persist()
     }
 
@@ -153,7 +230,7 @@ final class ProfileService {
         let wasActive = activeProfileID == id
         profiles.removeAll { $0.id == id }
         if wasActive, let first = profiles.first {
-            setActiveProfile(id: first.id)
+            setActiveProfile(id: first.id, source: .deleteFallback)
         } else {
             persist()
         }
@@ -162,6 +239,16 @@ final class ProfileService {
     private func persist() {
         if let data = try? encoder.encode(profiles) {
             defaults.set(data, forKey: Keys.profiles)
+            DiagnosticsTrace.shared.record(.profiles, "profilesPersisted", fields: [
+                "profileCount": profiles.count,
+                "activeProfileToken": DiagnosticsTrace.shared.token(activeProfileID),
+                "encodedBytes": data.count,
+            ])
+        } else {
+            DiagnosticsTrace.shared.record(.profiles, "profilesPersistFailed", fields: [
+                "profileCount": profiles.count,
+                "activeProfileToken": DiagnosticsTrace.shared.token(activeProfileID),
+            ])
         }
         defaults.set(activeProfileID, forKey: Keys.activeProfileID)
     }

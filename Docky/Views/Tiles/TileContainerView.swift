@@ -1365,6 +1365,15 @@ struct TileContainerView: View {
             Self.logger.info(
                 "Drag started tile=\(tileLogDescription(tile), privacy: .public) pinnedSource=\(isPinnedReorderable(tileID: tile.id), privacy: .public) trailingSource=\(isTrailingReorderable(tileID: tile.id), privacy: .public) startPinnedIndex=\(optionalIndexDescription(draggedPinnedTileDestinationIndex), privacy: .public) startTrailingIndex=\(optionalIndexDescription(draggedTrailingTileDestinationIndex), privacy: .public)"
             )
+            let diagnostics = DiagnosticsTrace.shared
+            diagnostics.record(.input, "tileReorderDragStarted", fields: [
+                "tileToken": diagnostics.token(tile.id),
+                "sourceProfileToken": diagnostics.token(draggedProfileID),
+                "pinnedSource": isPinnedReorderable(tileID: tile.id),
+                "trailingSource": isTrailingReorderable(tileID: tile.id),
+                "startPinnedIndex": draggedPinnedTileDestinationIndex ?? -1,
+                "startTrailingIndex": draggedTrailingTileDestinationIndex ?? -1,
+            ])
         }
 
         guard draggedTileID == tile.id else {
@@ -1433,11 +1442,27 @@ struct TileContainerView: View {
         Self.logger.info(
             "endDrag tile=\(tileLogDescription(tile), privacy: .public) translation=(\(value.translation.width, privacy: .public),\(value.translation.height, privacy: .public)) magnitude=\(translationMagnitude, privacy: .public) draggedTileID=\(self.draggedTileID ?? "nil", privacy: .public)"
         )
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(.input, "tileReorderDragEnded", fields: [
+            "tileToken": diagnostics.token(tile.id),
+            "draggedTileToken": diagnostics.token(draggedTileID),
+            "sourceProfileToken": diagnostics.token(draggedProfileID),
+            "activeProfileToken": diagnostics.token(profileService.activeProfileID),
+            "translationX": value.translation.width,
+            "translationY": value.translation.height,
+            "translationMagnitude": translationMagnitude,
+        ])
 
         guard draggedProfileID == profileService.activeProfileID else {
             Self.logger.info(
                 "Drag cancelled after profile change tile=\(tileLogDescription(tile), privacy: .public) sourceProfile=\(self.draggedProfileID ?? "nil", privacy: .public) activeProfile=\(self.profileService.activeProfileID, privacy: .public)"
             )
+            diagnostics.record(.profiles, "tileReorderDragCancelled", fields: [
+                "reason": "profileChanged",
+                "tileToken": diagnostics.token(tile.id),
+                "sourceProfileToken": diagnostics.token(draggedProfileID),
+                "activeProfileToken": diagnostics.token(profileService.activeProfileID),
+            ])
             clearDragState()
             return
         }

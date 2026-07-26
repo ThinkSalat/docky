@@ -165,6 +165,7 @@ final class PermissionsService: ObservableObject {
     private let systemEventsAutomationStatusKey = "docky.systemEventsAutomationStatus"
     private let initialOnboardingCompletedKey = "docky.initialOnboardingCompleted"
     private let skippedPermissionsKey = "docky.skippedPermissions"
+    private var lastDiagnosticsPermissionSummary: [String: String]?
 
     private init() {
         clearLegacyBookmarks()
@@ -236,6 +237,24 @@ final class PermissionsService: ObservableObject {
         refreshLocation()
         refreshCalendar()
         refreshReminders()
+        let diagnosticsSummary = [
+            "userFolders": String(describing: userFolders),
+            "finderAutomation": String(describing: finderAutomation),
+            "accessibility": String(describing: accessibility),
+            "systemEventsAutomation": String(describing: systemEventsAutomation),
+            "screenCapture": String(describing: screenCapture),
+            "location": String(describing: location),
+            "calendar": String(describing: calendar),
+            "reminders": String(describing: reminders),
+        ]
+        if diagnosticsSummary != lastDiagnosticsPermissionSummary {
+            lastDiagnosticsPermissionSummary = diagnosticsSummary
+            DiagnosticsTrace.shared.record(
+                .lifecycle,
+                "permissionsChanged",
+                fields: diagnosticsSummary
+            )
+        }
     }
 
     func markInitialOnboardingCompleted() {

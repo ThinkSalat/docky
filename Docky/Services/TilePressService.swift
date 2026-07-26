@@ -60,6 +60,10 @@ final class TilePressService: ObservableObject {
             hoveredTileID = nil
         }
         if pressedTileID == tileID {
+            DiagnosticsTrace.shared.record(.input, "activeTilePressCleared", fields: [
+                "reason": "tileLifecycleEndedBeforeMouseUp",
+                "tileToken": DiagnosticsTrace.shared.token(tileID),
+            ])
             pressedTileID = nil
         }
     }
@@ -68,9 +72,23 @@ final class TilePressService: ObservableObject {
         switch event.type {
         case .leftMouseDown:
             Self.logger.info("leftMouseDown hovered=\(self.hoveredTileID ?? "nil", privacy: .public) clickCount=\(event.clickCount, privacy: .public) modifiers=\(event.modifierFlags.rawValue, privacy: .public)")
+            DiagnosticsTrace.shared.record(.input, "tilePressMouseDown", fields: [
+                "eventNumber": event.eventNumber,
+                "windowNumber": event.windowNumber,
+                "hoveredTileToken": DiagnosticsTrace.shared.token(hoveredTileID),
+                "clickCount": event.clickCount,
+                "modifiers": event.modifierFlags.rawValue,
+            ])
             pressedTileID = hoveredTileID
         case .leftMouseUp:
             Self.logger.info("leftMouseUp pressedTileID=\(self.pressedTileID ?? "nil", privacy: .public) clickCount=\(event.clickCount, privacy: .public)")
+            DiagnosticsTrace.shared.record(.input, "tilePressMouseUp", fields: [
+                "eventNumber": event.eventNumber,
+                "windowNumber": event.windowNumber,
+                "pressedTileToken": DiagnosticsTrace.shared.token(pressedTileID),
+                "hoveredTileToken": DiagnosticsTrace.shared.token(hoveredTileID),
+                "clickCount": event.clickCount,
+            ])
             if pressedTileID != nil {
                 pressedTileID = nil
             }
