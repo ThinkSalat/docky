@@ -59,17 +59,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         TileStore.shared.syncPreferencesFromSystemDockIfNeeded()
 
         PermissionsService.shared.refresh()
-
-        if PermissionsService.shared.setupComplete {
-            PermissionsService.shared.markInitialOnboardingCompleted()
-            showMainWindow()
-        } else {
-            showPermissionsWindow(
-                steps: PermissionsService.shared.setupPermissions,
-                marksInitialOnboardingCompleted: true,
-                showsMainWindowOnCompletion: true
-            )
-        }
+        showMainWindow()
     }
 
     /// Handles two entry points:
@@ -279,24 +269,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         return true
     }
 
-    private func showPermissionsWindow(
-        steps: [Permission],
-        marksInitialOnboardingCompleted: Bool,
-        showsMainWindowOnCompletion: Bool
-    ) {
+    private func showPermissionsWindow(steps: [Permission]) {
         NSApp.setActivationPolicy(.regular)
         let controller = PermissionsWindowController(steps: steps)
         controller.onComplete = { [weak self] in
             NSApp.setActivationPolicy(.accessory)
             self?.permissionsWindowController = nil
-
-            if marksInitialOnboardingCompleted {
-                PermissionsService.shared.markInitialOnboardingCompleted()
-            }
-
-            if showsMainWindowOnCompletion {
-                self?.showMainWindow()
-            }
         }
         permissionsWindowController = controller
         controller.showWindow(nil)
@@ -428,11 +406,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func showDebugOnboarding(_ sender: Any?) {
         PermissionsService.shared.refresh()
-        showPermissionsWindow(
-            steps: Permission.allCases,
-            marksInitialOnboardingCompleted: false,
-            showsMainWindowOnCompletion: false
-        )
+        showPermissionsWindow(steps: Permission.allCases)
     }
 
     private func installDebugStatusItem() {

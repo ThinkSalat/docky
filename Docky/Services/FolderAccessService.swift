@@ -2,11 +2,12 @@
 //  FolderAccessService.swift
 //  Docky
 //
-//  Reads folder contents for preview tiles. Relies on the .userFolders
-//  permission granted via Full Disk Access. Silent no-op when access isn't
-//  granted.
+//  Reads folder contents for preview tiles. Access is evaluated against the
+//  actual pinned URL; there is no global Full Disk Access probe because macOS
+//  exposes no supported API whose result would describe every folder.
 //
 
+import AppKit
 import Combine
 import Dispatch
 import Foundation
@@ -44,6 +45,18 @@ final class FolderAccessService: ObservableObject {
 
     func snapshot(of folderURL: URL) -> FolderContentsSnapshot {
         cachedSnapshot(of: folderURL)
+    }
+
+    /// Opens the least-privileged privacy pane relevant to a folder that the
+    /// user has already tried to preview. This is called only from an explicit
+    /// recovery action in an unreadable-folder UI.
+    func openFilesAndFoldersSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
+        ) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     func sortedContents(of folderURL: URL, sortMode: FolderTileSortMode) -> [URL] {
@@ -180,10 +193,6 @@ final class FolderAccessService: ObservableObject {
             return .loaded(cached.items)
         }
 
-        guard FileManager.default.isReadableFile(atPath: normalizedFolderURL.path) else {
-            return .unreadable
-        }
-
         let keys: [URLResourceKey] = [
             .addedToDirectoryDateKey,
             .contentModificationDateKey,
@@ -194,11 +203,14 @@ final class FolderAccessService: ObservableObject {
             .localizedTypeDescriptionKey,
             .totalFileAllocatedSizeKey
         ]
-        guard let loaded = try? FileManager.default.contentsOfDirectory(
-            at: normalizedFolderURL,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles]
-        ).sorted(by: { Self.modDate($0) > Self.modDate($1) }) else {
+        let loaded: [URL]
+        do {
+            loaded = try FileManager.default.contentsOfDirectory(
+                at: normalizedFolderURL,
+                includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles]
+            ).sorted(by: { Self.modDate($0) > Self.modDate($1) })
+        } catch {
             return .unreadable
         }
 

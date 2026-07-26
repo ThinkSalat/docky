@@ -2,16 +2,14 @@
 //  PermissionsService.swift
 //  Docky
 //
-//  Tracks the remaining macOS permissions Docky needs:
-//    - .userFolders       → Full Disk Access for pinned folder previews
-//    - .finderAutomation       → Finder Apple Events for Finder-backed actions
-//    - .accessibility          → inspect and restore minimized windows
-//    - .systemEventsAutomation → System Events Apple Events for menu-click actions
-//    - .screenCapture     → minimized window previews
+//  Tracks feature-specific macOS capabilities. None of these capabilities
+//  blocks launch: callers request access at the action that needs it and
+//  otherwise degrade to the subset of Docky that is available.
 //
-//  Required file-system access is granted through Full Disk Access (FDA),
-//  probed via an attempted read of a TCC-protected directory
-//  (inket/FullDiskAccess approach).
+//  Folder access is intentionally not represented here. macOS has no
+//  supported API for querying Full Disk Access, and a probe of an unrelated
+//  protected directory does not describe whether a particular pinned folder
+//  is readable. FolderAccessService reports that state from the actual folder.
 //
 
 import AppKit
@@ -26,7 +24,6 @@ enum PermissionStatus {
 }
 
 enum GrantMethod {
-    case fullDiskAccess
     case automation
     case accessibility
     case screenCapture
@@ -34,7 +31,6 @@ enum GrantMethod {
 }
 
 enum Permission: String, CaseIterable, Identifiable {
-    case userFolders
     case finderAutomation
     case accessibility
     case systemEventsAutomation
@@ -47,7 +43,6 @@ enum Permission: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .userFolders: return "Full Disk Access"
         case .finderAutomation: return "Automation (Finder)"
         case .accessibility: return "Accessibility"
         case .systemEventsAutomation: return "Automation (System Events)"
@@ -60,10 +55,8 @@ enum Permission: String, CaseIterable, Identifiable {
 
     var explanation: String {
         switch self {
-        case .userFolders:
-            return "Grant Full Disk Access so Docky can preview recent items from folders pinned to the Dock, including protected locations like Downloads, Documents, and Desktop. No data leaves your Mac."
         case .finderAutomation:
-            return "Docky uses Finder automation for reveal-in-Finder, open-folder, and Trash actions. macOS grants this separately from Full Disk Access, and you can request it here without waiting for the first Finder action to fail."
+            return "Docky uses Finder automation for reveal-in-Finder, open-folder, and Trash actions. Docky requests this only when you use one of those actions or explicitly enable it here."
         case .accessibility:
             return "Accessibility access lets Docky click menu bar items for curated menuClick actions, inspect app windows for Dock-like reopen behavior and window menus, and restore minimized windows beside the Trash. These actions are slower and more fragile than built-in actions, so Docky requests this only when needed."
         case .systemEventsAutomation:
@@ -81,8 +74,6 @@ enum Permission: String, CaseIterable, Identifiable {
 
     var systemSettingsURL: URL? {
         switch self {
-        case .userFolders:
-            return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
         case .finderAutomation:
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
         case .systemEventsAutomation:
@@ -100,46 +91,10 @@ enum Permission: String, CaseIterable, Identifiable {
         }
     }
 
-    var isRequiredAtLaunch: Bool {
-        switch self {
-        case .userFolders:
-            return true
-        case .finderAutomation:
-            return false
-        case .systemEventsAutomation:
-            return false
-        case .accessibility:
-            return true
-        case .screenCapture:
-            return true
-        case .location:
-            return false
-        case .calendar:
-            return false
-        case .reminders:
-            return false
-        }
-    }
-
-    /// Whether this permission is surfaced during the initial onboarding
-    /// flow. Widget-tied permissions (calendar, reminders, location) are
-    /// requested lazily from the widget itself the first time it renders,
-    /// so they never appear in onboarding; only app-feature permissions do.
-    var appearsInOnboarding: Bool {
-        switch self {
-        case .userFolders, .finderAutomation, .accessibility, .systemEventsAutomation, .screenCapture:
-            return true
-        case .location, .calendar, .reminders:
-            return false
-        }
-    }
 }
 
 final class PermissionsService: ObservableObject {
     static let shared = PermissionsService()
-
-    @Published private(set) var userFolders: PermissionStatus = .notDetermined
-    @Published private(set) var userFoldersGrantMethod: GrantMethod?
 
     @Published private(set) var finderAutomation: PermissionStatus = .notDetermined
     @Published private(set) var finderAutomationGrantMethod: GrantMethod?
@@ -159,16 +114,11 @@ final class PermissionsService: ObservableObject {
     @Published private(set) var calendar: PermissionStatus = .notDetermined
     @Published private(set) var reminders: PermissionStatus = .notDetermined
 
-    private let dockBookmarkKey = "docky.dockPlistBookmark"
-    private let userFoldersBookmarkKey = "docky.userFoldersBookmark"
     private let finderAutomationStatusKey = "docky.finderAutomationStatus"
     private let systemEventsAutomationStatusKey = "docky.systemEventsAutomationStatus"
-    private let initialOnboardingCompletedKey = "docky.initialOnboardingCompleted"
-    private let skippedPermissionsKey = "docky.skippedPermissions"
     private var lastDiagnosticsPermissionSummary: [String: String]?
 
     private init() {
-        clearLegacyBookmarks()
         refresh()
     }
 
@@ -176,7 +126,6 @@ final class PermissionsService: ObservableObject {
 
     func status(for permission: Permission) -> PermissionStatus {
         switch permission {
-        case .userFolders: return userFolders
         case .finderAutomation: return finderAutomation
         case .accessibility: return accessibility
         case .systemEventsAutomation: return systemEventsAutomation
@@ -187,49 +136,7 @@ final class PermissionsService: ObservableObject {
         }
     }
 
-    var missingPermissions: [Permission] {
-        Permission.allCases.filter { status(for: $0) != .granted }
-    }
-
-    var missingRequiredPermissions: [Permission] {
-        Permission.allCases.filter { $0.isRequiredAtLaunch && status(for: $0) != .granted }
-    }
-
-    var setupPermissions: [Permission] {
-        Permission.allCases.filter {
-            guard $0.appearsInOnboarding else {
-                return false
-            }
-
-            if hasSkippedPermission($0) {
-                return false
-            }
-
-            if $0.isRequiredAtLaunch {
-                return status(for: $0) != .granted
-            }
-
-            if hasCompletedInitialOnboarding {
-                return false
-            }
-
-            return status(for: $0) == .notDetermined
-        }
-    }
-
-    var allGranted: Bool { missingPermissions.isEmpty }
-
-    var allRequiredGranted: Bool { missingRequiredPermissions.isEmpty }
-
-    var setupComplete: Bool { setupPermissions.isEmpty }
-
-    var hasCompletedInitialOnboarding: Bool {
-        UserDefaults.standard.bool(forKey: initialOnboardingCompletedKey)
-    }
-
     func refresh() {
-        let fdaGranted = checkFullDiskAccess()
-        refreshUserFolders(fdaGranted: fdaGranted)
         refreshFinderAutomation()
         refreshAccessibility()
         refreshSystemEventsAutomation()
@@ -238,7 +145,6 @@ final class PermissionsService: ObservableObject {
         refreshCalendar()
         refreshReminders()
         let diagnosticsSummary = [
-            "userFolders": String(describing: userFolders),
             "finderAutomation": String(describing: finderAutomation),
             "accessibility": String(describing: accessibility),
             "systemEventsAutomation": String(describing: systemEventsAutomation),
@@ -257,25 +163,7 @@ final class PermissionsService: ObservableObject {
         }
     }
 
-    func markInitialOnboardingCompleted() {
-        UserDefaults.standard.set(true, forKey: initialOnboardingCompletedKey)
-    }
-
-    func markPermissionSkipped(_ permission: Permission) {
-        var skippedPermissions = skippedPermissionIDs
-        skippedPermissions.insert(permission.rawValue)
-        UserDefaults.standard.set(Array(skippedPermissions), forKey: skippedPermissionsKey)
-    }
-
-    func hasSkippedPermission(_ permission: Permission) -> Bool {
-        skippedPermissionIDs.contains(permission.rawValue)
-    }
-
     // MARK: - Grant actions
-
-    private var skippedPermissionIDs: Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: skippedPermissionsKey) ?? [])
-    }
 
     func openSystemSettings(for permission: Permission) {
         guard let url = permission.systemSettingsURL else { return }
@@ -304,8 +192,6 @@ final class PermissionsService: ObservableObject {
             let granted = await RemindersService.shared.requestAccess()
             refreshReminders()
             return granted
-        case .userFolders:
-            return false
         }
     }
 
@@ -317,7 +203,7 @@ final class PermissionsService: ObservableObject {
         case .systemEventsAutomation:
             UserDefaults.standard.removeObject(forKey: systemEventsAutomationStatusKey)
             refreshSystemEventsAutomation()
-        case .userFolders, .accessibility, .screenCapture, .location, .calendar, .reminders:
+        case .accessibility, .screenCapture, .location, .calendar, .reminders:
             break
         }
     }
@@ -346,18 +232,6 @@ final class PermissionsService: ObservableObject {
         if alert.runModal() == .alertFirstButtonReturn {
             openSystemSettings(for: permission)
         }
-    }
-
-    // MARK: - User folders permission
-
-    private func refreshUserFolders(fdaGranted: Bool) {
-        if fdaGranted {
-            userFoldersGrantMethod = .fullDiskAccess
-            userFolders = .granted
-            return
-        }
-        userFoldersGrantMethod = nil
-        userFolders = .denied
     }
 
     // MARK: - Finder automation permission
@@ -467,22 +341,4 @@ final class PermissionsService: ObservableObject {
         reminders = RemindersService.shared.permissionStatus
     }
 
-    // MARK: - Full Disk Access probe
-
-    private func checkFullDiskAccess() -> Bool {
-        let probePath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Containers/com.apple.stocks")
-            .path
-        do {
-            _ = try FileManager.default.contentsOfDirectory(atPath: probePath)
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    private func clearLegacyBookmarks() {
-        UserDefaults.standard.removeObject(forKey: dockBookmarkKey)
-        UserDefaults.standard.removeObject(forKey: userFoldersBookmarkKey)
-    }
 }

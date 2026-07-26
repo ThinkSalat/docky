@@ -103,8 +103,9 @@ Updates are delivered in-app via Sparkle. No tap trust step is needed for a norm
 install. If you run Homebrew with `HOMEBREW_REQUIRE_TAP_TRUST=1`, trust the cask
 first with `brew trust --cask josejuanqm/tap/docky`.
 
-Docky needs **Accessibility** and **Screen Recording** permissions to manage
-windows and render previews. It prompts for these on first launch.
+Docky can use **Accessibility** to manage windows and **Screen Recording** to
+render previews. The dock launches without either capability and requests
+access only when you explicitly use or enable the corresponding feature.
 
 > [!NOTE]
 > Docky uses private SkyLight / CoreGraphics Services and Accessibility SPI (see
