@@ -999,7 +999,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 }
 
 @Observable final class DockyPreferences {
-    static let shared = DockyPreferences()
+    static var shared: DockyPreferences {
+        ProfileStateBootstrap.shared.preferences
+    }
 
     /// Set of `Keys.*` strings the user has explicitly customized. Each
     /// appearance setter inserts its key; setters that clear a value
@@ -2321,6 +2323,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// Bundle identifiers hidden from Docky's app tile surfaces.
     var hiddenAppBundleIdentifiers: [String] {
         didSet {
+            guard !isRevertingProfileBackedPreference else { return }
             let normalizedIdentifiers = Self.normalizedBundleIdentifiers(hiddenAppBundleIdentifiers)
             guard normalizedIdentifiers != oldValue else {
                 if hiddenAppBundleIdentifiers != normalizedIdentifiers {
@@ -2334,8 +2337,19 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
                 return
             }
 
+            guard mirrorToActiveProfile({
+                $0.hiddenAppBundleIdentifiers = normalizedIdentifiers
+            }) else {
+                let authoritativeIdentifiers =
+                    profileService?.activeProfile?.hiddenAppBundleIdentifiers
+                    ?? Self.normalizedBundleIdentifiers(oldValue)
+                revertProfileBackedPreference {
+                    hiddenAppBundleIdentifiers = authoritativeIdentifiers
+                }
+                return
+            }
+
             defaults.set(normalizedIdentifiers, forKey: Keys.hiddenAppBundleIdentifiers)
-            mirrorToActiveProfile { $0.hiddenAppBundleIdentifiers = normalizedIdentifiers }
         }
     }
 
@@ -2642,10 +2656,15 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// Docky-owned ordered pinned section items.
     var pinnedItems: [PinnedTileItem] {
         didSet {
-            guard pinnedItems != oldValue else { return }
-            persistPinnedItems(pinnedItems)
+            guard pinnedItems != oldValue, !isRevertingProfileBackedPreference else { return }
             let snapshot = pinnedItems
-            mirrorToActiveProfile { $0.pinnedItems = snapshot }
+            guard mirrorToActiveProfile({ $0.pinnedItems = snapshot }) else {
+                revertProfileBackedPreference {
+                    pinnedItems = oldValue
+                }
+                return
+            }
+            persistPinnedItems(snapshot)
 
             let appBundleIdentifiers = pinnedItems.compactMap { item in
                 item.kind == .app ? item.bundleIdentifier : nil
@@ -2659,30 +2678,45 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// Enabled widgets grouped by the app tile they extend.
     var widgetPlacements: [WidgetPlacement] {
         didSet {
-            guard widgetPlacements != oldValue else { return }
-            persistWidgetPlacements(widgetPlacements)
+            guard widgetPlacements != oldValue, !isRevertingProfileBackedPreference else { return }
             let snapshot = widgetPlacements
-            mirrorToActiveProfile { $0.widgetPlacements = snapshot }
+            guard mirrorToActiveProfile({ $0.widgetPlacements = snapshot }) else {
+                revertProfileBackedPreference {
+                    widgetPlacements = oldValue
+                }
+                return
+            }
+            persistWidgetPlacements(snapshot)
         }
     }
 
     /// Optional widget substitutions for app tiles.
     var appWidgetDisplays: [AppWidgetDisplay] {
         didSet {
-            guard appWidgetDisplays != oldValue else { return }
-            persistAppWidgetDisplays(appWidgetDisplays)
+            guard appWidgetDisplays != oldValue, !isRevertingProfileBackedPreference else { return }
             let snapshot = appWidgetDisplays
-            mirrorToActiveProfile { $0.appWidgetDisplays = snapshot }
+            guard mirrorToActiveProfile({ $0.appWidgetDisplays = snapshot }) else {
+                revertProfileBackedPreference {
+                    appWidgetDisplays = oldValue
+                }
+                return
+            }
+            persistAppWidgetDisplays(snapshot)
         }
     }
 
     /// Docky-owned ordered folder/trash section items.
     var trailingItems: [TrailingTileItem] {
         didSet {
-            guard trailingItems != oldValue else { return }
-            persistTrailingItems(trailingItems)
+            guard trailingItems != oldValue, !isRevertingProfileBackedPreference else { return }
             let snapshot = trailingItems
-            mirrorToActiveProfile { $0.trailingItems = snapshot }
+            guard mirrorToActiveProfile({ $0.trailingItems = snapshot }) else {
+                revertProfileBackedPreference {
+                    trailingItems = oldValue
+                }
+                return
+            }
+            persistTrailingItems(snapshot)
         }
     }
 
@@ -2714,11 +2748,24 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var isSyncingOpenAtLoginPreference = false
+    private weak var profileService: ProfileService?
+
+    /// Legacy profile-backed values that existed in UserDefaults but could
+    /// not be decoded during bootstrap. Profile migration treats these as a
+    /// blocking integrity failure rather than silently replacing them with
+    /// empty/default values.
+    private(set) var legacyProfileSnapshotDecodeFailures: [String] = []
 
     /// When `true`, tile-store didSet observers skip the push to
     /// `ProfileService`. Used by `applyProfile(_:)` so loading a profile
     /// doesn't immediately overwrite it with the values just loaded.
     private var isApplyingProfile = false
+    private var isRevertingProfileBackedPreference = false
+
+    fileprivate func attachProfileService(_ profileService: ProfileService) {
+        precondition(self.profileService == nil)
+        self.profileService = profileService
+    }
 
     /// Swap the active profile's tile-store fields into this preferences
     /// object. Each assignment fires its didSet — those still persist to
@@ -2758,9 +2805,30 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     /// Mirror a tile-store edit to the active profile so it survives the
     /// next profile switch. No-op while a profile is being applied.
-    fileprivate func mirrorToActiveProfile(_ mutate: @escaping (inout DockProfile) -> Void) {
-        guard !isApplyingProfile else { return }
-        ProfileService.shared.updateActiveProfile(mutate)
+    @discardableResult
+    private func mirrorToActiveProfile(
+        _ mutate: @escaping (inout DockProfile) -> Void
+    ) -> Bool {
+        guard !isApplyingProfile, !isRevertingProfileBackedPreference else {
+            return true
+        }
+        guard let profileService else {
+            DiagnosticsTrace.shared.record(.profiles, "profilePreferenceMutationRejected", fields: [
+                "reason": "profileServiceUnavailable",
+            ])
+            return false
+        }
+        return profileService.updateActiveProfile(mutate)
+    }
+
+    private func revertProfileBackedPreference(_ revert: () -> Void) {
+        isRevertingProfileBackedPreference = true
+        revert()
+        isRevertingProfileBackedPreference = false
+        DiagnosticsTrace.shared.record(.profiles, "profilePreferenceMutationReverted", fields: [
+            "activeProfileToken": DiagnosticsTrace.shared.token(profileService?.activeProfileID),
+            "error": profileService?.lastPersistenceError ?? "unknown",
+        ])
     }
 
     // MARK: - Effective appearance values (theme override layer)
@@ -3801,7 +3869,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let hasSeenDockEditorHint = false
     }
 
-    private init() {
+    fileprivate init() {
         self.defaults = .standard
         let storedVerticalPadding = defaults.object(forKey: Keys.tileVerticalPadding) as? Double
         let storedTileSpacing = defaults.object(forKey: Keys.tileSpacing) as? Double
@@ -3926,8 +3994,42 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         let storedAppWidgetDisplays = defaults.data(forKey: Keys.appWidgetDisplays)
         let storedTrailingItems = defaults.data(forKey: Keys.trailingItems)
         let storedHasSeenDockEditorHint = defaults.object(forKey: Keys.hasSeenDockEditorHint) as? Bool
+        var profileSnapshotDecodeFailures: [String] = []
+        let decodedPinnedItems: [PinnedTileItem]? = Self.decodeProfileSnapshot(
+            from: storedPinnedItems,
+            storedObjectExists: defaults.object(forKey: Keys.pinnedItems) != nil,
+            key: Keys.pinnedItems,
+            failures: &profileSnapshotDecodeFailures
+        )
+        let decodedWidgetPlacements: [WidgetPlacement]? = Self.decodeProfileSnapshot(
+            from: storedWidgetPlacements,
+            storedObjectExists: defaults.object(forKey: Keys.widgetPlacements) != nil,
+            key: Keys.widgetPlacements,
+            failures: &profileSnapshotDecodeFailures
+        )
+        let decodedAppWidgetDisplays: [AppWidgetDisplay]? = Self.decodeProfileSnapshot(
+            from: storedAppWidgetDisplays,
+            storedObjectExists: defaults.object(forKey: Keys.appWidgetDisplays) != nil,
+            key: Keys.appWidgetDisplays,
+            failures: &profileSnapshotDecodeFailures
+        )
+        let decodedTrailingItems: [TrailingTileItem]? = Self.decodeProfileSnapshot(
+            from: storedTrailingItems,
+            storedObjectExists: defaults.object(forKey: Keys.trailingItems) != nil,
+            key: Keys.trailingItems,
+            failures: &profileSnapshotDecodeFailures
+        )
+        if defaults.object(forKey: Keys.hiddenAppBundleIdentifiers) != nil,
+           storedHiddenAppBundleIdentifiers == nil {
+            profileSnapshotDecodeFailures.append(Keys.hiddenAppBundleIdentifiers)
+        }
+        if storedPinnedItems == nil,
+           defaults.object(forKey: Keys.pinnedAppBundleIdentifiers) != nil,
+           storedPinnedAppBundleIdentifiers == nil {
+            profileSnapshotDecodeFailures.append(Keys.pinnedAppBundleIdentifiers)
+        }
         let initialPinnedAppBundleIdentifiers = storedPinnedAppBundleIdentifiers ?? DefaultValues.pinnedAppBundleIdentifiers
-        let initialPinnedItems = Self.decodePinnedItems(from: storedPinnedItems)
+        let initialPinnedItems = decodedPinnedItems
             ?? initialPinnedAppBundleIdentifiers.map(PinnedTileItem.app(bundleIdentifier:))
         self.tileVerticalPadding = storedVerticalPadding.map { CGFloat($0) } ?? DefaultValues.tileVerticalPadding
         self.tileSpacing = storedTileSpacing.map { CGFloat($0) } ?? DefaultValues.tileSpacing
@@ -4077,10 +4179,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         self.switcherZoomKeyCode = storedSwitcherZoomKeyCode.map(UInt16.init) ?? DefaultValues.switcherZoomKeyCode
         self.pinnedAppBundleIdentifiers = initialPinnedAppBundleIdentifiers
         self.pinnedItems = initialPinnedItems
-        self.widgetPlacements = Self.decodeWidgetPlacements(from: storedWidgetPlacements) ?? DefaultValues.widgetPlacements
-        self.appWidgetDisplays = Self.decodeAppWidgetDisplays(from: storedAppWidgetDisplays) ?? DefaultValues.appWidgetDisplays
-        self.trailingItems = Self.decodeTrailingItems(from: storedTrailingItems) ?? DefaultValues.trailingItems
+        self.widgetPlacements = decodedWidgetPlacements ?? DefaultValues.widgetPlacements
+        self.appWidgetDisplays = decodedAppWidgetDisplays ?? DefaultValues.appWidgetDisplays
+        self.trailingItems = decodedTrailingItems ?? DefaultValues.trailingItems
         self.hasSeenDockEditorHint = storedHasSeenDockEditorHint ?? DefaultValues.hasSeenDockEditorHint
+        self.legacyProfileSnapshotDecodeFailures = profileSnapshotDecodeFailures
         self.photoFrameBookmarks = (defaults.array(forKey: Keys.photoFrameBookmarks) as? [Data]) ?? []
 
         // Load the user-override set, then run the one-shot migration
@@ -4401,39 +4504,64 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     private func persistPinnedItems(_ items: [PinnedTileItem]) {
-        guard let data = try? encoder.encode(items) else {
-            defaults.removeObject(forKey: Keys.pinnedItems)
-            return
+        do {
+            defaults.set(try encoder.encode(items), forKey: Keys.pinnedItems)
+        } catch {
+            recordProfileSnapshotEncodingFailure(
+                key: Keys.pinnedItems,
+                error: error
+            )
         }
-
-        defaults.set(data, forKey: Keys.pinnedItems)
     }
 
     private func persistWidgetPlacements(_ placements: [WidgetPlacement]) {
-        guard let data = try? encoder.encode(placements) else {
-            defaults.removeObject(forKey: Keys.widgetPlacements)
-            return
+        do {
+            defaults.set(
+                try encoder.encode(placements),
+                forKey: Keys.widgetPlacements
+            )
+        } catch {
+            recordProfileSnapshotEncodingFailure(
+                key: Keys.widgetPlacements,
+                error: error
+            )
         }
-
-        defaults.set(data, forKey: Keys.widgetPlacements)
     }
 
     private func persistAppWidgetDisplays(_ displays: [AppWidgetDisplay]) {
-        guard let data = try? encoder.encode(displays) else {
-            defaults.removeObject(forKey: Keys.appWidgetDisplays)
-            return
+        do {
+            defaults.set(
+                try encoder.encode(displays),
+                forKey: Keys.appWidgetDisplays
+            )
+        } catch {
+            recordProfileSnapshotEncodingFailure(
+                key: Keys.appWidgetDisplays,
+                error: error
+            )
         }
-
-        defaults.set(data, forKey: Keys.appWidgetDisplays)
     }
 
     private func persistTrailingItems(_ items: [TrailingTileItem]) {
-        guard let data = try? encoder.encode(items) else {
-            defaults.removeObject(forKey: Keys.trailingItems)
-            return
+        do {
+            defaults.set(try encoder.encode(items), forKey: Keys.trailingItems)
+        } catch {
+            recordProfileSnapshotEncodingFailure(
+                key: Keys.trailingItems,
+                error: error
+            )
         }
+    }
 
-        defaults.set(data, forKey: Keys.trailingItems)
+    private func recordProfileSnapshotEncodingFailure(
+        key: String,
+        error: Error
+    ) {
+        DiagnosticsTrace.shared.record(.profiles, "legacyTileSnapshotPersistFailed", fields: [
+            "key": key,
+            "error": (error as? LocalizedError)?.errorDescription
+                ?? String(describing: error),
+        ])
     }
 
     private func persistWindowTintColor(_ color: DockColor?) {
@@ -4533,22 +4661,6 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         return try? JSONDecoder().decode(DockColor.self, from: data)
     }
 
-    private static func decodeWidgetPlacements(from data: Data?) -> [WidgetPlacement]? {
-        guard let data else {
-            return nil
-        }
-
-        return try? JSONDecoder().decode([WidgetPlacement].self, from: data)
-    }
-
-    private static func decodeAppWidgetDisplays(from data: Data?) -> [AppWidgetDisplay]? {
-        guard let data else {
-            return nil
-        }
-
-        return try? JSONDecoder().decode([AppWidgetDisplay].self, from: data)
-    }
-
     private static func decodeAppIconOverrides(from data: Data?) -> [AppIconOverride]? {
         guard let data else {
             return nil
@@ -4581,20 +4693,25 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         return try? JSONDecoder().decode(KeyboardShortcut.self, from: data)
     }
 
-    private static func decodePinnedItems(from data: Data?) -> [PinnedTileItem]? {
+    private static func decodeProfileSnapshot<Value: Decodable>(
+        from data: Data?,
+        storedObjectExists: Bool,
+        key: String,
+        failures: inout [String]
+    ) -> Value? {
         guard let data else {
+            if storedObjectExists {
+                failures.append(key)
+            }
             return nil
         }
 
-        return try? JSONDecoder().decode([PinnedTileItem].self, from: data)
-    }
-
-    private static func decodeTrailingItems(from data: Data?) -> [TrailingTileItem]? {
-        guard let data else {
+        do {
+            return try JSONDecoder().decode(Value.self, from: data)
+        } catch {
+            failures.append(key)
             return nil
         }
-
-        return try? JSONDecoder().decode([TrailingTileItem].self, from: data)
     }
 
     private static func normalizedBundleIdentifiers(_ bundleIdentifiers: [String]) -> [String] {
@@ -4602,4 +4719,20 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
             $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
         }
     }
+}
+
+/// Constructs both sides of the profile/preferences bridge as one bootstrap
+/// transaction. Neither singleton is published until migration, validation,
+/// recovery, and active-profile reconciliation have completed.
+enum ProfileStateBootstrap {
+    static let shared: (
+        preferences: DockyPreferences,
+        profileService: ProfileService
+    ) = {
+        let preferences = DockyPreferences()
+        let profileService = ProfileService(preferences: preferences)
+        preferences.attachProfileService(profileService)
+        profileService.completeBootstrap()
+        return (preferences, profileService)
+    }()
 }

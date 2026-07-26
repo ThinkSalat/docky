@@ -22,6 +22,17 @@ struct ProfilesSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if let persistenceError = profileService.lastPersistenceError {
+                Section {
+                    Label("Profile changes could not be saved", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(persistenceError)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             Section("Switcher") {
                 Toggle(isOn: $preferences.hidesProfileStrip) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -59,7 +70,9 @@ struct ProfilesSettingsView: View {
             counter += 1
             name = "\(baseName) \(counter)"
         }
-        let created = profileService.createProfile(name: name)
+        guard let created = profileService.createProfile(name: name) else {
+            return
+        }
         profileService.setActiveProfile(id: created.id)
     }
 }
