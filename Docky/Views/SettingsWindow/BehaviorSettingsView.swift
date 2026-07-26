@@ -53,7 +53,7 @@ struct BehaviorSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Placement, visibility, app-tile click, app folders, widgets, launch, and system-dock settings will return to their defaults. Appearance, app icons, and other settings are unaffected. This cannot be undone.")
+            Text("Stored placement, visibility, app-tile click, app-folder, widget-preview, launch, and system-dock values will return to their built-in defaults, and their behavior theme overrides will be cleared. An active theme can still supply supported behavior values. Appearance, app icons, and other settings are unaffected. This cannot be undone.")
         }
     }
 
@@ -71,7 +71,7 @@ struct BehaviorSettingsView: View {
                     Spacer()
                 }
 
-                Text("Reverts every behavior setting (placement, visibility, app-tile click, app folders, widgets, launch, system-dock) to its built-in default. Use this when a theme has nudged behavior in a direction you want to undo.")
+                Text("Reverts behavior settings (placement, visibility, app-tile click, app folders, widget previews, launch, system Dock) to their built-in defaults and clears only their behavior theme overrides.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

@@ -1004,7 +1004,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     /// Set of `Keys.*` strings the user has explicitly customized. Each
-    /// appearance setter inserts its key; setters that clear a value
+    /// theme-aware setter inserts its key; setters that clear a value
     /// (e.g. setting `windowTintColor` back to `nil`) remove it.
     ///
     /// This is the predicate the theme override layer uses: when a key
@@ -1013,74 +1013,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// key *is* in this set, the user's explicit value wins.
     ///
     /// Persisted to `UserDefaults` so override status survives relaunch.
-    /// Populated on first launch via the migration in `init` (any key
-    /// already present in `UserDefaults` at upgrade time is treated as
-    /// user-overridden, better to over-respect existing customizations
-    /// than to let a theme silently replace them).
+    /// Populated on first launch via the migration in `init` (eligible keys
+    /// already present in `UserDefaults` at upgrade time are treated as
+    /// user-overridden; automatically imported DockSettings values are not).
     var userOverriddenAppearanceKeys: Set<String> = []
-
-    /// All preference keys that participate in the theme override
-    /// layer (i.e. the appearance subset). Used by `init` migration
-    /// and by `clearAllAppearanceOverrides()`.
-    static let appearanceKeys: Set<String> = [
-        Keys.disablesGlassLook,
-        Keys.tileVerticalPadding,
-        Keys.tileSpacing,
-        Keys.tileClipShape,
-        Keys.tileIconPadding,
-        Keys.tileHoverOpacity,
-        Keys.tileHoverScale,
-        Keys.tileHoverBackgroundColor,
-        Keys.tileHoverBackgroundImagePath,
-        Keys.tileHoverBackgroundOpacity,
-        Keys.tileHoverBackgroundCornerRadius,
-        Keys.tileActiveBackgroundColor,
-        Keys.tileActiveBackgroundImagePath,
-        Keys.tileActiveBackgroundOpacity,
-        Keys.tileActiveBackgroundCornerRadius,
-        Keys.widget1xContentPadding,
-        Keys.widget1xCornerRadius,
-        Keys.widget2xContentPadding,
-        Keys.widget2xCornerRadius,
-        Keys.widget3xContentPadding,
-        Keys.widget3xCornerRadius,
-        Keys.widget4xContentPadding,
-        Keys.widget4xCornerRadius,
-        Keys.windowCornerRadius,
-        Keys.windowCornerRadiusTopLeading,
-        Keys.windowCornerRadiusTopTrailing,
-        Keys.windowCornerRadiusBottomLeading,
-        Keys.windowCornerRadiusBottomTrailing,
-        Keys.windowContentInsetTop,
-        Keys.windowContentInsetLeading,
-        Keys.windowContentInsetBottom,
-        Keys.windowContentInsetTrailing,
-        Keys.windowClipShape,
-        Keys.windowTintColor,
-        Keys.windowTintOpacity,
-        Keys.windowBackgroundImagePath,
-        Keys.windowBackgroundImageMode,
-        Keys.activeIndicatorShape,
-        Keys.activeIndicatorImagePath,
-        Keys.activeIndicatorColor,
-        Keys.activeIndicatorOffset,
-        Keys.activeIndicatorScale,
-        Keys.dividerImagePath,
-        Keys.leftDividerImagePath,
-        Keys.rightDividerImagePath,
-        Keys.mirrorsLeftDividerOnRight,
-        Keys.dividerPaddingFraction,
-        Keys.dividerImageScale,
-        Keys.dividerOffset,
-        Keys.dividerOpacity,
-        Keys.dividerColor,
-        Keys.windowBorderColor,
-        Keys.windowBorderWidth,
-        Keys.iconShadowColor,
-        Keys.iconShadowRadius,
-        Keys.iconShadowOpacity,
-        Keys.showsActivePinnedSeparator,
-    ]
 
     /// Whether the user has an explicit override for this preference
     /// key. Used by Settings UI to show an "override / theme value"
@@ -1090,8 +1026,8 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         userOverriddenAppearanceKeys.contains(key)
     }
 
-    /// Marks an appearance key as user-overridden. Idempotent.
-    /// Called from every appearance setter alongside the persist write.
+    /// Marks a theme-aware key as user-overridden. Idempotent.
+    /// Called from every participating setter alongside the persist write.
     /// Internal (not fileprivate) so other services that own their own
     /// preference storage (e.g. `DockSettingsService` for tile size /
     /// magnification) can participate in the same override layer when a
@@ -1102,7 +1038,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         persistUserOverriddenAppearanceKeys()
     }
 
-    /// Clears the override flag for a single appearance key. The
+    /// Clears the override flag for a single theme-aware key. The
     /// stored value is left untouched, `effective<X>` simply starts
     /// preferring the theme value (or built-in default). Used by the
     /// Settings UI "revert to theme" affordance.
@@ -1112,11 +1048,25 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         persistUserOverriddenAppearanceKeys()
     }
 
-    /// Clears every appearance override. Used by the "use theme as-is"
-    /// flow and by `resetAppearanceToDefaults()`.
+    /// Clears every theme override. Used only by the explicit
+    /// "use theme as-is" flow; partial resets use scoped clearing.
     func clearAllAppearanceOverrides() {
         guard !userOverriddenAppearanceKeys.isEmpty else { return }
         userOverriddenAppearanceKeys.removeAll()
+        persistUserOverriddenAppearanceKeys()
+    }
+
+    /// Clears only the override flags owned by a partial reset. Unknown keys
+    /// and keys owned by other settings surfaces survive untouched.
+    private func clearThemeOverrides(
+        afterReset scope: DockyPreferenceResetScope
+    ) {
+        let retained = DockyPreferenceResetScopeModel.retainingThemeOverrides(
+            userOverriddenAppearanceKeys,
+            afterReset: scope
+        )
+        guard retained != userOverriddenAppearanceKeys else { return }
+        userOverriddenAppearanceKeys = retained
         persistUserOverriddenAppearanceKeys()
     }
 
@@ -3683,11 +3633,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let maximizedWindowBehavior = "docky.maximizedWindowBehavior"
         static let hidesSystemDock = "docky.hidesSystemDock"
         static let overflowBehavior = "docky.overflowBehavior"
-        static let windowAxisSizing = "docky.windowAxisSizing"
+        static let windowAxisSizing =
+            DockyThemeOverrideKey.windowAxisSizing.rawValue
         static let enablesWidgetHoverPreview = "docky.enablesWidgetHoverPreview"
         static let widgetHoverPreviewSpans = "docky.widgetHoverPreviewSpans"
         static let widgetHoverPreviewDelay = "docky.widgetHoverGrowDelay"
-        static let showsActivePinnedSeparator = "docky.showsActivePinnedSeparator"
+        static let showsActivePinnedSeparator =
+            DockyThemeOverrideKey.showsActivePinnedSeparator.rawValue
         static let showsRunningApps = "docky.showsRunningApps"
         static let showsMinimizedWindows = "docky.showsMinimizedWindows"
         static let hidesDuringFullscreen = "docky.hidesDuringFullscreen"
@@ -4189,27 +4141,47 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         // Load the user-override set, then run the one-shot migration
         // that infers overrides from existing UserDefaults presence.
         // After this runs once, the set is the authoritative source of
-        // truth, appearance setters maintain it from then on.
+        // truth; theme-aware setters maintain it from then on.
         if let storedOverrideKeys = defaults.stringArray(forKey: Keys.userOverriddenAppearanceKeys) {
+            // Preserve unknown/future keys as well as newly-recognized keys.
+            // Older builds may otherwise erase override intent merely by
+            // loading and re-persisting this compatibility set.
             self.userOverriddenAppearanceKeys = Set(storedOverrideKeys)
-                .intersection(Self.appearanceKeys)
         }
 
         let migrationVersion = defaults.integer(forKey: Keys.appearanceOverrideMigrationVersion)
         if migrationVersion < 1 {
             // First launch with the override layer: treat any
-            // appearance key that exists in UserDefaults as a user
-            // override. Better to over-respect existing customizations
-            // than to let a theme silently replace them.
+            // safely-inferable key that exists in UserDefaults as a user
+            // override. DockSettings-owned values are excluded because raw
+            // presence may only mean they were imported from the system Dock.
             var seeded = self.userOverriddenAppearanceKeys
-            for key in Self.appearanceKeys {
+            for key in DockyPreferenceResetScopeModel
+                .presenceInferredThemeOverrideKeys
+            {
                 if defaults.object(forKey: key) != nil {
                     seeded.insert(key)
                 }
             }
             self.userOverriddenAppearanceKeys = seeded
             persistUserOverriddenAppearanceKeys()
-            defaults.set(1, forKey: Keys.appearanceOverrideMigrationVersion)
+            defaults.set(2, forKey: Keys.appearanceOverrideMigrationVersion)
+        } else if migrationVersion < 2 {
+            // Version 1 accidentally omitted behavior.windowAxisSizing from
+            // its recognized-key catalog. Seed only that newly-recognized,
+            // safely-inferable key; re-seeding every key would resurrect
+            // overrides a user had explicitly cleared. Newly-recognized
+            // DockSettings keys survive via the unfiltered stored set above,
+            // but are not inferred from their automatically imported values.
+            var seeded = self.userOverriddenAppearanceKeys
+            for key in DockyPreferenceResetScopeModel.recognitionMigrationV2Keys {
+                if defaults.object(forKey: key) != nil {
+                    seeded.insert(key)
+                }
+            }
+            self.userOverriddenAppearanceKeys = seeded
+            persistUserOverriddenAppearanceKeys()
+            defaults.set(2, forKey: Keys.appearanceOverrideMigrationVersion)
         }
     }
 
@@ -4240,8 +4212,8 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     /// Resets only the preferences exposed in Settings → Appearance
     /// (General, Indicators, Tile Layout, Window Shape, Window
-    /// Background). App-icon overrides, behavior, widgets, launchpad,
-    /// window-management, and system-dock settings are untouched ,
+    /// Background, Appearance Widgets). App-icon overrides, behavior,
+    /// launchpad, window-management, and system-dock settings are untouched;
     /// callers that want a full wipe should call `resetToDefaults()`
     /// instead.
     func resetAppearanceToDefaults() {
@@ -4320,14 +4292,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         windowTintColor = DefaultValues.windowTintColor
         windowTintOpacity = DefaultValues.windowTintOpacity
 
-        // Clear all override flags so the active theme (if any) takes
-        // over for these fields. The setters above re-mark whichever
-        // keys ended up with a non-default value, but for non-Optional
-        // fields setting back to the exact default doesn't trigger
-        // `didSet` (the guard short-circuits), so any pre-existing
-        // override flag would survive. Clearing them all here is the
-        // simplest way to honor "reset" semantically.
-        clearAllAppearanceOverrides()
+        // Same-value setters do not re-persist or alter override flags.
+        // Explicitly clear only Appearance-owned flags so behavior and
+        // DockSettings-owned overrides keep their current meaning.
+        clearThemeOverrides(afterReset: .appearance)
     }
 
     /// Resets every preference surfaced in the Behavior settings panes
@@ -4372,8 +4340,6 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         enablesWidgetHoverPreview = DefaultValues.enablesWidgetHoverPreview
         widgetHoverPreviewSpans = DefaultValues.widgetHoverPreviewSpans
         widgetHoverPreviewDelay = DefaultValues.widgetHoverPreviewDelay
-        windowPreviewHoverDelay = DefaultValues.windowPreviewHoverDelay
-        windowPreviewLayout = DefaultValues.windowPreviewLayout
 
         // Launch
         opensAtLogin = DefaultValues.opensAtLogin
@@ -4381,68 +4347,24 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         // System dock
         hidesSystemDock = DefaultValues.hidesSystemDock
 
-        // Same rationale as `resetAppearanceToDefaults`: setters guard
-        // against same-value writes, so any pre-existing override flag
-        // would survive without an explicit wipe. The behavior keys
-        // currently in `appearanceKeys` (windowAxisSizing, tileSize,
-        // largeSize, magnification) get their override status cleared
-        // alongside the rest, themes can drive these again.
-        clearAllAppearanceOverrides()
+        // Clear only theme overrides for behavior values reset above.
+        // Appearance and DockSettings-owned overrides remain untouched.
+        clearThemeOverrides(afterReset: .behavior)
     }
 
+    /// Resets every global setting owned by DockyPreferences. Active-profile
+    /// content (pinned/trailing items, widgets, hidden apps), user content
+    /// such as Photo Frame bookmarks, DockSettings-imported values, and
+    /// migration/onboarding markers are intentionally preserved.
     func resetToDefaults() {
-        tileVerticalPadding = DefaultValues.tileVerticalPadding
-        tileSpacing = DefaultValues.tileSpacing
-        tileClipShape = DefaultValues.tileClipShape
-        windowCornerRadius = DefaultValues.windowCornerRadius
-        windowClipShape = DefaultValues.windowClipShape
-        windowTintColor = DefaultValues.windowTintColor
-        windowTintOpacity = DefaultValues.windowTintOpacity
-        disablesGlassLook = DefaultValues.disablesGlassLook
-        windowBackgroundImagePath = DefaultValues.windowBackgroundImagePath
-        windowBackgroundImageMode = DefaultValues.windowBackgroundImageMode
-        windowPosition = DefaultValues.windowPosition
-        windowDisplayTarget = DefaultValues.windowDisplayTarget
-        windowSpaceBehavior = DefaultValues.windowSpaceBehavior
-        autohidesWindow = DefaultValues.autohidesWindow
-        showsAppBadges = DefaultValues.showsAppBadges
-        folderBadgeMode = DefaultValues.folderBadgeMode
-        folderBadgePreviewStyle = DefaultValues.folderBadgePreviewStyle
-        opensAtLogin = DefaultValues.opensAtLogin
-        autohideWindowDelay = DefaultValues.autohideWindowDelay
-        autohideAnimationDuration = DefaultValues.autohideAnimationDuration
-        fullscreenRevealDelay = DefaultValues.fullscreenRevealDelay
-        windowPreviewHoverDelay = DefaultValues.windowPreviewHoverDelay
-        windowPreviewLayout = DefaultValues.windowPreviewLayout
-        maximizedWindowBehavior = DefaultValues.maximizedWindowBehavior
-        hidesSystemDock = DefaultValues.hidesSystemDock
-        overflowBehavior = DefaultValues.overflowBehavior
-        windowAxisSizing = DefaultValues.windowAxisSizing
-        enablesWidgetHoverPreview = DefaultValues.enablesWidgetHoverPreview
-        widgetHoverPreviewSpans = DefaultValues.widgetHoverPreviewSpans
-        widgetHoverPreviewDelay = DefaultValues.widgetHoverPreviewDelay
-        showsActivePinnedSeparator = DefaultValues.showsActivePinnedSeparator
-        showsRunningApps = DefaultValues.showsRunningApps
-        showsMinimizedWindows = DefaultValues.showsMinimizedWindows
-        hidesDuringFullscreen = DefaultValues.hidesDuringFullscreen
-        enablesShelveMode = DefaultValues.enablesShelveMode
-        shelveHidesFinder = DefaultValues.shelveHidesFinder
-        shelveHidesTrash = DefaultValues.shelveHidesTrash
-        hidesRecentApps = DefaultValues.hidesRecentApps
-        appTileFrontmostClickBehavior = DefaultValues.appTileFrontmostClickBehavior
-        activeIndicatorShape = DefaultValues.activeIndicatorShape
-        activeIndicatorImagePath = DefaultValues.activeIndicatorImagePath
-        activeIndicatorColor = DefaultValues.activeIndicatorColor
-        dividerImagePath = DefaultValues.dividerImagePath
-        leftDividerImagePath = DefaultValues.leftDividerImagePath
-        rightDividerImagePath = DefaultValues.rightDividerImagePath
-        mirrorsLeftDividerOnRight = DefaultValues.mirrorsLeftDividerOnRight
-        activeIndicatorOffset = DefaultValues.activeIndicatorOffset
-        activeIndicatorScale = DefaultValues.activeIndicatorScale
-        dividerPaddingFraction = DefaultValues.dividerPaddingFraction
-        dividerImageScale = DefaultValues.dividerImageScale
-        dividerOffset = DefaultValues.dividerOffset
-        dividerOpacity = DefaultValues.dividerOpacity
+        resetAppearanceToDefaults()
+        resetBehaviorToDefaults()
+
+        // Profile switcher visibility is managed on the Profiles surface,
+        // not by the Behavior reset.
+        hidesProfileStrip = DefaultValues.hidesProfileStrip
+
+        // User-supplied global icon replacements.
         appIconOverrides = DefaultValues.appIconOverrides
         trashIconOverrides = DefaultValues.trashIconOverrides
         folderIconOverrides = DefaultValues.folderIconOverrides
@@ -4450,16 +4372,25 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         launchpadIconPaddingFraction = DefaultValues.launchpadIconPaddingFraction
         startMenuIconPath = DefaultValues.startMenuIconPath
         startMenuIconPaddingFraction = DefaultValues.startMenuIconPaddingFraction
-        hiddenAppBundleIdentifiers = DefaultValues.hiddenAppBundleIdentifiers
-        showsGroupedOpenedAppsInDock = DefaultValues.showsGroupedOpenedAppsInDock
-        showsGroupedOpenedAppsBackdrop = DefaultValues.showsGroupedOpenedAppsBackdrop
+
+        // Launchpad and Start Menu.
         enablesLaunchpadOverlay = DefaultValues.enablesLaunchpadOverlay
         enablesStartMenuOverlay = DefaultValues.enablesStartMenuOverlay
         opensStartMenuFromFinderTile = DefaultValues.opensStartMenuFromFinderTile
         launchpadOverlayTransparency = DefaultValues.launchpadOverlayTransparency
         launchpadGridColumnCount = DefaultValues.launchpadGridColumnCount
         launchpadGridRowCount = DefaultValues.launchpadGridRowCount
+        launchpadBaseIconSize = DefaultValues.launchpadBaseIconSize
+        launchpadColumnSpacing = DefaultValues.launchpadColumnSpacing
+        launchpadBackgroundImagePath = DefaultValues.launchpadBackgroundImagePath
+        launchpadBackgroundBlursImage = DefaultValues.launchpadBackgroundBlursImage
+        launchpadLayoutAxis = DefaultValues.launchpadLayoutAxis
+        launchpadSortMode = DefaultValues.launchpadSortMode
         launchpadShortcut = DefaultValues.launchpadShortcut
+
+        // Window Manager.
+        windowPreviewHoverDelay = DefaultValues.windowPreviewHoverDelay
+        windowPreviewLayout = DefaultValues.windowPreviewLayout
         enablesWindowSwitcher = DefaultValues.enablesWindowSwitcher
         includesMinimizedWindows = DefaultValues.includesMinimizedWindows
         windowSwitcherShortcut = DefaultValues.windowSwitcherShortcut
@@ -4469,8 +4400,6 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         switcherMinimizeKeyCode = DefaultValues.switcherMinimizeKeyCode
         switcherCloseKeyCode = DefaultValues.switcherCloseKeyCode
         switcherZoomKeyCode = DefaultValues.switcherZoomKeyCode
-        appWidgetDisplays = DefaultValues.appWidgetDisplays
-        hasSeenDockEditorHint = DefaultValues.hasSeenDockEditorHint
     }
 
     private func syncSystemDockPositionIfNeeded() {

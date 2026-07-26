@@ -35,9 +35,9 @@ struct ThemesSettingsView: View {
                 if !preferences.userOverriddenAppearanceKeys.isEmpty {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("You have \(preferences.userOverriddenAppearanceKeys.count) appearance override(s).")
+                            Text("You have \(preferences.userOverriddenAppearanceKeys.count) theme override(s).")
                                 .font(.callout)
-                            Text("These take precedence over the active theme. Clear them to let the theme show through.")
+                            Text("These appearance and behavior choices take precedence over the active theme. Clear them to let the theme show through.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

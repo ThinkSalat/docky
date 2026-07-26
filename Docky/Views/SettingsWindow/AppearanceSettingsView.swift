@@ -50,7 +50,7 @@ struct AppearanceSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Indicators, tile layout, window shape, window background, and the glass toggle will return to their defaults. App icons, behavior, widgets, and other settings are unaffected. This cannot be undone.")
+            Text("Stored indicators, Docky tile and widget chrome, window shape, window background, and glass values will return to their built-in defaults, and their theme overrides will be cleared. An active theme can still supply those appearance values. Imported tile size and magnification, behavior, app icons, and other settings are unaffected. This cannot be undone.")
         }
     }
 
@@ -70,7 +70,7 @@ struct AppearanceSettingsView: View {
 
         Section("Reset Appearance") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Restores the appearance preferences (indicators, tile layout, window shape, window background, glass) to their defaults. App icons, behavior, widgets, launchpad, and window-management settings keep their current values.")
+                Text("Restores indicators, Docky tile and widget chrome, window shape, window background, and glass preferences, then lets an active theme supply those appearance values. Imported tile size and magnification, behavior, app icons, Launchpad, and Window Manager settings keep their current values.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 

@@ -188,9 +188,9 @@ final class DockSettingsService {
     private enum Keys {
         static let hasImportedSystemDockSettings = "docky.dockSettings.hasImportedSystemDockSettings"
         static let orientation = "docky.dockSettings.orientation"
-        static let tileSize = "docky.dockSettings.tileSize"
-        static let largeSize = "docky.dockSettings.largeSize"
-        static let magnification = "docky.dockSettings.magnification"
+        static let tileSize = DockyThemeOverrideKey.dockTileSize.rawValue
+        static let largeSize = DockyThemeOverrideKey.dockLargeSize.rawValue
+        static let magnification = DockyThemeOverrideKey.dockMagnification.rawValue
         static let autohide = "docky.dockSettings.autohide"
         static let autohideDelay = "docky.dockSettings.autohideDelay"
         static let autohideTimeModifier = "docky.dockSettings.autohideTimeModifier"
