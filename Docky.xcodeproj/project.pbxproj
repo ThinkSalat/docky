@@ -124,7 +124,6 @@
 				11051DE52F929079005CE09D /* Resources */,
 				11051E022F929079005CE09D /* Embed Frameworks */,
 				D0C1000D2FA400000000000D /* Embed Watchdog */,
-				D0C1000F2FA400000000000F /* Bump CFBundleVersion (Release Only) */,
 				D0C10010BBBBBBBB00000001 /* Copy Bundled Themes */,
 			);
 			buildRules = (
@@ -225,21 +224,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		D0C1000F2FA400000000000F /* Bump CFBundleVersion (Release Only) */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-			);
-			name = "Bump CFBundleVersion (Release Only)";
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "# Auto-bump CFBundleVersion on Release builds only.\n# Sparkle compares this numerically; using a fixed-width 12-digit\n# YYYYMMDDhhmm timestamp guarantees each release is greater than the last\n# without tracking state. Earlier ad-hoc YYYYMMDD[N] schemes broke when a\n# shorter same-day value (e.g. 20260507) ended up numerically less than a\n# prior 9-digit value (e.g. 202605012).\n#\n# The embedded DockyDockWatchdog gets the same CFBundleVersion (and the\n# main app's CFBundleShortVersionString) so the helper stays in lockstep —\n# version-mismatched login items can trip up macOS launch services and\n# update flows. Outer CodeSign re-signs the modified watchdog bundle.\nif [ \"$CONFIGURATION\" != \"Release\" ]; then\n    exit 0\nfi\n\nINFOPLIST=\"${TARGET_BUILD_DIR}/${INFOPLIST_PATH}\"\nWATCHDOG_INFOPLIST=\"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Library/LoginItems/DockyDockWatchdog.app/Contents/Info.plist\"\n\nBUILD_NUMBER=$(date +%Y%m%d%H%M)\n/usr/libexec/PlistBuddy -c \"Set :CFBundleVersion $BUILD_NUMBER\" \"$INFOPLIST\"\necho \"note: bumped Docky CFBundleVersion to $BUILD_NUMBER\"\n\nif [ -f \"$WATCHDOG_INFOPLIST\" ]; then\n    /usr/libexec/PlistBuddy -c \"Set :CFBundleVersion $BUILD_NUMBER\" \"$WATCHDOG_INFOPLIST\"\n    SHORT_VERSION=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleShortVersionString\" \"$INFOPLIST\" 2>/dev/null)\n    if [ -n \"$SHORT_VERSION\" ]; then\n        /usr/libexec/PlistBuddy -c \"Set :CFBundleShortVersionString $SHORT_VERSION\" \"$WATCHDOG_INFOPLIST\"\n    fi\n    echo \"note: synced DockyDockWatchdog to CFBundleVersion $BUILD_NUMBER (short $SHORT_VERSION)\"\nfi\n";
-		};
 		D0C10010BBBBBBBB00000001 /* Copy Bundled Themes */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
