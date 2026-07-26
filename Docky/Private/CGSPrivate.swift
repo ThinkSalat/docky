@@ -22,6 +22,31 @@ func CGSMainConnectionID() -> CGSConnectionID
 @_silgen_name("CGSGetActiveSpace")
 func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
 
+// Returns 0 for a regular desktop Space and 4 for a native fullscreen
+// or tiled-window Space on current macOS releases.
+@_silgen_name("CGSSpaceGetType")
+private func CGSSpaceGetType(_ connection: CGSConnectionID, _ space: UInt64) -> Int32
+
+/// Whether the focused Mission Control Space is a native fullscreen Space.
+///
+/// `nil` deliberately means SkyLight returned an unknown/system Space type,
+/// allowing callers to fall back to window inspection. This is runtime-only:
+/// it never rewrites Docky's persisted autohide preference.
+func activeSpaceFullscreenState() -> Bool? {
+    let connection = CGSMainConnectionID()
+    let spaceID = CGSGetActiveSpace(connection)
+    guard spaceID != 0 else { return nil }
+
+    switch CGSSpaceGetType(connection, spaceID) {
+    case 0:
+        return false
+    case 4:
+        return true
+    default:
+        return nil
+    }
+}
+
 // Returns the ordered list of spaces per managed display. Each element is
 // a dictionary with `Display Identifier` and `Spaces` keys; `Spaces` is
 // an ordered array of `{id64, uuid, type, …}` dicts. We use it to resolve

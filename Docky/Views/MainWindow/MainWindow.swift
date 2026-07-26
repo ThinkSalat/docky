@@ -1009,15 +1009,28 @@ final class MainWindow: NSPanel {
     }
 
     private func computeContentOverlapStateOnTargetScreen() -> ContentOverlapObservation {
+        // Native fullscreen is a property of the active Mission Control
+        // Space. Prefer that direct signal over window geometry so entering
+        // and leaving fullscreen toggles Docky's transient autohide state
+        // with the Space itself. Unknown Space types retain the existing
+        // CGWindow + Accessibility fallback below.
+        let fullscreenSpaceState = activeSpaceFullscreenState()
+
         guard let screen = targetScreen(),
               let primaryScreenHeight = NSScreen.screens.first?.frame.height
         else {
-            return ContentOverlapObservation(isFullscreen: false, isMaximized: false)
+            return ContentOverlapObservation(
+                isFullscreen: fullscreenSpaceState ?? false,
+                isMaximized: false
+            )
         }
 
         let listOptions: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windows = CGWindowListCopyWindowInfo(listOptions, kCGNullWindowID) as? [[String: Any]] else {
-            return ContentOverlapObservation(isFullscreen: false, isMaximized: false)
+            return ContentOverlapObservation(
+                isFullscreen: fullscreenSpaceState ?? false,
+                isMaximized: false
+            )
         }
 
         let ownPID = ProcessInfo.processInfo.processIdentifier
@@ -1064,12 +1077,14 @@ final class MainWindow: NSPanel {
             }
         }
 
-        let foundFullscreen = fullscreenCandidate
+        let geometryReportsFullscreen = fullscreenSpaceState == nil
+            && fullscreenCandidate
             && registryReportsFullscreenWindow(
                 candidatePIDs: fullscreenCandidatePIDs,
                 matching: frame,
                 primaryScreenHeight: primaryScreenHeight
             )
+        let foundFullscreen = fullscreenSpaceState ?? geometryReportsFullscreen
 
         return ContentOverlapObservation(isFullscreen: foundFullscreen, isMaximized: foundMaximized)
     }
