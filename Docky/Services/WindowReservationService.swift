@@ -30,12 +30,29 @@ final class WindowReservationService {
     private var scanTask: Task<Void, Never>?
     private var windowCooldowns: [WindowID: Date] = [:]
     private var inFlightWindowIDs: Set<WindowID> = []
+    private var activationState = WindowReservationActivationState()
     private var lastActivationSignature: String?
     private var lastScanGate: String?
     private var lastScanSummary: String?
     private let cooldownInterval: TimeInterval = 0.25
     private let matchTolerance: CGFloat = 1
     private let edgeTolerance: CGFloat = 2
+
+    private lazy var accessibilityMonitor =
+        WindowReservationPermissionEventMonitor(
+            events:
+                NSWorkspace.shared.notificationCenter
+                .publisher(
+                    for: NSWorkspace.didActivateApplicationNotification
+                )
+                .receive(on: DispatchQueue.main)
+                .map { _ in () }
+                .eraseToAnyPublisher(),
+            onEvent: {
+                _ = PermissionsService.shared
+                    .refreshAccessibilityStatus()
+            }
+        )
 
     private enum DockSide { case top, bottom, left, right }
 
@@ -64,20 +81,42 @@ final class WindowReservationService {
     }
 
     private func updateActivation(mode: MaximizedWindowBehavior, status: PermissionStatus) {
-        let shouldBeActive = (mode == .resizeWindow) && (status == .granted)
-        let signature = "\(mode)|\(status)|\(shouldBeActive)"
+        let transition =
+            WindowReservationActivationPolicy.reduce(
+                current: activationState,
+                resizeWindowsSelected: mode == .resizeWindow,
+                accessibilityGranted: status == .granted
+            )
+        activationState = transition.state
+        let signature =
+            "\(mode)|\(status)|"
+            + "\(transition.state.reservationActive)|"
+            + "\(transition.state.accessibilityMonitorActive)"
         if signature != lastActivationSignature {
             lastActivationSignature = signature
             DiagnosticsTrace.shared.record(.windows, "reservationActivationChanged", fields: [
                 "mode": String(describing: mode),
                 "accessibility": String(describing: status),
-                "active": shouldBeActive,
+                "active": transition.state.reservationActive,
+                "accessibilityMonitorActive":
+                    transition.state.accessibilityMonitorActive,
             ])
         }
-        if shouldBeActive {
-            attachIfNeeded()
-        } else {
+
+        // Stop obsolete work before starting its replacement. In particular,
+        // leaving Resize Windows drops its capability monitor before the
+        // AX-backed reservation subscription is detached.
+        if transition.accessibilityMonitorChange == .stop {
+            accessibilityMonitor.stop()
+        }
+        if transition.reservationChange == .stop {
             detach()
+        }
+        if transition.accessibilityMonitorChange == .start {
+            accessibilityMonitor.start()
+        }
+        if transition.reservationChange == .start {
+            attachIfNeeded()
         }
     }
 

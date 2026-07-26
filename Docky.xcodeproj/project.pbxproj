@@ -50,6 +50,8 @@
 		D0C2A1122FB0000000000112 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1172FB0000000000117 /* Theme.swift */; };
 		D0C2A1132FB0000000000113 /* DiagnosticPrivacyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1182FB0000000000118 /* DiagnosticPrivacyTests.swift */; };
 		D0C2A1142FB0000000000114 /* DiagnosticPrivacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1192FB0000000000119 /* DiagnosticPrivacy.swift */; };
+		D0C2A1202FB0000000000120 /* WindowReservationPermissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1222FB0000000000122 /* WindowReservationPermissionTests.swift */; };
+		D0C2A1212FB0000000000121 /* WindowReservationActivationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1232FB0000000000123 /* WindowReservationActivationPolicy.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -132,6 +134,8 @@
 		D0C2A1172FB0000000000117 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = Theme.swift; path = Docky/Models/Theme.swift; sourceTree = SOURCE_ROOT; };
 		D0C2A1182FB0000000000118 /* DiagnosticPrivacyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticPrivacyTests.swift; sourceTree = "<group>"; };
 		D0C2A1192FB0000000000119 /* DiagnosticPrivacy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DiagnosticPrivacy.swift; path = Docky/Models/DiagnosticPrivacy.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1222FB0000000000122 /* WindowReservationPermissionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowReservationPermissionTests.swift; sourceTree = "<group>"; };
+		D0C2A1232FB0000000000123 /* WindowReservationActivationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = WindowReservationActivationPolicy.swift; path = Docky/Models/WindowReservationActivationPolicy.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -246,6 +250,8 @@
 				D0C2A1172FB0000000000117 /* Theme.swift */,
 				D0C2A1182FB0000000000118 /* DiagnosticPrivacyTests.swift */,
 				D0C2A1192FB0000000000119 /* DiagnosticPrivacy.swift */,
+				D0C2A1222FB0000000000122 /* WindowReservationPermissionTests.swift */,
+				D0C2A1232FB0000000000123 /* WindowReservationActivationPolicy.swift */,
 			);
 			path = DockyTests;
 			sourceTree = "<group>";
@@ -467,6 +473,8 @@
 				D0C2A1122FB0000000000112 /* Theme.swift in Sources */,
 				D0C2A1132FB0000000000113 /* DiagnosticPrivacyTests.swift in Sources */,
 				D0C2A1142FB0000000000114 /* DiagnosticPrivacy.swift in Sources */,
+				D0C2A1202FB0000000000120 /* WindowReservationPermissionTests.swift in Sources */,
+				D0C2A1212FB0000000000121 /* WindowReservationActivationPolicy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

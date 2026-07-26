@@ -58,7 +58,7 @@ enum Permission: String, CaseIterable, Identifiable {
         case .finderAutomation:
             return "Docky uses Finder automation for reveal-in-Finder, open-folder, and Trash actions. Docky requests this only when you use one of those actions or explicitly enable it here."
         case .accessibility:
-            return "Accessibility access lets Docky click menu bar items for curated menuClick actions, inspect app windows for Dock-like reopen behavior and window menus, and restore minimized windows beside the Trash. These actions are slower and more fragile than built-in actions, so Docky requests this only when needed."
+            return "Accessibility access lets Docky inspect and resize app windows for Resize Windows, provide Dock-like reopen behavior and window menus, restore minimized windows beside the Trash, and click menu bar items for curated actions. Docky requests this only when a feature needs it."
         case .systemEventsAutomation:
             return "Docky uses System Events automation for curated menuClick actions. Requesting it here lets Docky click supported app menus without waiting for the first action to trigger a macOS prompt. Menu-click actions still require Accessibility too."
         case .screenCapture:
@@ -138,12 +138,28 @@ final class PermissionsService: ObservableObject {
 
     func refresh() {
         refreshFinderAutomation()
-        refreshAccessibility()
+        updateAccessibilityStatus()
         refreshSystemEventsAutomation()
         refreshScreenCapture()
         refreshLocation()
         refreshCalendar()
         refreshReminders()
+        recordPermissionDiagnosticsIfNeeded(source: "fullRefresh")
+    }
+
+    /// Rechecks only the Accessibility capability. This is used after the
+    /// user returns from the Accessibility pane while an AX-backed feature is
+    /// waiting; unrelated privacy services are not touched.
+    @discardableResult
+    func refreshAccessibilityStatus() -> PermissionStatus {
+        updateAccessibilityStatus()
+        recordPermissionDiagnosticsIfNeeded(
+            source: "accessibilityRefresh"
+        )
+        return accessibility
+    }
+
+    private func recordPermissionDiagnosticsIfNeeded(source: String) {
         let diagnosticsSummary = [
             "finderAutomation": String(describing: finderAutomation),
             "accessibility": String(describing: accessibility),
@@ -155,10 +171,12 @@ final class PermissionsService: ObservableObject {
         ]
         if diagnosticsSummary != lastDiagnosticsPermissionSummary {
             lastDiagnosticsPermissionSummary = diagnosticsSummary
+            var fields = diagnosticsSummary
+            fields["source"] = source
             DiagnosticsTrace.shared.record(
                 .lifecycle,
                 "permissionsChanged",
-                fields: diagnosticsSummary
+                fields: fields
             )
         }
     }
@@ -212,7 +230,7 @@ final class PermissionsService: ObservableObject {
     func requestAccessibilityPermission(prompt: Bool) -> Bool {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
         let granted = AXIsProcessTrustedWithOptions(options)
-        refreshAccessibility()
+        refreshAccessibilityStatus()
         return granted
     }
 
@@ -294,7 +312,7 @@ final class PermissionsService: ObservableObject {
         }
     }
 
-    private func refreshAccessibility() {
+    private func updateAccessibilityStatus() {
         let granted = AXIsProcessTrusted()
         accessibility = granted ? .granted : .denied
         accessibilityGrantMethod = granted ? .accessibility : nil
