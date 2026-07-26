@@ -44,6 +44,7 @@ final class StartMenuService: ObservableObject {
     }
 
     func present() {
+        guard !isPresented else { return }
         isPresented = true
     }
 

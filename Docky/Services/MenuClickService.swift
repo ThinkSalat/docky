@@ -24,7 +24,7 @@ final class MenuClickService {
             try? await Task.sleep(for: .milliseconds(250))
         }
 
-        let processName = runningApplicationName(for: targetApp)
+        let processName = await runningApplicationName(for: targetApp)
         guard let processName else {
             presentUnavailableAlert(targetApp: targetApp, actionTitle: action.title)
             return false
@@ -58,17 +58,43 @@ final class MenuClickService {
         )
     }
 
-    private func runningApplicationName(for bundleIdentifier: String) -> String? {
-        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first,
-           let localizedName = app.localizedName,
-           !localizedName.isEmpty {
-            return localizedName
+    private func runningApplicationName(
+        for bundleIdentifier: String
+    ) async -> String? {
+        if let running = WorkspaceService.shared.runningApps.first(where: {
+            $0.bundleIdentifier == bundleIdentifier
+        }), !running.localizedName.isEmpty {
+            return running.localizedName
         }
 
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
+        // Accessory/background processes are intentionally absent from
+        // WorkspaceService's dock-facing snapshot. Preserve support for
+        // their catalog actions, but query AppKit away from MainActor.
+        if let processName = await Task.detached(
+            priority: .userInitiated,
+            operation: {
+                NSRunningApplication
+                    .runningApplications(
+                        withBundleIdentifier: bundleIdentifier
+                    )
+                    .first?
+                    .localizedName
+            }
+        ).value, !processName.isEmpty {
+            return processName
+        }
+
+        guard !Task.isCancelled,
+              let url = await ApplicationURLResolver.shared.applicationURL(
+                for: bundleIdentifier
+              ),
+              !Task.isCancelled else {
             return nil
         }
-        return FileManager.default.displayName(atPath: url.path)
+
+        return await Task.detached(priority: .utility) {
+            FileManager.default.displayName(atPath: url.path)
+        }.value
     }
 
     private func presentUnavailableAlert(targetApp: String, actionTitle: String) {

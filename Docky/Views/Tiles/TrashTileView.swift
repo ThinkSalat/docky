@@ -13,9 +13,22 @@ struct TrashTileView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            Image(nsImage: icon)
-                .resizable()
-                .interpolation(.high)
+            let state: TrashIconState = trash.isEmpty ? .empty : .full
+            let overrideURL = preferences.effectiveTrashIconOverrideURL(
+                forState: state
+            )
+            CachedAsyncImageFile(
+                url: overrideURL,
+                placeholder: {
+                    Image(nsImage: systemIcon(for: state))
+                        .resizable()
+                        .interpolation(.high)
+                }
+            ) { image in
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+            }
                 .aspectRatio(contentMode: .fit)
                 .padding(overridePadding(in: proxy.size))
                 .brightness(isDropTarget ? -0.35 : 0)
@@ -32,14 +45,7 @@ struct TrashTileView: View {
         return preferences.trashIconOverridePadding(forState: state) * min(size.width, size.height)
     }
 
-    private var icon: NSImage {
-        let state: TrashIconState = trash.isEmpty ? .empty : .full
-
-        if let overrideURL = preferences.effectiveTrashIconOverrideURL(forState: state),
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-
+    private func systemIcon(for state: TrashIconState) -> NSImage {
         return NSImage(named: state.systemImageName)
             ?? NSImage(named: TrashIconState.empty.systemImageName)
             ?? NSImage()

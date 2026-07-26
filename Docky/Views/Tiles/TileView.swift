@@ -44,6 +44,8 @@ struct TileView: View {
     @State private var isContextMenuPresented = false
     @State private var widgetExpansionTask: Task<Void, Never>?
     @State private var folderSnapshot: FolderContentsSnapshot = .loaded([])
+    @State private var folderSnapshotLoadTask: Task<Void, Never>?
+    @State private var folderSnapshotLoadGeneration: UInt64 = 0
     @State private var lastFolderPopoverDismissedAt: TimeInterval = 0
     @State private var windowPreviewDelayTask: Task<Void, Never>?
     @ObservedObject private var windowPreview = WindowPreviewWindowController.shared
@@ -52,6 +54,11 @@ struct TileView: View {
 
     private static let finderBundleIdentifier = "com.apple.finder"
     private static let folderPopoverRetapGuardInterval: TimeInterval = 0.25
+
+    private enum FolderOpenBehavior: Equatable {
+        case togglePresentation
+        case ensurePresented
+    }
 
     init(
         tile: Tile,
@@ -409,15 +416,17 @@ struct TileView: View {
         if isHovering, hasHoverBackground {
             let cornerRadius = preferences.effectiveTileHoverBackgroundCornerRadius
             let opacity = preferences.effectiveTileHoverBackgroundOpacity
-            ZStack {
-                if let url = preferences.effectiveTileHoverBackgroundImageURL,
-                   let image = NSImage(contentsOf: url) {
+            CachedAsyncImageFile(
+                url: preferences.effectiveTileHoverBackgroundImageURL,
+                placeholder: {
+                    if let color = preferences.effectiveTileHoverBackgroundColor {
+                        Color(nsColor: color)
+                    }
+                }
+            ) { image in
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFill()
-                } else if let color = preferences.effectiveTileHoverBackgroundColor {
-                    Color(nsColor: color)
-                }
             }
             .opacity(opacity)
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
@@ -453,15 +462,17 @@ struct TileView: View {
         if isFrontmostTile, hasActiveBackground {
             let cornerRadius = preferences.effectiveTileActiveBackgroundCornerRadius
             let opacity = preferences.effectiveTileActiveBackgroundOpacity
-            ZStack {
-                if let url = preferences.effectiveTileActiveBackgroundImageURL,
-                   let image = NSImage(contentsOf: url) {
+            CachedAsyncImageFile(
+                url: preferences.effectiveTileActiveBackgroundImageURL,
+                placeholder: {
+                    if let color = preferences.effectiveTileActiveBackgroundColor {
+                        Color(nsColor: color)
+                    }
+                }
+            ) { image in
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFill()
-                } else if let color = preferences.effectiveTileActiveBackgroundColor {
-                    Color(nsColor: color)
-                }
             }
             .opacity(opacity)
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
@@ -581,6 +592,7 @@ struct TileView: View {
                 widgetExpansionTask = nil
                 windowPreviewDelayTask?.cancel()
                 windowPreviewDelayTask = nil
+                cancelFolderSnapshotLoad()
                 isHovering = false
                 WidgetExpansionWindowController.shared.dismiss(sourceTileID: tile.id)
                 isTooltipPresented = false
@@ -619,10 +631,11 @@ struct TileView: View {
                     if !isAppFolderPopoverPresented {
                         isAppFolderPopoverPresented = true
                     }
-                case .folder:
-                    if !isFolderPopoverPresented {
-                        isFolderPopoverPresented = true
-                    }
+                case .folder(let folder):
+                    handleExplicitFolderOpen(
+                        folder,
+                        behavior: .ensurePresented
+                    )
                 default:
                     return
                 }
@@ -672,8 +685,8 @@ struct TileView: View {
                         // at the top — so the newest entry (sorted
                         // first) sits near the tile and the oldest
                         // ends up at the top of the fan naturally.
-                        let fanItems = FolderAccessService.shared.sortedItems(
-                            in: snapshotItems,
+                        let fanItems = FolderAccessService.shared.cachedContents(
+                            of: folder.url,
                             sortMode: folderSortMode
                         )
                         FolderFanPresenter(
@@ -773,7 +786,9 @@ struct TileView: View {
                     .frame(width: runningIndicatorSize.width, height: runningIndicatorSize.height)
                     .foregroundStyle(Color(nsColor: preferences.effectiveActiveIndicatorColor).opacity(0.9))
             case .image:
-                if let runningIndicatorImage {
+                CachedAsyncImageFile(
+                    url: preferences.effectiveActiveIndicatorImageURL
+                ) { runningIndicatorImage in
                     // Render the artwork in its natural (horizontal)
                     // orientation, rotate, then claim the post-rotation
                     // bounding box. Without the rotation the outer frame
@@ -901,14 +916,6 @@ struct TileView: View {
         case .right:
             return CGSize(width: -totalInward, height: 0)
         }
-    }
-
-    private var runningIndicatorImage: NSImage? {
-        guard let url = preferences.effectiveActiveIndicatorImageURL else {
-            return nil
-        }
-
-        return NSImage(contentsOf: url)
     }
 
     private var contentPadding: CGFloat {
@@ -1456,12 +1463,23 @@ struct TileView: View {
             WorkspaceService.shared.activateOrOpen(bundleIdentifier: app.bundleIdentifier)
         case .minimizedWindow(let window):
             isTooltipPresented = false
-            let restored = WorkspaceService.shared.restoreMinimizedWindow(window)
-            DiagnosticsTrace.shared.record(.actions, "restoreMinimizedWindow", fields: [
-                "windowToken": DiagnosticsTrace.shared.token(window.windowIdentifier),
-                "appToken": DiagnosticsTrace.shared.token(window.bundleIdentifier),
-                "succeeded": restored,
-            ])
+            Task {
+                let restored = await WorkspaceService.shared
+                    .restoreMinimizedWindow(window)
+                DiagnosticsTrace.shared.record(
+                    .actions,
+                    "restoreMinimizedWindow",
+                    fields: [
+                        "windowToken": DiagnosticsTrace.shared.token(
+                            window.windowIdentifier
+                        ),
+                        "appToken": DiagnosticsTrace.shared.token(
+                            window.bundleIdentifier
+                        ),
+                        "succeeded": restored,
+                    ]
+                )
+            }
         case .appFolder:
             isTooltipPresented = false
 
@@ -1520,48 +1538,10 @@ struct TileView: View {
             ])
             return
         case .folder(let folder):
-            isTooltipPresented = false
-
-            if folderContentViewMode == .finder {
-                isFolderPopoverPresented = false
-                Task {
-                    _ = await AppleScriptService.shared.openFinderWindow(for: folder.url)
-                }
-                return
-            }
-
-            if folderContentViewMode == .list {
-                isFolderPopoverPresented = false
-                guard !isFolderListMenuPresented else { return }
-                isFolderListMenuPresented = true
-                return
-            }
-
-            if isFolderPopoverPresented {
-                // In fan mode the dismissal is animated by the fan
-                // window's own click-away monitor, which has already
-                // fired by the time this tap reaches `handleTap`.
-                // Flipping the binding here would race that animation
-                // — the tile's `isOpen` would go false and reveal
-                // the preview stack underneath while the fan items
-                // are still sliding back to the tile. Bail out and
-                // let the fan's `tearDown` flip the binding when the
-                // close animation finishes.
-                if folderContentViewMode == .fan {
-                    return
-                }
-
-                isFolderPopoverPresented = false
-                return
-            }
-
-            let now = Date.timeIntervalSinceReferenceDate
-            guard now - lastFolderPopoverDismissedAt > Self.folderPopoverRetapGuardInterval else {
-                return
-            }
-
-            folderSnapshot = FolderAccessService.shared.snapshot(of: folder.url)
-            isFolderPopoverPresented = true
+            handleExplicitFolderOpen(
+                folder,
+                behavior: .togglePresentation
+            )
         case .trash:
             isTooltipPresented = false
             Task {
@@ -1573,6 +1553,97 @@ struct TileView: View {
             ])
             return
         }
+    }
+
+    private func handleExplicitFolderOpen(
+        _ folder: FolderTile,
+        behavior: FolderOpenBehavior
+    ) {
+        isTooltipPresented = false
+
+        switch folderContentViewMode {
+        case .finder:
+            cancelFolderSnapshotLoad()
+            isFolderPopoverPresented = false
+            isFolderListMenuPresented = false
+            Task {
+                _ = await AppleScriptService.shared.openFinderWindow(
+                    for: folder.url
+                )
+            }
+
+        case .list:
+            cancelFolderSnapshotLoad()
+            isFolderPopoverPresented = false
+            if isFolderListMenuPresented {
+                if behavior == .togglePresentation {
+                    // A cold list menu marks the binding active while its
+                    // root snapshot is still loading. A second click is a
+                    // cancellation request even though no menu is visible
+                    // yet; clearing the binding makes the presenter retire
+                    // its load generation and prevents a late surprise menu.
+                    isFolderListMenuPresented = false
+                }
+                return
+            }
+            isFolderListMenuPresented = true
+
+        case .grid, .inline, .fan:
+            isFolderListMenuPresented = false
+            if isFolderPopoverPresented {
+                // In fan mode the dismissal is animated by the fan
+                // window's own click-away monitor, which has already
+                // fired by the time a tap reaches this path. Flipping
+                // the binding here would race that animation.
+                if behavior == .togglePresentation,
+                   folderContentViewMode != .fan {
+                    isFolderPopoverPresented = false
+                }
+                return
+            }
+
+            if behavior == .togglePresentation {
+                let now = Date.timeIntervalSinceReferenceDate
+                guard now - lastFolderPopoverDismissedAt
+                    > Self.folderPopoverRetapGuardInterval else {
+                    return
+                }
+                if folderSnapshotLoadTask != nil {
+                    cancelFolderSnapshotLoad()
+                    return
+                }
+            }
+
+            // Load before presenting so both Fan and Grid (including Fan's
+            // large-folder Grid fallback) receive the explicit snapshot.
+            // Enumeration runs on FolderAccessService's serial worker so a
+            // slow file provider cannot stall every dock click.
+            cancelFolderSnapshotLoad()
+            let generation = folderSnapshotLoadGeneration
+            let expectedTileID = tile.id
+            folderSnapshotLoadTask = Task { @MainActor in
+                let snapshot = await FolderAccessService.shared.loadSnapshot(
+                    of: folder.url
+                )
+                guard !Task.isCancelled,
+                      folderSnapshotLoadGeneration == generation,
+                      tile.id == expectedTileID,
+                      !isFolderPopoverPresented,
+                      folderContentViewMode != .finder,
+                      folderContentViewMode != .list else {
+                    return
+                }
+                folderSnapshot = snapshot
+                folderSnapshotLoadTask = nil
+                isFolderPopoverPresented = true
+            }
+        }
+    }
+
+    private func cancelFolderSnapshotLoad() {
+        folderSnapshotLoadGeneration &+= 1
+        folderSnapshotLoadTask?.cancel()
+        folderSnapshotLoadTask = nil
     }
 
     /// Children for the "View Content as" submenu on a folder tile.
@@ -1665,7 +1736,9 @@ struct TileView: View {
 
         var children: [ContextAction] = windows.map { window in
             .action(appWindowMenuTitle(for: window)) {
-                _ = WorkspaceService.shared.focus(window: window)
+                Task {
+                    _ = await WorkspaceService.shared.focus(window: window)
+                }
             }
         }
 
@@ -1676,26 +1749,61 @@ struct TileView: View {
                 .action(
                     "Left and Right",
                     image: contextMenuSymbol("rectangle.lefthalf.filled")
-                ) { _ = workspace.tile(windows: windows, layout: .leftRight) },
+                ) {
+                    Task {
+                        _ = await workspace.tile(
+                            windows: windows,
+                            layout: .leftRight
+                        )
+                    }
+                },
                 .action(
                     "Right and Left",
                     image: contextMenuSymbol("rectangle.righthalf.filled")
-                ) { _ = workspace.tile(windows: windows, layout: .rightLeft) },
+                ) {
+                    Task {
+                        _ = await workspace.tile(
+                            windows: windows,
+                            layout: .rightLeft
+                        )
+                    }
+                },
                 .action(
                     "Top and Bottom",
                     image: contextMenuSymbol("rectangle.tophalf.filled")
-                ) { _ = workspace.tile(windows: windows, layout: .topBottom) },
+                ) {
+                    Task {
+                        _ = await workspace.tile(
+                            windows: windows,
+                            layout: .topBottom
+                        )
+                    }
+                },
                 .action(
                     "Bottom and Top",
                     image: contextMenuSymbol("rectangle.bottomhalf.filled")
-                ) { _ = workspace.tile(windows: windows, layout: .bottomTop) },
+                ) {
+                    Task {
+                        _ = await workspace.tile(
+                            windows: windows,
+                            layout: .bottomTop
+                        )
+                    }
+                },
             ])
             if windows.count >= 3 {
                 children.append(
                     .action(
                         "Quarters",
                         image: contextMenuSymbol("rectangle.split.2x2")
-                    ) { _ = workspace.tile(windows: windows, layout: .quarters) }
+                    ) {
+                        Task {
+                            _ = await workspace.tile(
+                                windows: windows,
+                                layout: .quarters
+                            )
+                        }
+                    }
                 )
             }
         }
@@ -1771,12 +1879,16 @@ struct TileView: View {
         }
 
         let homeURL = FileManager.default.homeDirectoryForCurrentUser
-        let homeName = (try? homeURL.resourceValues(forKeys: [.localizedNameKey]).localizedName)
-            ?? homeURL.lastPathComponent
-        let homeIcon = IconCacheService.shared.icon(forFileURL: homeURL)
+        let homeName = homeURL.lastPathComponent
+        let homeIcon = IconCacheService.shared.cachedIcon(
+            forFileURL: homeURL
+        ) ?? contextMenuSymbol("house.fill")
 
-        let homeSubmenu = ContextAction.lazySubmenu(homeName, image: homeIcon) {
-            folderNavigationContextActions(for: homeURL)
+        let homeSubmenu = ContextAction.asyncLazySubmenu(
+            homeName,
+            image: homeIcon
+        ) {
+            await folderNavigationContextActions(for: homeURL)
         }
 
         // Touch the singleton so its Spotlight query is running by the
@@ -1890,10 +2002,14 @@ struct TileView: View {
         let workspace = WorkspaceService.shared
         return [
             .action(String(localized: "Restore Window")) {
-                _ = workspace.restoreMinimizedWindow(window)
+                Task {
+                    _ = await workspace.restoreMinimizedWindow(window)
+                }
             },
             .action(String(localized: "Close Window")) {
-                _ = workspace.closeMinimizedWindow(window)
+                Task {
+                    _ = await workspace.closeMinimizedWindow(window)
+                }
             }
         ]
     }
@@ -2566,9 +2682,7 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
         context.coordinator.update(tile: tile, isPresented: $isPresented, preferredEdge: preferredEdge)
 
         if isPresented {
-            DispatchQueue.main.async {
-                context.coordinator.show(relativeTo: nsView)
-            }
+            context.coordinator.scheduleShow(relativeTo: nsView)
         } else {
             context.coordinator.close()
         }
@@ -2593,6 +2707,9 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
         /// doesn't kiss the screen edge — keeps the "Show More" item
         /// comfortably above the bottom of the visible area.
         private static let inlineItemSafetyMargin: Int = 5
+        /// A multi-row placeholder prevents AppKit from caching a nearly
+        /// zero-height submenu before an asynchronous folder load completes.
+        private static let loadingPlaceholderRowCount = 4
 
         private var tile: FolderTile
         private var isPresented: Binding<Bool>
@@ -2600,7 +2717,17 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
         private var isShowing = false
         private var mainWindowInteractionLease: MainWindowInteractionLease?
         private var folderURLByMenuID: [ObjectIdentifier: URL] = [:]
+        private var submenuLoadTaskByMenuID:
+            [ObjectIdentifier: Task<Void, Never>] = [:]
+        private var submenuLoadGenerationByMenuID:
+            [ObjectIdentifier: UInt64] = [:]
+        private var loadedSubmenuIDs: Set<ObjectIdentifier> = []
+        private var rootLoadTask: Task<Void, Never>?
         private var inlineItemLimit: Int = 60
+        private var activePresentation: PresentationGeneration.Token?
+        private var pendingDismissal: PresentationGeneration.Token?
+        private var activeMenu: NSMenu?
+        private var presentationGeneration = PresentationGeneration()
 
         init(tile: FolderTile, isPresented: Binding<Bool>, preferredEdge: NSRectEdge) {
             self.tile = tile
@@ -2610,69 +2737,176 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
         }
 
         func update(tile: FolderTile, isPresented: Binding<Bool>, preferredEdge: NSRectEdge) {
+            if self.tile.url.standardizedFileURL
+                != tile.url.standardizedFileURL {
+                retireCurrentPresentation()
+            }
             self.tile = tile
             self.isPresented = isPresented
             self.preferredEdge = preferredEdge
         }
 
-        func show(relativeTo view: NSView) {
+        func scheduleShow(relativeTo view: NSView) {
+            guard !isShowing,
+                  pendingDismissal == nil,
+                  rootLoadTask == nil else {
+                return
+            }
+            let presentation = presentationGeneration.advance()
+            rootLoadTask?.cancel()
+            let folderURL = tile.url
+            rootLoadTask = Task { @MainActor [weak self, weak view] in
+                let snapshot =
+                    await FolderAccessService.shared.loadSnapshot(
+                        of: folderURL
+                    )
+                guard let self,
+                      self.presentationGeneration.isCurrent(presentation) else {
+                    return
+                }
+                self.rootLoadTask = nil
+                guard !Task.isCancelled,
+                      let view,
+                      self.presentationGeneration.isCurrent(presentation),
+                      self.isPresented.wrappedValue else {
+                    return
+                }
+                self.show(
+                    relativeTo: view,
+                    presentation: presentation,
+                    snapshot: snapshot
+                )
+            }
+        }
+
+        private func show(
+            relativeTo view: NSView,
+            presentation: PresentationGeneration.Token,
+            snapshot: FolderContentsSnapshot
+        ) {
             guard view.window != nil, !isShowing else { return }
+            guard presentationGeneration.isCurrent(presentation),
+                  isPresented.wrappedValue else {
+                return
+            }
 
             isShowing = true
+            activePresentation = presentation
             beginAutohideInterruption(for: view)
             folderURLByMenuID.removeAll()
             inlineItemLimit = Self.computeInlineItemLimit(
                 for: view.window?.screen ?? NSScreen.main,
                 dockWindowFrame: view.window?.frame
             )
-            let menu = buildMenu(for: tile.url, title: tile.displayName)
+            let menu = buildMenu(
+                for: tile.url,
+                title: tile.displayName,
+                snapshot: snapshot
+            )
+            activeMenu = menu
             popUp(menu: menu, in: view)
+
+            // The synchronous menu API spins a nested event loop. If close,
+            // dismantle, or a reopen ran inside it, this invocation no longer
+            // owns presenter state and must not clean up the newer menu.
+            guard activePresentation == presentation else { return }
+            if activeMenu === menu {
+                activeMenu = nil
+            }
+            activePresentation = nil
+            cancelSubmenuLoads()
             endAutohideInterruption()
             isShowing = false
+            pendingDismissal = presentation
 
-            DispatchQueue.main.async { [isPresented] in
-                guard isPresented.wrappedValue else { return }
-                isPresented.wrappedValue = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.presentationGeneration.isCurrent(presentation),
+                      self.pendingDismissal == presentation,
+                      !self.isShowing else {
+                    return
+                }
+                self.pendingDismissal = nil
+                guard self.isPresented.wrappedValue else { return }
+                self.isPresented.wrappedValue = false
             }
         }
 
         func close() {
+            retireCurrentPresentation()
+        }
+
+        private func retireCurrentPresentation() {
+            _ = presentationGeneration.advance()
+            activeMenu?.cancelTracking()
+            activeMenu = nil
+            activePresentation = nil
+            pendingDismissal = nil
+            rootLoadTask?.cancel()
+            rootLoadTask = nil
+            cancelSubmenuLoads()
             endAutohideInterruption()
             isShowing = false
             folderURLByMenuID.removeAll()
         }
 
-        private func buildMenu(for folderURL: URL, title: String) -> NSMenu {
+        private func buildMenu(
+            for folderURL: URL,
+            title: String,
+            snapshot: FolderContentsSnapshot
+        ) -> NSMenu {
             let menu = NSMenu(title: title)
-            populate(menu: menu, for: folderURL)
+            populate(menu: menu, for: folderURL, snapshot: snapshot)
             return menu
         }
 
-        private func populate(menu: NSMenu, for folderURL: URL) {
+        private func populate(
+            menu: NSMenu,
+            for folderURL: URL,
+            snapshot: FolderContentsSnapshot
+        ) {
             menu.removeAllItems()
 
-            switch FolderAccessService.shared.snapshot(of: folderURL) {
-            case .loaded(let itemURLs):
-                let sortedItemURLs = FolderAccessService.shared.sortedItems(in: itemURLs, sortMode: tile.sortMode)
+            switch snapshot {
+            case .loaded:
+                let sortedItemURLs = FolderAccessService.shared.cachedContents(
+                    of: folderURL,
+                    sortMode: tile.sortMode
+                )
                 if sortedItemURLs.isEmpty {
                     let emptyItem = NSMenuItem(title: "No visible items", action: nil, keyEquivalent: "")
                     emptyItem.isEnabled = false
                     menu.addItem(emptyItem)
                 } else if sortedItemURLs.count > inlineItemLimit {
                     for itemURL in sortedItemURLs.prefix(inlineItemLimit) {
-                        menu.addItem(menuItem(for: itemURL))
+                        menu.addItem(
+                            menuItem(
+                                for: itemURL,
+                                in: folderURL
+                            )
+                        )
                     }
                     let overflowCount = sortedItemURLs.count - inlineItemLimit
                     let showMoreItem = NSMenuItem(title: "Show More (\(overflowCount))", action: nil, keyEquivalent: "")
                     let overflowMenu = NSMenu(title: showMoreItem.title)
                     for itemURL in sortedItemURLs.dropFirst(inlineItemLimit) {
-                        overflowMenu.addItem(menuItem(for: itemURL))
+                        overflowMenu.addItem(
+                            menuItem(
+                                for: itemURL,
+                                in: folderURL
+                            )
+                        )
                     }
                     showMoreItem.submenu = overflowMenu
                     menu.addItem(showMoreItem)
                 } else {
                     for itemURL in sortedItemURLs {
-                        menu.addItem(menuItem(for: itemURL))
+                        menu.addItem(
+                            menuItem(
+                                for: itemURL,
+                                in: folderURL
+                            )
+                        )
                     }
                 }
             case .unreadable:
@@ -2699,11 +2933,27 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
             menu.addItem(openInFinderItem)
         }
 
-        private func menuItem(for itemURL: URL) -> NSMenuItem {
-            let item = NSMenuItem(title: displayName(for: itemURL), action: nil, keyEquivalent: "")
-            item.image = listMenuIcon(for: itemURL)
+        private func menuItem(
+            for itemURL: URL,
+            in folderURL: URL
+        ) -> NSMenuItem {
+            let metadata = FolderAccessService.shared.cachedMetadata(
+                for: itemURL,
+                in: folderURL
+            )
+            let isNavigableFolder =
+                metadata?.isNavigableFolder == true
+            let item = NSMenuItem(
+                title: metadata?.displayName ?? itemURL.lastPathComponent,
+                action: nil,
+                keyEquivalent: ""
+            )
+            item.image = listMenuIcon(
+                for: itemURL,
+                isFolder: isNavigableFolder
+            )
 
-            if isNavigableFolder(itemURL) {
+            if isNavigableFolder {
                 let submenu = NSMenu(title: item.title)
                 submenu.delegate = self
                 folderURLByMenuID[ObjectIdentifier(submenu)] = itemURL
@@ -2731,9 +2981,20 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
             return max(minimumInlineItemLimit, fittedCount - inlineItemSafetyMargin)
         }
 
-        private func listMenuIcon(for itemURL: URL) -> NSImage {
-            let icon = IconCacheService.shared.previewIcon(forFileURL: itemURL).copy() as? NSImage
-                ?? IconCacheService.shared.previewIcon(forFileURL: itemURL)
+        private func listMenuIcon(
+            for itemURL: URL,
+            isFolder: Bool
+        ) -> NSImage {
+            let source =
+                IconCacheService.shared.cachedIcon(forFileURL: itemURL)
+                ?? NSImage(
+                    systemSymbolName: isFolder
+                        ? "folder.fill"
+                        : "doc.fill",
+                    accessibilityDescription: nil
+                )
+                ?? NSImage()
+            let icon = source.copy() as? NSImage ?? source
             icon.size = NSSize(width: 16, height: 16)
             return icon
         }
@@ -2754,30 +3015,85 @@ private struct FolderListMenuPresenter: NSViewRepresentable {
             FolderAccessService.shared.openFilesAndFoldersSettings()
         }
 
-        private func displayName(for itemURL: URL) -> String {
-            (try? itemURL.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? itemURL.lastPathComponent
-        }
-
-        private func isNavigableFolder(_ itemURL: URL) -> Bool {
-            let values = try? itemURL.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
-            return values?.isDirectory == true && values?.isPackage != true
-        }
-
         func menuNeedsUpdate(_ menu: NSMenu) {
-            guard let folderURL = folderURLByMenuID[ObjectIdentifier(menu)] else { return }
-            populate(menu: menu, for: folderURL)
-        }
-
-        private func popUp(menu: NSMenu, in view: NSView) {
-            let selector = NSSelectorFromString("_popUpMenuRelativeToRect:inView:preferredEdge:")
-            if menu.responds(to: selector) {
-                typealias Fn = @convention(c) (NSMenu, Selector, NSRect, NSView?, NSRectEdge) -> Void
-                let imp = menu.method(for: selector)
-                let fn = unsafeBitCast(imp, to: Fn.self)
-                fn(menu, selector, view.bounds, view, preferredEdge)
+            let menuID = ObjectIdentifier(menu)
+            guard let folderURL = folderURLByMenuID[menuID],
+                  !loadedSubmenuIDs.contains(menuID),
+                  submenuLoadTaskByMenuID[menuID] == nil else {
                 return
             }
 
+            installStableLoadingItems(in: menu)
+
+            submenuLoadGenerationByMenuID[menuID, default: 0] &+= 1
+            let generation =
+                submenuLoadGenerationByMenuID[menuID, default: 0]
+            submenuLoadTaskByMenuID[menuID] =
+                Task { @MainActor [weak self, weak menu] in
+                    let snapshot =
+                        await FolderAccessService.shared.loadSnapshot(
+                            of: folderURL
+                        )
+                    guard let self,
+                          !Task.isCancelled,
+                          self.submenuLoadGenerationByMenuID[menuID]
+                            == generation,
+                          self.activePresentation != nil,
+                          self.activeMenu != nil,
+                          self.folderURLByMenuID[menuID] == folderURL,
+                          let menu,
+                          menu.supermenu != nil else {
+                        return
+                    }
+                    self.submenuLoadTaskByMenuID.removeValue(
+                        forKey: menuID
+                    )
+                    self.loadedSubmenuIDs.insert(menuID)
+                    self.populate(
+                        menu: menu,
+                        for: folderURL,
+                        snapshot: snapshot
+                    )
+                    // The menu is still attached to the current presentation.
+                    // Re-run AppKit's public layout pass so it cannot reuse the
+                    // placeholder cartouche's geometry.
+                    menu.update()
+                    _ = menu.size
+                }
+        }
+
+        func menuDidClose(_ menu: NSMenu) {
+            let menuID = ObjectIdentifier(menu)
+            submenuLoadGenerationByMenuID[menuID, default: 0] &+= 1
+            submenuLoadTaskByMenuID.removeValue(forKey: menuID)?.cancel()
+            loadedSubmenuIDs.remove(menuID)
+        }
+
+        private func installStableLoadingItems(in menu: NSMenu) {
+            menu.removeAllItems()
+            for index in 0..<Self.loadingPlaceholderRowCount {
+                let item = NSMenuItem(
+                    title: index == 0
+                        ? String(localized: "Loading…")
+                        : " ",
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+        }
+
+        private func cancelSubmenuLoads() {
+            for task in submenuLoadTaskByMenuID.values {
+                task.cancel()
+            }
+            submenuLoadTaskByMenuID.removeAll()
+            submenuLoadGenerationByMenuID.removeAll()
+            loadedSubmenuIDs.removeAll()
+        }
+
+        private func popUp(menu: NSMenu, in view: NSView) {
             menu.update()
             let anchorRect = view.bounds
             let anchor: NSPoint
@@ -2831,7 +3147,13 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> FolderPopoverAnchorView {
-        FolderPopoverAnchorView()
+        let view = FolderPopoverAnchorView()
+        view.onWindowChanged = {
+            [weak coordinator = context.coordinator, weak view] window in
+            guard window != nil, let view else { return }
+            coordinator?.anchorDidMoveToWindow(view)
+        }
+        return view
     }
 
     func updateNSView(_ nsView: FolderPopoverAnchorView, context: Context) {
@@ -2841,16 +3163,15 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
             isPresented: $isPresented,
             preferredEdge: preferredEdge
         )
-
-        if isPresented {
-            context.coordinator.show(relativeTo: nsView)
-        } else {
-            context.coordinator.close()
-        }
+        context.coordinator.setPresented(
+            isPresented,
+            relativeTo: nsView
+        )
     }
 
     static func dismantleNSView(_ nsView: FolderPopoverAnchorView, coordinator: Coordinator) {
-        coordinator.close()
+        nsView.onWindowChanged = nil
+        coordinator.tearDown()
     }
 
     final class Coordinator: NSObject, NSPopoverDelegate {
@@ -2871,6 +3192,15 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
         private var preferredEdge: NSRectEdge
         private var lastContentSize = NSSize(width: 320, height: 240)
         private var mainWindowInteractionLease: MainWindowInteractionLease?
+        private var presentationGeneration = PresentationGeneration()
+        private weak var anchorView: NSView?
+        private var requestedPresented: Bool?
+        private var activePresentation:
+            PresentationGeneration.Token?
+        private var closeTransition:
+            PresentationGeneration.Token?
+        private var pendingReopen:
+            PresentationGeneration.Token?
         private var globalClickMonitor: Any?
         private var localClickMonitor: Any?
         private var dragEndSubscription: AnyCancellable?
@@ -2914,28 +3244,141 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
             )
         }
 
-        func show(relativeTo view: NSView) {
-            guard view.window != nil, !popover.isShown else { return }
+        func setPresented(_ presented: Bool, relativeTo view: NSView) {
+            anchorView = view
+            if requestedPresented == presented {
+                // The first SwiftUI update can arrive before the anchor is in
+                // a window. Retry that still-current open intent once AppKit
+                // attaches the same representable.
+                if presented,
+                   !popover.isShown,
+                   closeTransition == nil,
+                   pendingReopen == nil {
+                    requestOpen(relativeTo: view)
+                }
+                return
+            }
+
+            requestedPresented = presented
+            if presented {
+                requestOpen(relativeTo: view)
+            } else {
+                requestClose()
+            }
+        }
+
+        func anchorDidMoveToWindow(_ view: NSView) {
+            guard view.window != nil,
+                  requestedPresented == true,
+                  isPresented.wrappedValue,
+                  !popover.isShown,
+                  closeTransition == nil,
+                  pendingReopen == nil else {
+                return
+            }
+            requestOpen(relativeTo: view)
+        }
+
+        private func requestOpen(relativeTo view: NSView) {
+            guard view.window != nil else { return }
+
+            if closeTransition != nil {
+                pendingReopen = presentationGeneration.advance()
+                return
+            }
+            guard !popover.isShown else { return }
+
+            let presentation = presentationGeneration.advance()
+            activePresentation = presentation
+            pendingReopen = nil
             beginAutohideInterruption(for: view)
             updateContentSize(lastContentSize)
             popover.show(relativeTo: anchorRect(in: view.bounds), of: view, preferredEdge: preferredEdge)
-            installClickAwayMonitors()
-            installDragEndSubscriptionIfNeeded()
+            installClickAwayMonitors(for: presentation)
+            installDragEndSubscriptionIfNeeded(for: presentation)
         }
 
-        func close() {
+        private func requestClose() {
+            let closure = presentationGeneration.advance()
+            activePresentation = nil
+            pendingReopen = nil
+            closeTransition = closure
+            removeClickAwayMonitors()
+            cancelDragEndSubscription()
+
+            if popover.isShown {
+                popover.performClose(nil)
+            } else {
+                closeTransition = nil
+                endAutohideInterruption()
+            }
+        }
+
+        func tearDown() {
+            requestedPresented = false
+            _ = presentationGeneration.advance()
+            activePresentation = nil
+            closeTransition = nil
+            pendingReopen = nil
             removeClickAwayMonitors()
             cancelDragEndSubscription()
             endAutohideInterruption()
+            popover.delegate = nil
             popover.performClose(nil)
         }
 
-        func popoverDidClose(_ notification: Notification) {
+        func popoverWillClose(_ notification: Notification) {
+            if closeTransition == nil {
+                closeTransition = presentationGeneration.advance()
+            }
+            activePresentation = nil
             removeClickAwayMonitors()
             cancelDragEndSubscription()
+        }
+
+        func popoverDidClose(_ notification: Notification) {
+            guard !popover.isShown else { return }
+            let completedClose = closeTransition
+            closeTransition = nil
+            activePresentation = nil
+            removeClickAwayMonitors()
+            cancelDragEndSubscription()
+
+            if let reopen = pendingReopen,
+               presentationGeneration.isCurrent(reopen),
+               requestedPresented == true,
+               isPresented.wrappedValue,
+               let anchorView {
+                pendingReopen = nil
+                DispatchQueue.main.async { [weak self, weak anchorView] in
+                    guard let self, let anchorView,
+                          self.presentationGeneration.isCurrent(reopen),
+                          self.requestedPresented == true,
+                          self.isPresented.wrappedValue,
+                          !self.popover.isShown else {
+                        return
+                    }
+                    self.requestOpen(relativeTo: anchorView)
+                }
+                return
+            }
+
+            pendingReopen = nil
             endAutohideInterruption()
-            guard isPresented.wrappedValue else { return }
-            DispatchQueue.main.async { [isPresented] in
+
+            guard let completedClose,
+                  presentationGeneration.isCurrent(completedClose),
+                  requestedPresented == true,
+                  isPresented.wrappedValue else {
+                return
+            }
+            DispatchQueue.main.async { [weak self, isPresented] in
+                guard let self,
+                      self.presentationGeneration.isCurrent(completedClose),
+                      self.requestedPresented == true,
+                      !self.popover.isShown else {
+                    return
+                }
                 isPresented.wrappedValue = false
             }
         }
@@ -2943,7 +3386,9 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
         /// Mirrors AppFolderPopoverPresenter: when the popover opens during
         /// an active drag, watch DockDragService so the popover closes when
         /// the drag ends, drop on us, drop elsewhere, or cancel.
-        private func installDragEndSubscriptionIfNeeded() {
+        private func installDragEndSubscriptionIfNeeded(
+            for presentation: PresentationGeneration.Token
+        ) {
             cancelDragEndSubscription()
             guard DockDragService.shared.kind != nil else { return }
             dragEndSubscription = DockDragService.shared.$kind
@@ -2951,7 +3396,7 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] kind in
                     guard kind == nil else { return }
-                    self?.dismissAfterDragEnd()
+                    self?.dismissAfterDragEnd(for: presentation)
                 }
         }
 
@@ -2960,28 +3405,45 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
             dragEndSubscription = nil
         }
 
-        private func dismissAfterDragEnd() {
+        private func dismissAfterDragEnd(
+            for presentation: PresentationGeneration.Token
+        ) {
+            guard presentationGeneration.isCurrent(presentation),
+                  activePresentation == presentation else {
+                return
+            }
             cancelDragEndSubscription()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, isPresented] in
-                guard let self else { return }
-                if isPresented.wrappedValue {
-                    self.popover.performClose(nil)
-                    isPresented.wrappedValue = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self,
+                      self.presentationGeneration.isCurrent(presentation),
+                      self.activePresentation == presentation else {
+                    return
                 }
+                self.dismissPresentation(ifCurrent: presentation)
             }
         }
 
-        private func installClickAwayMonitors() {
+        private func installClickAwayMonitors(
+            for presentation: PresentationGeneration.Token
+        ) {
             removeClickAwayMonitors()
             let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
             globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
-                self?.dismissForClickAway()
+                DispatchQueue.main.async {
+                    self?.dismissPresentation(ifCurrent: presentation)
+                }
             }
             localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
                 guard let self else { return event }
+                guard self.presentationGeneration.isCurrent(presentation),
+                      self.activePresentation == presentation else {
+                    return event
+                }
                 let popoverWindow = self.popover.contentViewController?.view.window
                 if event.window !== popoverWindow {
-                    self.dismissForClickAway()
+                    DispatchQueue.main.async { [weak self] in
+                        self?.dismissPresentation(ifCurrent: presentation)
+                    }
                 }
                 return event
             }
@@ -2998,14 +3460,19 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
             }
         }
 
-        private func dismissForClickAway() {
-            removeClickAwayMonitors()
-            DispatchQueue.main.async { [weak self, isPresented] in
-                self?.popover.performClose(nil)
-                if isPresented.wrappedValue {
-                    isPresented.wrappedValue = false
-                }
+        private func dismissPresentation(
+            ifCurrent presentation: PresentationGeneration.Token
+        ) {
+            guard presentationGeneration.isCurrent(presentation),
+                  activePresentation == presentation,
+                  requestedPresented == true else {
+                return
             }
+            requestedPresented = false
+            if isPresented.wrappedValue {
+                isPresented.wrappedValue = false
+            }
+            requestClose()
         }
 
         private func beginAutohideInterruption(for view: NSView) {
@@ -3044,32 +3511,50 @@ private struct FolderPopoverPresenter: NSViewRepresentable {
 }
 
 private final class FolderPopoverAnchorView: NSView {
+    var onWindowChanged: ((NSWindow?) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onWindowChanged?(window)
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
     }
 }
 
-private func folderNavigationContextActions(for folderURL: URL) -> [ContextAction] {
-    let snapshot = FolderAccessService.shared.snapshot(of: folderURL)
-    guard case .loaded(let items) = snapshot else {
+private func folderNavigationContextActions(
+    for folderURL: URL
+) async -> [ContextAction] {
+    let snapshot = await FolderAccessService.shared.loadSnapshot(
+        of: folderURL
+    )
+    guard case .loaded = snapshot else {
         return [.action(String(localized: "Can't read folder")) {}]
     }
 
-    let sortedItems = FolderAccessService.shared.sortedItems(in: items, sortMode: .name)
+    let sortedItems = FolderAccessService.shared.cachedContents(
+        of: folderURL,
+        sortMode: .name
+    )
 
     var actions: [ContextAction] = sortedItems.map { url in
-        let resources = try? url.resourceValues(forKeys: [
-            .localizedNameKey,
-            .isDirectoryKey,
-            .isPackageKey
-        ])
-        let displayName = resources?.localizedName ?? url.lastPathComponent
-        let isNavigableFolder = (resources?.isDirectory == true) && (resources?.isPackage != true)
-        let icon = IconCacheService.shared.icon(forFileURL: url)
+        let metadata = FolderAccessService.shared.cachedMetadata(
+            for: url,
+            in: folderURL
+        )
+        let displayName = metadata?.displayName ?? url.lastPathComponent
+        let isNavigableFolder =
+            metadata?.isNavigableFolder == true
+        let icon =
+            IconCacheService.shared.cachedIcon(forFileURL: url)
+            ?? contextMenuSymbol(
+                isNavigableFolder ? "folder.fill" : "doc.fill"
+            )
 
         if isNavigableFolder {
-            return .lazySubmenu(displayName, image: icon) {
-                folderNavigationContextActions(for: url)
+            return .asyncLazySubmenu(displayName, image: icon) {
+                await folderNavigationContextActions(for: url)
             }
         }
 
@@ -3097,8 +3582,11 @@ func fileContextActions(for url: URL) -> [ContextAction] {
         .action(String(localized: "Open"), image: contextMenuSymbol("arrow.up.forward.app")) {
             NSWorkspace.shared.open(url)
         },
-        .lazySubmenu(String(localized: "Open With"), image: contextMenuSymbol("app.badge")) {
-            openWithApplicationActions(for: url)
+        .asyncLazySubmenu(
+            String(localized: "Open With"),
+            image: contextMenuSymbol("app.badge")
+        ) {
+            await openWithApplicationActions(for: url)
         },
         .action(String(localized: "Reveal in Finder"), image: contextMenuSymbol("folder")) {
             NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -3118,21 +3606,26 @@ func fileContextActions(for url: URL) -> [ContextAction] {
             image: contextMenuSymbol("trash"),
             isDestructive: true
         ) {
-            try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
+            Task.detached(priority: .userInitiated) {
+                try? FileManager.default.trashItem(
+                    at: url,
+                    resultingItemURL: nil
+                )
+            }
         }
     ]
 }
 
 @MainActor
 func recentFilesContextActions() -> [ContextAction] {
-    let urls = RecentFilesService.shared.recentURLs
+    let entries = RecentFilesService.shared.recentEntries
     Logger(subsystem: "gt.quintero.Docky", category: "RecentFiles")
-        .info("menu requested urls.count=\(urls.count, privacy: .public)")
-    guard !urls.isEmpty else { return [] }
+        .info("menu requested entries.count=\(entries.count, privacy: .public)")
+    guard !entries.isEmpty else { return [] }
 
     let visibleLimit = 10
-    let visible = urls.prefix(visibleLimit)
-    let overflow = Array(urls.dropFirst(visibleLimit))
+    let visible = entries.prefix(visibleLimit)
+    let overflow = Array(entries.dropFirst(visibleLimit))
 
     var actions: [ContextAction] = visible.map(recentFileContextAction)
 
@@ -3146,12 +3639,14 @@ func recentFilesContextActions() -> [ContextAction] {
 }
 
 @MainActor
-private func recentFileContextAction(for url: URL) -> ContextAction {
-    let displayName = (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName)
-        ?? url.lastPathComponent
-    let icon = IconCacheService.shared.icon(forFileURL: url)
-    return .lazySubmenu(displayName, image: icon) {
-        fileContextActions(for: url)
+private func recentFileContextAction(
+    for entry: RecentFileEntry
+) -> ContextAction {
+    let icon = IconCacheService.shared.cachedIcon(
+        forFileURL: entry.url
+    ) ?? contextMenuSymbol("doc.fill")
+    return .lazySubmenu(entry.displayName, image: icon) {
+        fileContextActions(for: entry.url)
     }
 }
 
@@ -3172,7 +3667,9 @@ func injectingAppWindowActions(
 
     let windowActions = windows.map { window in
         ContextAction.action(appWindowMenuTitle(for: window)) {
-            _ = WorkspaceService.shared.focus(window: window)
+            Task {
+                _ = await WorkspaceService.shared.focus(window: window)
+            }
         }
     }
 
@@ -3209,26 +3706,51 @@ func appWindowMenuTitle(for window: AppWindow) -> String {
     return "\(window.windowTitle) (Minimized)"
 }
 
-private func openWithApplicationActions(for url: URL) -> [ContextAction] {
-    let appURLs = NSWorkspace.shared.urlsForApplications(toOpen: url)
-    guard !appURLs.isEmpty else {
+private nonisolated struct ResolvedOpenWithApplication: Sendable {
+    let url: URL
+    let displayName: String
+}
+
+private func openWithApplicationActions(
+    for url: URL
+) async -> [ContextAction] {
+    let applications = await resolveOpenWithApplications(for: url)
+    guard !applications.isEmpty else {
         return [.action(String(localized: "No Applications Available")) {}]
     }
 
-    return appURLs.map { appURL in
-        let appName = (try? appURL.resourceValues(forKeys: [.localizedNameKey]).localizedName)
-            ?? appURL.deletingPathExtension().lastPathComponent
-        let icon = IconCacheService.shared.icon(forFileURL: appURL)
-        return .action(appName, image: icon) {
+    return applications.map { application in
+        let icon = IconCacheService.shared.cachedIcon(
+            forFileURL: application.url
+        ) ?? contextMenuSymbol("app.fill")
+        return .action(application.displayName, image: icon) {
             let configuration = NSWorkspace.OpenConfiguration()
             NSWorkspace.shared.open(
                 [url],
-                withApplicationAt: appURL,
+                withApplicationAt: application.url,
                 configuration: configuration,
                 completionHandler: nil
             )
         }
     }
+}
+
+private nonisolated func resolveOpenWithApplications(
+    for url: URL
+) async -> [ResolvedOpenWithApplication] {
+    await Task.detached(priority: .userInitiated) {
+        NSWorkspace.shared.urlsForApplications(toOpen: url).map { appURL in
+            let displayName = (
+                try? appURL.resourceValues(
+                    forKeys: [.localizedNameKey]
+                ).localizedName
+            ) ?? appURL.deletingPathExtension().lastPathComponent
+            return ResolvedOpenWithApplication(
+                url: appURL,
+                displayName: displayName
+            )
+        }
+    }.value
 }
 
 private func shareApplicationActions(for url: URL) -> [ContextAction] {
@@ -3251,6 +3773,8 @@ final class FilePreviewMenuItemView: NSView, NSDraggingSource {
     private let imageView: NSImageView
     private let url: URL
     private var mouseDownLocation: NSPoint?
+    private var fallbackIconTask: Task<Void, Never>?
+    private var hasQuickLookPreview = false
 
     init(url: URL) {
         self.url = url
@@ -3265,12 +3789,24 @@ final class FilePreviewMenuItemView: NSView, NSDraggingSource {
         let imageView = NSImageView(frame: inset)
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.imageAlignment = .alignCenter
-        imageView.image = IconCacheService.shared.previewIcon(forFileURL: url)
+        imageView.image = IconCacheService.shared.cachedIcon(
+            forFileURL: url
+        ) ?? contextMenuSymbol("doc.fill")
         imageView.autoresizingMask = [.width, .height]
         self.imageView = imageView
 
         super.init(frame: frame)
         addSubview(imageView)
+        fallbackIconTask = Task { [weak self] in
+            let image = await IconCacheService.shared
+                .loadPreviewIconAsync(forFileURL: url)
+            guard let self,
+                  !Task.isCancelled,
+                  !self.hasQuickLookPreview else {
+                return
+            }
+            self.imageView.image = image
+        }
         loadPreview(for: url)
     }
 
@@ -3295,7 +3831,9 @@ final class FilePreviewMenuItemView: NSView, NSDraggingSource {
         mouseDownLocation = nil
 
         let draggingItem = NSDraggingItem(pasteboardWriter: url as NSURL)
-        let dragImage = imageView.image ?? IconCacheService.shared.icon(forFileURL: url)
+        let dragImage = imageView.image
+            ?? contextMenuSymbol("doc.fill")
+            ?? NSImage()
         draggingItem.setDraggingFrame(imageView.frame, contents: dragImage)
 
         beginDraggingSession(with: [draggingItem], event: event, source: self)
@@ -3321,8 +3859,13 @@ final class FilePreviewMenuItemView: NSView, NSDraggingSource {
         QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { [weak self] thumbnail, _ in
             guard let nsImage = thumbnail?.nsImage else { return }
             DispatchQueue.main.async {
+                self?.hasQuickLookPreview = true
                 self?.imageView.image = nsImage
             }
         }
+    }
+
+    deinit {
+        fallbackIconTask?.cancel()
     }
 }

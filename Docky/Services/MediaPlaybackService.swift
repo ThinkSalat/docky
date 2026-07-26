@@ -28,7 +28,7 @@ enum LyricsLoadState: Equatable {
 
 struct MediaPlaybackState: Equatable {
     let bundleIdentifier: String
-    let displayName: String
+    var displayName: String
     var title: String
     var artist: String
     var album: String
@@ -39,6 +39,7 @@ struct MediaPlaybackState: Equatable {
     var supportsFavorite: Bool
     var isFavorite: Bool
     var artworkData: Data?
+    var artworkRevision: String?
     var lastUpdated: Date
     var isPresentable: Bool {
         isAvailable && hasContent
@@ -65,6 +66,12 @@ struct MediaAppChoice: Equatable, Identifiable {
     var id: String { bundleIdentifier }
 }
 
+private struct MediaFavoriteMutation: Sendable {
+    let id: UUID
+    let trackKey: String
+    let priorFavorite: Bool?
+}
+
 final class MediaPlaybackService: ObservableObject {
     static let shared = MediaPlaybackService()
     static let genericNowPlayingOwnerBundleIdentifier = WidgetOwnerBundleIdentifiers.genericNowPlaying
@@ -73,6 +80,9 @@ final class MediaPlaybackService: ObservableObject {
     @Published private(set) var lyricsByTrackKey: [String: LyricsLoadState] = [:]
 
     private let mediaRemote = MediaRemoteBridge.shared
+    private var resolvedDisplayNameByBundleIdentifier: [String: String] = [:]
+    private var displayNameResolutionTaskByBundleIdentifier:
+        [String: Task<Void, Never>] = [:]
 
     private init() {
         mediaRemote.onStateChange = { [weak self] state in
@@ -234,7 +244,7 @@ final class MediaPlaybackService: ObservableObject {
         }
     }
 
-    private struct LRCEntry: Decodable {
+    private nonisolated struct LRCEntry: Decodable {
         let plainLyrics: String?
         let syncedLyrics: String?
         let instrumental: Bool?
@@ -372,21 +382,43 @@ final class MediaPlaybackService: ObservableObject {
 
     func setFavorite(_ favorite: Bool, for bundleIdentifier: String) async {
         guard let resolvedBundleIdentifier = resolvedBundleIdentifier(for: bundleIdentifier),
-              resolvedBundleIdentifier == "com.apple.Music" else {
+              resolvedBundleIdentifier == "com.apple.Music",
+              let mutation = mediaRemote.beginFavoriteMutation(
+                for: resolvedBundleIdentifier
+              ) else {
             return
         }
 
         let source = """
         tell application "Music"
-            if it is running then
-                try
-                    set favorited of current track to \(favorite ? "true" : "false")
-                end try
+            if it is not running then
+                error "Music is not running."
             end if
+            set favorited of current track to \(favorite ? "true" : "false")
+            return favorited of current track
         end tell
         """
 
-        _ = try? AppleScriptService.shared.executeDescriptor(source: source)
+        let verifiedFavorite: Bool
+        do {
+            verifiedFavorite = try await AppleScriptService.shared
+                .executeBoolean(source: source)
+        } catch {
+            mediaRemote.abandonFavoriteMutation(mutation)
+            return
+        }
+        guard verifiedFavorite == favorite else {
+            mediaRemote.abandonFavoriteMutation(mutation)
+            return
+        }
+        guard mediaRemote.recordFavorite(
+                verifiedFavorite,
+                for: resolvedBundleIdentifier,
+                mutation: mutation
+              ) else {
+            mediaRemote.abandonFavoriteMutation(mutation)
+            return
+        }
         try? await Task.sleep(for: .milliseconds(120))
         refresh()
     }
@@ -412,13 +444,77 @@ final class MediaPlaybackService: ObservableObject {
                 updatedState.isAvailable = false
                 updatedState.isPlaying = false
                 updatedState.artworkData = nil
+                updatedState.artworkRevision = nil
                 updatedState.lastUpdated = now
                 return updatedState
             }
             return
         }
 
-        statesByBundleIdentifier[state.bundleIdentifier] = state
+        var updatedState = state
+        if let displayName =
+            resolvedDisplayNameByBundleIdentifier[
+                state.bundleIdentifier
+            ] {
+            updatedState.displayName = displayName
+        } else {
+            updatedState.displayName = String(localized: "Now Playing")
+            resolveDisplayNameIfNeeded(
+                bundleIdentifier: state.bundleIdentifier
+            )
+        }
+        statesByBundleIdentifier[state.bundleIdentifier] = updatedState
+    }
+
+    private func resolveDisplayNameIfNeeded(
+        bundleIdentifier: String
+    ) {
+        guard !bundleIdentifier.isEmpty,
+              resolvedDisplayNameByBundleIdentifier[
+                bundleIdentifier
+              ] == nil,
+              displayNameResolutionTaskByBundleIdentifier[
+                bundleIdentifier
+              ] == nil else {
+            return
+        }
+
+        displayNameResolutionTaskByBundleIdentifier[bundleIdentifier] =
+            Task { @MainActor [weak self] in
+                let applicationURL =
+                    await ApplicationURLResolver.shared.applicationURL(
+                        for: bundleIdentifier
+                    )
+                guard let self else { return }
+                self.displayNameResolutionTaskByBundleIdentifier[
+                    bundleIdentifier
+                ] = nil
+
+                guard !Task.isCancelled,
+                      let displayName = applicationURL?
+                        .deletingPathExtension()
+                        .lastPathComponent
+                        .trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ),
+                      !displayName.isEmpty else {
+                    return
+                }
+
+                self.resolvedDisplayNameByBundleIdentifier[
+                    bundleIdentifier
+                ] = displayName
+                guard var currentState =
+                    self.statesByBundleIdentifier[
+                        bundleIdentifier
+                    ] else {
+                    return
+                }
+                currentState.displayName = displayName
+                self.statesByBundleIdentifier[
+                    bundleIdentifier
+                ] = currentState
+            }
     }
 }
 
@@ -458,6 +554,45 @@ private struct MediaRemoteSnapshot: Decodable {
     }
 }
 
+/// Produces a stable revision while artwork bytes are unchanged and a new
+/// revision whenever the bytes change. Metadata and byte count are not content
+/// identities: two covers can share both and must still restart SwiftUI's
+/// artwork preparation task.
+private struct MediaArtworkRevisionTracker {
+    private struct Entry {
+        let data: Data
+        let revision: UInt64
+    }
+
+    private var entryByBundleIdentifier: [String: Entry] = [:]
+    private var nextRevision: UInt64 = 0
+
+    mutating func revision(
+        for data: Data?,
+        bundleIdentifier: String
+    ) -> String? {
+        guard let data else {
+            entryByBundleIdentifier.removeValue(
+                forKey: bundleIdentifier
+            )
+            return nil
+        }
+        if let previous =
+            entryByBundleIdentifier[bundleIdentifier],
+           previous.data == data {
+            return String(previous.revision)
+        }
+
+        nextRevision &+= 1
+        let revision = nextRevision
+        entryByBundleIdentifier[bundleIdentifier] = Entry(
+            data: data,
+            revision: revision
+        )
+        return String(revision)
+    }
+}
+
 private final class MediaRemoteBridge {
     enum Command: Int32 {
         case play = 0
@@ -478,6 +613,15 @@ private final class MediaRemoteBridge {
     private let helper = MediaRemoteHelperProcess()
     private var lastPayloadByBundleIdentifier: [String: MediaRemoteSnapshot.Payload] = [:]
     private var lastActiveBundleIdentifier: String?
+    private var latestStateByBundleIdentifier:
+        [String: MediaPlaybackState] = [:]
+    private var artworkRevisionTracker =
+        MediaArtworkRevisionTracker()
+    private var favoriteByTrackKey: [String: Bool] = [:]
+    private var favoriteLookupID: UUID?
+    private var favoriteLookupTrackKey: String?
+    private var favoriteLookupTask: Task<Void, Never>?
+    private var favoriteMutation: MediaFavoriteMutation?
 
     private init() {
         let bundleURL = NSURL(fileURLWithPath: "/System/Library/PrivateFrameworks/MediaRemote.framework")
@@ -485,7 +629,9 @@ private final class MediaRemoteBridge {
         self.sendRemoteCommand = Self.function(named: "MRMediaRemoteSendCommand", in: bundle)
 
         helper.onSnapshot = { [weak self] snapshot in
-            self?.handle(snapshot)
+            DispatchQueue.main.async {
+                self?.handle(snapshot)
+            }
         }
     }
 
@@ -503,6 +649,8 @@ private final class MediaRemoteBridge {
 
     private func handle(_ snapshot: MediaRemoteSnapshot?) {
         guard let snapshot else {
+            cancelFavoriteLookup()
+            favoriteMutation = nil
             onStateChange?(nil)
             return
         }
@@ -522,16 +670,36 @@ private final class MediaRemoteBridge {
 
         guard !bundleIdentifier.isEmpty,
               !title.isEmpty || !artist.isEmpty || artworkData != nil else {
+            cancelFavoriteLookup()
+            favoriteMutation = nil
             onStateChange?(nil)
             return
         }
+        let artworkRevision = artworkRevisionTracker.revision(
+            for: artworkData,
+            bundleIdentifier: bundleIdentifier
+        )
 
         lastPayloadByBundleIdentifier[bundleIdentifier] = payload
         lastActiveBundleIdentifier = bundleIdentifier
 
+        let trackKey = favoriteTrackKey(
+            bundleIdentifier: bundleIdentifier,
+            title: title,
+            artist: artist,
+            album: album
+        )
+        if bundleIdentifier != "com.apple.Music"
+            || favoriteLookupTrackKey != trackKey
+            || favoriteByTrackKey[trackKey] != nil {
+            cancelFavoriteLookup()
+        }
+        if favoriteMutation?.trackKey != trackKey {
+            favoriteMutation = nil
+        }
         let state = MediaPlaybackState(
             bundleIdentifier: bundleIdentifier,
-            displayName: displayName(for: bundleIdentifier),
+            displayName: "",
             title: title,
             artist: artist,
             album: album,
@@ -540,40 +708,180 @@ private final class MediaRemoteBridge {
             isPlaying: isPlaying,
             isAvailable: true,
             supportsFavorite: bundleIdentifier == "com.apple.Music",
-            isFavorite: fetchFavorite(bundleIdentifier: bundleIdentifier),
+            isFavorite: favoriteByTrackKey[trackKey]
+                ?? (
+                    favoriteMutation?.trackKey == trackKey
+                        ? favoriteMutation?.priorFavorite
+                        : nil
+                )
+                ?? false,
             artworkData: artworkData,
+            artworkRevision: artworkRevision,
             lastUpdated: Date()
         )
+        latestStateByBundleIdentifier[bundleIdentifier] = state
         onStateChange?(state)
+
+        if bundleIdentifier == "com.apple.Music",
+           favoriteByTrackKey[trackKey] == nil,
+           favoriteMutation?.trackKey != trackKey,
+           favoriteLookupTrackKey != trackKey {
+            scheduleFavoriteLookup(
+                bundleIdentifier: bundleIdentifier,
+                trackKey: trackKey
+            )
+        }
     }
 
-    private func fetchFavorite(bundleIdentifier: String) -> Bool {
-        guard bundleIdentifier == "com.apple.Music" else {
+    func recordFavorite(
+        _ favorite: Bool,
+        for bundleIdentifier: String,
+        mutation: MediaFavoriteMutation
+    ) -> Bool {
+        guard bundleIdentifier == "com.apple.Music",
+              favoriteMutation?.id == mutation.id,
+              var latestState =
+                latestStateByBundleIdentifier[bundleIdentifier],
+              favoriteTrackKey(for: latestState)
+                == mutation.trackKey else {
             return false
         }
 
+        cancelFavoriteLookup()
+        favoriteMutation = nil
+        favoriteByTrackKey[mutation.trackKey] = favorite
+        latestState.isFavorite = favorite
+        latestState.lastUpdated = Date()
+        latestStateByBundleIdentifier[bundleIdentifier] = latestState
+        onStateChange?(latestState)
+        return true
+    }
+
+    func beginFavoriteMutation(
+        for bundleIdentifier: String
+    ) -> MediaFavoriteMutation? {
+        guard bundleIdentifier == "com.apple.Music",
+              let latestState =
+                latestStateByBundleIdentifier[bundleIdentifier] else {
+            return nil
+        }
+        cancelFavoriteLookup()
+        let trackKey = favoriteTrackKey(for: latestState)
+        let priorFavorite = favoriteByTrackKey.removeValue(
+            forKey: trackKey
+        ) ?? (
+            favoriteMutation?.trackKey == trackKey
+                ? favoriteMutation?.priorFavorite
+                : nil
+        )
+        let mutation = MediaFavoriteMutation(
+            id: UUID(),
+            trackKey: trackKey,
+            priorFavorite: priorFavorite
+        )
+        favoriteMutation = mutation
+        return mutation
+    }
+
+    func abandonFavoriteMutation(
+        _ mutation: MediaFavoriteMutation
+    ) {
+        guard favoriteMutation?.id == mutation.id else { return }
+        favoriteMutation = nil
+
+        guard favoriteByTrackKey[mutation.trackKey] == nil,
+              let latestState =
+                latestStateByBundleIdentifier["com.apple.Music"],
+              favoriteTrackKey(for: latestState)
+                == mutation.trackKey else {
+            return
+        }
+        scheduleFavoriteLookup(
+            bundleIdentifier: "com.apple.Music",
+            trackKey: mutation.trackKey
+        )
+    }
+
+    private func scheduleFavoriteLookup(
+        bundleIdentifier: String,
+        trackKey: String
+    ) {
+        cancelFavoriteLookup()
+        let lookupID = UUID()
+        favoriteLookupID = lookupID
+        favoriteLookupTrackKey = trackKey
+        favoriteLookupTask = Task { @MainActor [weak self] in
+            let favorite = await Self.fetchFavorite(
+                bundleIdentifier: bundleIdentifier
+            )
+            guard let self else { return }
+            guard favoriteLookupID == lookupID else { return }
+
+            favoriteLookupID = nil
+            favoriteLookupTrackKey = nil
+            favoriteLookupTask = nil
+            guard !Task.isCancelled,
+                  let favorite,
+                  favoriteByTrackKey[trackKey] == nil,
+                  var latestState =
+                    latestStateByBundleIdentifier[bundleIdentifier],
+                  favoriteTrackKey(for: latestState) == trackKey else {
+                return
+            }
+
+            favoriteByTrackKey[trackKey] = favorite
+            latestState.isFavorite = favorite
+            latestStateByBundleIdentifier[bundleIdentifier] = latestState
+            onStateChange?(latestState)
+        }
+    }
+
+    private func cancelFavoriteLookup() {
+        favoriteLookupID = nil
+        favoriteLookupTrackKey = nil
+        let task = favoriteLookupTask
+        favoriteLookupTask = nil
+        task?.cancel()
+    }
+
+    private static func fetchFavorite(
+        bundleIdentifier: String
+    ) async -> Bool? {
+        guard bundleIdentifier == "com.apple.Music" else {
+            return nil
+        }
         let source = """
         tell application "Music"
-            if it is running then
-                try
-                    return favorited of current track
-                on error
-                    return false
-                end try
+            if it is not running then
+                error "Music is not running."
             end if
-            return false
+            return favorited of current track
         end tell
         """
 
-        return (try? AppleScriptService.shared.executeDescriptor(source: source))?.booleanValue ?? false
+        return try? await AppleScriptService.shared.executeBoolean(
+            source: source
+        )
     }
 
-    private func displayName(for bundleIdentifier: String) -> String {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
-            return FileManager.default.displayName(atPath: url.path)
-        }
+    private func favoriteTrackKey(
+        for state: MediaPlaybackState
+    ) -> String {
+        favoriteTrackKey(
+            bundleIdentifier: state.bundleIdentifier,
+            title: state.title,
+            artist: state.artist,
+            album: state.album
+        )
+    }
 
-        return bundleIdentifier
+    private func favoriteTrackKey(
+        bundleIdentifier: String,
+        title: String,
+        artist: String,
+        album: String
+    ) -> String {
+        "\(bundleIdentifier)|\(title)|\(artist)|\(album)"
     }
 
     private static func function<T>(named name: String, in bundle: CFBundle?) -> T? {

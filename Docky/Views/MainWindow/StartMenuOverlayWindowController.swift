@@ -23,6 +23,7 @@ final class StartMenuOverlayWindowController: NSWindowController {
     private weak var mainWindow: MainWindow?
     private var cancellables: Set<AnyCancellable> = []
     private var mainWindowInteractionLease: MainWindowInteractionLease?
+    private var presentationGeneration = PresentationGeneration()
     private var isAttachedToParent = false
     private var localDismissMonitor: Any?
     private var globalDismissMonitor: Any?
@@ -44,14 +45,13 @@ final class StartMenuOverlayWindowController: NSWindowController {
         NSSize(width: mainPanelWidth + sidePanelGap + sidePanelWidth, height: 680)
     }
     private let gap: CGFloat = 8
-    private let hostingController = NSHostingController(rootView: StartMenuView())
+    private var hostingController: NSHostingController<StartMenuView>?
 
     init(mainWindow: MainWindow) {
         self.mainWindow = mainWindow
 
         let panel = StartMenuPanel()
         panel.setContentSize(NSSize(width: 440 + 8 + 280, height: 680))
-        panel.contentViewController = hostingController
 
         super.init(window: panel)
 
@@ -73,6 +73,7 @@ final class StartMenuOverlayWindowController: NSWindowController {
 
     private func observePresentation() {
         StartMenuService.shared.$isPresented
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isPresented in
                 guard let self else { return }
@@ -109,6 +110,8 @@ final class StartMenuOverlayWindowController: NSWindowController {
 
     private func present() {
         guard let panel = window as? StartMenuPanel, let main = mainWindow else { return }
+        let presentation = presentationGeneration.advance()
+        installHostingRootIfNeeded(on: panel)
         updateFrame()
         beginMainInteraction()
         if !isAttachedToParent {
@@ -120,14 +123,29 @@ final class StartMenuOverlayWindowController: NSWindowController {
         // absolute level in the process.
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 1)
         panel.makeKeyAndOrderFront(nil)
-        installDismissMonitors()
+        installDismissMonitors(for: presentation)
         animateAlpha(to: 1)
     }
 
+    /// Constructing `StartMenuView` starts its observable services, including
+    /// the recent-files metadata query. Keep that work behind the user's first
+    /// explicit request to show the menu.
+    private func installHostingRootIfNeeded(on panel: StartMenuPanel) {
+        guard hostingController == nil else { return }
+        let hostingController = NSHostingController(rootView: StartMenuView())
+        self.hostingController = hostingController
+        panel.contentViewController = hostingController
+    }
+
     private func dismiss() {
+        let dismissal = presentationGeneration.advance()
         removeDismissMonitors()
         animateAlpha(to: 0) { [weak self] in
             guard let self else { return }
+            guard self.presentationGeneration.isCurrent(dismissal),
+                  !StartMenuService.shared.isPresented else {
+                return
+            }
             defer { self.endMainInteraction() }
             guard let panel = self.window as? StartMenuPanel else { return }
             if self.isAttachedToParent, let main = self.mainWindow {
@@ -205,15 +223,22 @@ final class StartMenuOverlayWindowController: NSWindowController {
     /// fires for every other app. The hit test against the panel
     /// frame in screen coords keeps clicks inside the start menu
     /// from dismissing it.
-    private func installDismissMonitors() {
+    private func installDismissMonitors(
+        for presentation: PresentationGeneration.Token
+    ) {
         guard localDismissMonitor == nil, globalDismissMonitor == nil else { return }
 
         dismissMonitorsInstalledAt = ProcessInfo.processInfo.systemUptime
 
         let dismissIfOutside: () -> Void = { [weak self] in
             guard let self, let panel = self.window else { return }
+            guard self.presentationGeneration.isCurrent(presentation) else {
+                return
+            }
             if !panel.frame.contains(NSEvent.mouseLocation) {
                 DispatchQueue.main.async {
+                    guard self.presentationGeneration.isCurrent(presentation)
+                    else { return }
                     StartMenuService.shared.dismiss()
                 }
             }
@@ -223,6 +248,9 @@ final class StartMenuOverlayWindowController: NSWindowController {
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] event in
             guard let self else { return event }
+            guard self.presentationGeneration.isCurrent(presentation) else {
+                return event
+            }
             // Suppress the originating tile click: its timestamp is
             // already older than the install time by the time we get
             // here, otherwise a single tap would open + close in one go.
@@ -245,6 +273,9 @@ final class StartMenuOverlayWindowController: NSWindowController {
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] event in
             guard let self else { return }
+            guard self.presentationGeneration.isCurrent(presentation) else {
+                return
+            }
             guard event.timestamp > self.dismissMonitorsInstalledAt else {
                 return
             }
@@ -254,9 +285,15 @@ final class StartMenuOverlayWindowController: NSWindowController {
         // Escape dismisses while the menu has key focus. Returning nil
         // swallows the event so the focused TextField doesn't also see
         // it (and try to clear its contents on first press).
-        escapeKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        escapeKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  self.presentationGeneration.isCurrent(presentation) else {
+                return event
+            }
             guard Int(event.keyCode) == kVK_Escape else { return event }
             DispatchQueue.main.async {
+                guard self.presentationGeneration.isCurrent(presentation)
+                else { return }
                 StartMenuService.shared.dismiss()
             }
             return nil
@@ -325,11 +362,12 @@ private struct StartMenuView: View {
     /// current panel width, so 8 is a comfortable upper bound.
     private static let recentAppsLimit = 8
 
-    private var filteredRecents: [URL] {
-        let urls = recents.recentURLs
-        guard !query.isEmpty else { return urls }
-        return urls.filter {
-            $0.lastPathComponent.localizedCaseInsensitiveContains(query)
+    private var filteredRecents: [RecentFileEntry] {
+        let entries = recents.recentEntries
+        guard !query.isEmpty else { return entries }
+        return entries.filter {
+            $0.displayName.localizedCaseInsensitiveContains(query)
+                || $0.url.path.localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -357,31 +395,12 @@ private struct StartMenuView: View {
     /// `/Applications` and `~/Applications` roots, so the Recent Apps
     /// shelf only ever surfaces things the user actually installed.
     private func resolveTiles(forBundleIDs ids: [String]) -> [AppTile] {
-        let allowedRoots = Self.userAppRoots
-        return ids.compactMap { bundleID in
-            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID),
-                  Self.isURL(url, under: allowedRoots) else {
-                return nil
-            }
-            return AppTile(
-                bundleIdentifier: bundleID,
-                displayName: FileManager.default.displayName(atPath: url.path)
-            )
+        let installed = Self.flattened(launchpad.entries)
+        var byBundleIdentifier: [String: AppTile] = [:]
+        for app in installed {
+            byBundleIdentifier[app.bundleIdentifier] = app
         }
-    }
-
-    private static let userAppRoots: [URL] = [
-        URL(fileURLWithPath: "/Applications", isDirectory: true),
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Applications", isDirectory: true),
-    ]
-
-    private static func isURL(_ url: URL, under roots: [URL]) -> Bool {
-        let path = url.standardizedFileURL.path
-        return roots.contains { root in
-            let rootPath = root.standardizedFileURL.path
-            return path == rootPath || path.hasPrefix(rootPath + "/")
-        }
+        return ids.compactMap { byBundleIdentifier[$0] }
     }
 
     private var filteredHomeFolders: [HomeFolderShortcut] {
@@ -525,10 +544,7 @@ private struct StartMenuView: View {
             StartMenuService.shared.dismiss()
         } label: {
             VStack(spacing: 6) {
-                Image(nsImage: IconCacheService.shared.icon(forFileURL: folder.url))
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 44, height: 44)
+                homeFolderIcon(folder)
                 Text(folder.name)
                     .font(.system(size: 12))
                     .lineLimit(1)
@@ -544,13 +560,32 @@ private struct StartMenuView: View {
     }
 
     @ViewBuilder
+    private func homeFolderIcon(_ folder: HomeFolderShortcut) -> some View {
+        CachedAsyncFileImage(
+            url: folder.url,
+            placeholder: {
+                Image(systemName: "folder.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.blue.gradient)
+                    .padding(4)
+            }
+        ) { image in
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+        }
+        .frame(width: 44, height: 44)
+    }
+
+    @ViewBuilder
     private var recentsSection: some View {
         let items = Array(filteredRecents.prefix(8))
         if !items.isEmpty {
             sectionHeader("Recents")
             VStack(spacing: 4) {
-                ForEach(items, id: \.self) { url in
-                    recentRow(url: url)
+                ForEach(items) { entry in
+                    recentRow(entry: entry)
                 }
             }
         }
@@ -640,9 +675,21 @@ private struct StartMenuView: View {
             StartMenuService.shared.dismiss()
         } label: {
             HStack(spacing: 10) {
-                Image(nsImage: IconCacheService.shared.icon(forBundleIdentifier: app.bundleIdentifier))
-                    .resizable()
-                    .interpolation(.high)
+                CachedAsyncAppImage(
+                    bundleIdentifier: app.bundleIdentifier,
+                    overrideURL: preferences
+                        .effectiveAppIconOverrideURL(
+                            forBundleIdentifier: app.bundleIdentifier
+                        ),
+                    placeholder: {
+                        Image(systemName: "app.fill")
+                            .resizable()
+                    }
+                ) { image in
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                }
                     .frame(width: 22, height: 22)
                 Text(app.displayName)
                     .font(.system(size: 13))
@@ -679,21 +726,29 @@ private struct StartMenuView: View {
         .padding(.horizontal, 4)
     }
 
-    private func recentRow(url: URL) -> some View {
+    private func recentRow(entry: RecentFileEntry) -> some View {
         Button {
-            NSWorkspace.shared.open(url)
+            NSWorkspace.shared.open(entry.url)
             StartMenuService.shared.dismiss()
         } label: {
             HStack(spacing: 12) {
-                Image(nsImage: IconCacheService.shared.icon(forFileURL: url))
-                    .resizable()
-                    .interpolation(.high)
+                CachedAsyncFileImage(
+                    url: entry.url,
+                    placeholder: {
+                        Image(systemName: "doc.fill")
+                            .resizable()
+                    }
+                ) { image in
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                }
                     .frame(width: 28, height: 28)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(url.deletingPathExtension().lastPathComponent)
+                    Text(entry.displayName)
                         .font(.system(size: 14))
                         .lineLimit(1)
-                    Text(url.deletingLastPathComponent().path)
+                    Text(entry.url.deletingLastPathComponent().path)
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -714,9 +769,21 @@ private struct StartMenuView: View {
             StartMenuService.shared.dismiss()
         } label: {
             VStack(spacing: 6) {
-                Image(nsImage: IconCacheService.shared.icon(forBundleIdentifier: app.bundleIdentifier))
-                    .resizable()
-                    .interpolation(.high)
+                CachedAsyncAppImage(
+                    bundleIdentifier: app.bundleIdentifier,
+                    overrideURL: preferences
+                        .effectiveAppIconOverrideURL(
+                            forBundleIdentifier: app.bundleIdentifier
+                        ),
+                    placeholder: {
+                        Image(systemName: "app.fill")
+                            .resizable()
+                    }
+                ) { image in
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                }
                     .frame(width: 52, height: 52)
                 Text(app.displayName)
                     .font(.system(size: 12))
@@ -733,8 +800,9 @@ private struct StartMenuView: View {
     }
 
     private func launch(_ app: AppTile) {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier) else { return }
-        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        WorkspaceService.shared.activateOrOpen(
+            bundleIdentifier: app.bundleIdentifier
+        )
     }
 
     private var footer: some View {

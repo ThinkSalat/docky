@@ -203,7 +203,11 @@ struct LaunchpadSettingsView: View {
 
                         if preferences.launchpadBackgroundImagePath != nil {
                             Button("Use Desktop Wallpaper") {
-                                preferences.launchpadBackgroundImagePath = nil
+                                preferences.clearUserAsset(
+                                    slot: "launchpad:background"
+                                ) {
+                                    preferences.launchpadBackgroundImagePath = nil
+                                }
                             }
                         }
                     }
@@ -244,15 +248,10 @@ struct LaunchpadSettingsView: View {
         return URL(fileURLWithPath: path).lastPathComponent
     }
 
-    /// Where the file picker should land on open. Re-uses the parent
-    /// folder of whatever the user picked last (lets them iterate
-    /// inside a curated wallpapers directory); otherwise jumps to the
-    /// system desktop pictures folder so the OS-provided images are one
-    /// click away.
+    /// Start at the system desktop pictures folder. Docky persists only its
+    /// managed copy of a selected image, not the source folder, so reopening
+    /// this picker never probes a stale protected-directory preference.
     private func startingDirectoryForBackgroundImagePicker() -> URL? {
-        if let path = preferences.launchpadBackgroundImagePath, !path.isEmpty {
-            return URL(fileURLWithPath: path).deletingLastPathComponent()
-        }
         return defaultDesktopPicturesDirectory()
     }
 
@@ -297,7 +296,20 @@ struct LaunchpadSettingsView: View {
         // elevated `runModal()` only when there's no key window.
         let completion: (NSApplication.ModalResponse) -> Void = { response in
             guard response == .OK, let url = panel.url else { return }
-            preferences.launchpadBackgroundImagePath = url.path
+            Task { @MainActor in
+                guard let path = await preferences.importUserAssetPath(
+                    from: url,
+                    slot: "launchpad:background"
+                ) else {
+                    return
+                }
+                preferences.commitImportedUserAssetPath(
+                    path,
+                    slot: "launchpad:background"
+                ) {
+                    preferences.launchpadBackgroundImagePath = $0
+                }
+            }
         }
 
         if let parent = NSApp.keyWindow {

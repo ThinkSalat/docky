@@ -18,9 +18,15 @@ struct FolderPopoverView: View {
     @State private var currentEntry: FolderPopoverEntry
     @State private var backHistory: [FolderPopoverEntry]
     @State private var selectedItemID: String?
+    @State private var hasAdoptedInitialSnapshot = false
+    @State private var lastHandledChangeToken: UInt64 = 0
     @State private var watchedEntryURL: URL?
     @State private var springLoadingItemID: String?
     @State private var springLoadTask: Task<Void, Never>?
+    @State private var navigationTask: Task<Void, Never>?
+    @State private var navigationGeneration: UInt64 = 0
+    @State private var dropTask: Task<Void, Never>?
+    @State private var dropGeneration: UInt64 = 0
     private let subfolderSpringLoadDwell: TimeInterval = 0.7
 
     private let maxGridColumnCount = 8
@@ -58,29 +64,51 @@ struct FolderPopoverView: View {
         let _ = Self._printChanges()
         #endif
 
-        bodyContent
+        Group {
+            if isPresented {
+                bodyContent
+                    .background {
+                        FolderPopoverKeyMonitor { event in
+                            handleKeyDown(event)
+                        }
+                    }
+                    .onAppear {
+                        selectDefaultItemIfNeeded()
+                        reportPopoverSize()
+                    }
+                    .onChange(of: popoverSize) { _ in
+                        reportPopoverSize()
+                    }
+            } else {
+                Color.clear
+                    .frame(width: 1, height: 1)
+            }
+        }
             .task(id: reloadKey) {
-                syncWatchedFolder()
-                currentEntry = refreshedEntry(for: currentEntry)
-                backHistory = backHistory.map(refreshedEntry(for:))
-                selectDefaultItemIfNeeded()
-                reportPopoverSize()
-            }
-            .background {
-                FolderPopoverKeyMonitor { event in
-                    handleKeyDown(event)
+                guard isPresented else {
+                    cancelNavigationTask()
+                    cancelSubfolderSpringLoad()
+                    cancelDropTask()
+                    hasAdoptedInitialSnapshot = false
+                    stopWatchingCurrentFolder()
+                    return
                 }
-            }
-            .onAppear {
+                if hasAdoptedInitialSnapshot {
+                    await refreshEntriesIfNeeded()
+                } else {
+                    adoptInitialSnapshot()
+                }
+                guard !Task.isCancelled else { return }
                 syncWatchedFolder()
                 selectDefaultItemIfNeeded()
                 reportPopoverSize()
             }
             .onDisappear {
+                cancelNavigationTask()
+                cancelSubfolderSpringLoad()
+                cancelDropTask()
+                hasAdoptedInitialSnapshot = false
                 stopWatchingCurrentFolder()
-            }
-            .onChange(of: popoverSize) { _ in
-                reportPopoverSize()
             }
     }
 
@@ -106,7 +134,13 @@ struct FolderPopoverView: View {
     }
 
     private var items: [URL] {
-        FolderAccessService.shared.sortedItems(in: currentEntry.snapshot, sortMode: tile.sortMode)
+        guard case .loaded(let snapshotItems) = currentEntry.snapshot else {
+            return []
+        }
+        return FolderAccessService.shared.cachedContentsIfPresent(
+            of: currentEntry.url,
+            sortMode: tile.sortMode
+        ) ?? snapshotItems
     }
 
     private var popoverItems: [FolderPopoverItem] {
@@ -130,7 +164,11 @@ struct FolderPopoverView: View {
                     cardButton(for: item) {
                         switch item {
                         case .url(let itemURL):
-                            FolderPopoverItemView(url: itemURL)
+                            FolderPopoverItemView(
+                                url: itemURL,
+                                displayName: displayName(for: itemURL),
+                                isFolder: isNavigableFolder(itemURL)
+                            )
                         case .action(let action):
                             FolderPopoverActionItemView(action: action)
                         }
@@ -193,11 +231,11 @@ struct FolderPopoverView: View {
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(nsImage: IconCacheService.shared.icon(forFileURL: currentEntry.url))
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 112, height: 112)
+            FolderPopoverAsyncIcon(
+                url: currentEntry.url,
+                fallbackSystemName: "folder.fill",
+                extent: 112
+            )
 
             Text("No visible items")
                 .font(.headline)
@@ -213,7 +251,7 @@ struct FolderPopoverView: View {
 
     private var unreadableState: some View {
         VStack(spacing: 12) {
-            Image(nsImage: IconCacheService.shared.icon(forFileURL: currentEntry.url))
+            Image(nsImage: unreadableFolderIcon)
                 .resizable()
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fit)
@@ -239,13 +277,22 @@ struct FolderPopoverView: View {
                 }
 
                 Button("Try Again") {
-                    folderAccess.invalidateCache()
-                    currentEntry = refreshedEntry(for: currentEntry)
+                    folderAccess.invalidateCache(of: currentEntry.url)
+                    refreshCurrentEntry()
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(20)
+    }
+
+    private var unreadableFolderIcon: NSImage {
+        IconCacheService.shared.cachedIcon(forFileURL: currentEntry.url)
+            ?? NSImage(
+                systemSymbolName: "folder.fill",
+                accessibilityDescription: String(localized: "Folder")
+            )
+            ?? NSImage()
     }
 
     private var navigationHeader: some View {
@@ -336,13 +383,7 @@ struct FolderPopoverView: View {
 
     private func handleSelection(of itemURL: URL) {
         if isNavigableFolder(itemURL) {
-            backHistory.append(currentEntry)
-            currentEntry = FolderPopoverEntry(
-                url: itemURL,
-                displayName: displayName(for: itemURL),
-                snapshot: FolderAccessService.shared.snapshot(of: itemURL)
-            )
-            selectDefaultItemIfNeeded()
+            navigateIntoFolder(itemURL)
             return
         }
 
@@ -350,9 +391,25 @@ struct FolderPopoverView: View {
     }
 
     private func navigateBack() {
-        guard let previousEntry = backHistory.popLast() else { return }
-        currentEntry = previousEntry
-        selectDefaultItemIfNeeded()
+        guard let previousEntry = backHistory.last else { return }
+        cancelNavigationTask()
+        let generation = navigationGeneration
+        let expectedCurrentEntry = currentEntry
+        navigationTask = Task { @MainActor in
+            let refreshed = await refreshedEntry(for: previousEntry)
+            guard !Task.isCancelled,
+                  navigationGeneration == generation,
+                  isPresented,
+                  currentEntry == expectedCurrentEntry,
+                  backHistory.last == previousEntry else {
+                return
+            }
+            _ = backHistory.popLast()
+            currentEntry = refreshed
+            lastHandledChangeToken = folderAccess.changeToken
+            navigationTask = nil
+            selectDefaultItemIfNeeded()
+        }
     }
 
     private func open(_ itemURL: URL) {
@@ -399,12 +456,17 @@ struct FolderPopoverView: View {
     }
 
     private func isNavigableFolder(_ itemURL: URL) -> Bool {
-        let values = try? itemURL.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
-        return values?.isDirectory == true && values?.isPackage != true
+        FolderAccessService.shared.cachedMetadata(
+            for: itemURL,
+            in: currentEntry.url
+        )?.isNavigableFolder == true
     }
 
     private func displayName(for itemURL: URL) -> String {
-        (try? itemURL.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? itemURL.lastPathComponent
+        FolderAccessService.shared.cachedMetadata(
+            for: itemURL,
+            in: currentEntry.url
+        )?.displayName ?? itemURL.lastPathComponent
     }
 
     private func openCurrentFolderInFinder() {
@@ -426,36 +488,73 @@ struct FolderPopoverView: View {
     /// Cross-volume drops fall back to a copy. Skips items that already live
     /// in the destination folder.
     private func moveDroppedFiles(providers: [NSItemProvider], into destination: URL) {
-        let typeID = UTType.fileURL.identifier
+        cancelDropTask()
+        let generation = dropGeneration
+        let normalizedDestination = destination.standardizedFileURL
+        dropTask = Task { @MainActor in
+            let sources = await collectDroppedFileURLs(from: providers)
+            guard !Task.isCancelled,
+                  dropGeneration == generation,
+                  isPresented else {
+                return
+            }
+
+            await FolderDropOperationWorker.shared.moveOrCopy(
+                sources,
+                into: normalizedDestination
+            )
+            guard !Task.isCancelled,
+                  dropGeneration == generation,
+                  isPresented else {
+                return
+            }
+
+            dropTask = nil
+            DockDragService.shared.clear()
+            isPresented = false
+        }
+    }
+
+    private func collectDroppedFileURLs(
+        from providers: [NSItemProvider]
+    ) async -> [URL] {
         let group = DispatchGroup()
-        var collected: [URL] = []
-        let queue = DispatchQueue(label: "docky.folder.drop")
+        let collection = FolderDropURLCollection()
+        let typeID = UTType.fileURL.identifier
 
         for provider in providers {
-            guard provider.hasItemConformingToTypeIdentifier(typeID) else { continue }
+            guard provider.hasItemConformingToTypeIdentifier(typeID) else {
+                continue
+            }
             group.enter()
-            provider.loadDataRepresentation(forTypeIdentifier: typeID) { data, _ in
+            provider.loadDataRepresentation(
+                forTypeIdentifier: typeID
+            ) { data, _ in
                 defer { group.leave() }
-                guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-                queue.sync { collected.append(url) }
+                guard let data,
+                      let url = URL(
+                        dataRepresentation: data,
+                        relativeTo: nil
+                      ) else {
+                    return
+                }
+                collection.append(url.standardizedFileURL)
             }
         }
 
-        group.notify(queue: .main) {
-            for source in collected {
-                let target = destination.appendingPathComponent(source.lastPathComponent)
-                guard target.standardizedFileURL != source.standardizedFileURL else { continue }
-                do {
-                    try FileManager.default.moveItem(at: source, to: target)
-                } catch {
-                    // Cross-volume moves throw; copy as a fallback so the
-                    // user still gets something at the destination.
-                    try? FileManager.default.copyItem(at: source, to: target)
-                }
+        return await withCheckedContinuation { continuation in
+            group.notify(
+                queue: DispatchQueue.global(qos: .userInitiated)
+            ) {
+                continuation.resume(returning: collection.snapshot())
             }
-            isPresented = false
-            DockDragService.shared.clear()
         }
+    }
+
+    private func cancelDropTask() {
+        dropGeneration &+= 1
+        dropTask?.cancel()
+        dropTask = nil
     }
 
     /// Drives subfolder spring-loading: when a drag enters a folder card,
@@ -484,7 +583,11 @@ struct FolderPopoverView: View {
         let dwell = subfolderSpringLoadDwell
         springLoadTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(dwell * 1_000_000_000))
-            guard !Task.isCancelled, springLoadingItemID == itemID else { return }
+            guard !Task.isCancelled,
+                  isPresented,
+                  springLoadingItemID == itemID else {
+                return
+            }
             springLoadingItemID = nil
             handleSelection(of: itemURL)
         }
@@ -532,12 +635,93 @@ struct FolderPopoverView: View {
         return nil
     }
 
-    private func refreshedEntry(for entry: FolderPopoverEntry) -> FolderPopoverEntry {
-        FolderPopoverEntry(
+    private func refreshedEntry(
+        for entry: FolderPopoverEntry
+    ) async -> FolderPopoverEntry {
+        let snapshot = await FolderAccessService.shared.loadSnapshot(
+            of: entry.url
+        )
+        return FolderPopoverEntry(
             url: entry.url,
             displayName: entry.displayName,
-            snapshot: FolderAccessService.shared.snapshot(of: entry.url)
+            snapshot: snapshot
         )
+    }
+
+    private func adoptInitialSnapshot() {
+        currentEntry = FolderPopoverEntry(
+            url: tile.url,
+            displayName: tile.displayName,
+            snapshot: initialSnapshot
+        )
+        backHistory = []
+        lastHandledChangeToken = folderAccess.changeToken
+        hasAdoptedInitialSnapshot = true
+    }
+
+    private func refreshEntriesIfNeeded() async {
+        guard isPresented,
+              lastHandledChangeToken != folderAccess.changeToken else {
+            return
+        }
+
+        let refreshedCurrent = await refreshedEntry(for: currentEntry)
+        guard !Task.isCancelled, isPresented else { return }
+
+        currentEntry = refreshedCurrent
+        lastHandledChangeToken = folderAccess.changeToken
+    }
+
+    private func navigateIntoFolder(_ itemURL: URL) {
+        cancelNavigationTask()
+        let generation = navigationGeneration
+        let parentEntry = currentEntry
+        let itemName = displayName(for: itemURL)
+        navigationTask = Task { @MainActor in
+            let snapshot = await FolderAccessService.shared.loadSnapshot(
+                of: itemURL
+            )
+            guard !Task.isCancelled,
+                  navigationGeneration == generation,
+                  isPresented,
+                  currentEntry == parentEntry else {
+                return
+            }
+            backHistory.append(parentEntry)
+            currentEntry = FolderPopoverEntry(
+                url: itemURL,
+                displayName: itemName,
+                snapshot: snapshot
+            )
+            lastHandledChangeToken = folderAccess.changeToken
+            navigationTask = nil
+            selectDefaultItemIfNeeded()
+        }
+    }
+
+    private func refreshCurrentEntry() {
+        cancelNavigationTask()
+        let generation = navigationGeneration
+        let entry = currentEntry
+        navigationTask = Task { @MainActor in
+            let refreshed = await refreshedEntry(for: entry)
+            guard !Task.isCancelled,
+                  navigationGeneration == generation,
+                  isPresented,
+                  currentEntry == entry else {
+                return
+            }
+            currentEntry = refreshed
+            lastHandledChangeToken = folderAccess.changeToken
+            navigationTask = nil
+            selectDefaultItemIfNeeded()
+        }
+    }
+
+    private func cancelNavigationTask() {
+        navigationGeneration &+= 1
+        navigationTask?.cancel()
+        navigationTask = nil
     }
 
     private func syncWatchedFolder() {
@@ -563,6 +747,75 @@ struct FolderPopoverView: View {
         onPopoverSizeChange(popoverSize)
     }
 
+}
+
+private nonisolated final class FolderDropURLCollection:
+    @unchecked Sendable {
+    private let queue = DispatchQueue(
+        label: "gt.quintero.Docky.folder-drop-provider-collection"
+    )
+    private var urls: [URL] = []
+
+    func append(_ url: URL) {
+        queue.sync {
+            urls.append(url)
+        }
+    }
+
+    func snapshot() -> [URL] {
+        queue.sync {
+            urls
+        }
+    }
+}
+
+/// Serializes destructive folder-drop operations away from MainActor. The
+/// presentation task validates its generation both before and after awaiting
+/// this worker, so a dismissed or replaced popover cannot publish stale UI.
+private nonisolated final class FolderDropOperationWorker:
+    @unchecked Sendable {
+    static let shared = FolderDropOperationWorker()
+
+    private let queue = DispatchQueue(
+        label: "gt.quintero.Docky.folder-drop-filesystem",
+        qos: .userInitiated
+    )
+
+    private init() {}
+
+    func moveOrCopy(_ sources: [URL], into destination: URL) async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                Self.moveOrCopySynchronously(
+                    sources,
+                    into: destination
+                )
+                continuation.resume()
+            }
+        }
+    }
+
+    private static func moveOrCopySynchronously(
+        _ sources: [URL],
+        into destination: URL
+    ) {
+        for source in sources {
+            let target = destination.appendingPathComponent(
+                source.lastPathComponent
+            )
+            guard target.standardizedFileURL != source.standardizedFileURL else {
+                continue
+            }
+
+            do {
+                try FileManager.default.moveItem(at: source, to: target)
+            } catch {
+                // Cross-volume moves throw; copy as a fallback so the user
+                // still gets something at the destination.
+                try? FileManager.default.copyItem(at: source, to: target)
+            }
+        }
+    }
 }
 
 private struct FolderPopoverEntry: Equatable {
@@ -594,14 +847,16 @@ private struct FolderPopoverAction: Identifiable {
 
 private struct FolderPopoverItemView: View {
     let url: URL
+    let displayName: String
+    let isFolder: Bool
 
     var body: some View {
         VStack(spacing: 8) {
-            Image(nsImage: IconCacheService.shared.previewIcon(forFileURL: url))
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 112, height: 112)
+            FolderPopoverAsyncIcon(
+                url: url,
+                fallbackSystemName: isFolder ? "folder.fill" : "doc.fill",
+                extent: 112
+            )
 
             Text(displayName)
                 .font(.callout)
@@ -616,9 +871,45 @@ private struct FolderPopoverItemView: View {
         .frame(maxWidth: .infinity, minHeight: 158, alignment: .top)
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
+}
 
-    private var displayName: String {
-        (try? url.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? url.lastPathComponent
+/// Keeps all cold filesystem, image-decoding, and LaunchServices work out of
+/// SwiftUI's MainActor render path. A cached or generic icon is visible
+/// immediately while the real preview loads.
+private struct FolderPopoverAsyncIcon: View {
+    let url: URL
+    let fallbackSystemName: String
+    let extent: CGFloat
+
+    @State private var loadedImage: NSImage?
+
+    var body: some View {
+        Group {
+            if let image =
+                loadedImage ??
+                IconCacheService.shared.cachedIcon(forFileURL: url) {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+            } else {
+                Image(systemName: fallbackSystemName)
+                    .resizable()
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+                    .padding(extent * 0.12)
+            }
+        }
+        .aspectRatio(contentMode: .fit)
+        .frame(width: extent, height: extent)
+        .task(id: url.standardizedFileURL.path) {
+            loadedImage = nil
+            let image =
+                await IconCacheService.shared.loadPreviewIconAsync(
+                    forFileURL: url
+                )
+            guard !Task.isCancelled else { return }
+            loadedImage = image
+        }
     }
 }
 

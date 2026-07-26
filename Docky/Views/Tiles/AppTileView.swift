@@ -51,7 +51,11 @@ struct AppTileView: View {
 
     @ViewBuilder
     private func baseIconView(in size: CGSize) -> some View {
-        let hasAppOverride = preferences.effectiveAppIconOverrideURL(forBundleIdentifier: tile.bundleIdentifier) != nil
+        let appOverrideURL = preferences.effectiveAppIconOverrideURL(
+            forBundleIdentifier: tile.bundleIdentifier
+        )
+        let resolvedOverrideURL = iconOverrideURL ?? appOverrideURL
+        let hasAppOverride = appOverrideURL != nil
         let hasOverride = iconOverrideURL != nil || hasAppOverride
         // Caller-supplied padding wins (used by the Launchpad tile);
         // otherwise fall back to the per-bundle override padding.
@@ -68,9 +72,7 @@ struct AppTileView: View {
             // explicitly chosen how much breathing room they want, so
             // render the icon to fit `size` minus that inset.
             let pad = overridePaddingFraction * min(size.width, size.height)
-            Image(nsImage: icon)
-                .resizable()
-                .interpolation(.high)
+            appIcon(overrideURL: resolvedOverrideURL)
                 .aspectRatio(contentMode: shouldApplyCircleClip ? .fill : .fit)
                 .padding(pad)
                 .opacity(isHidden ? 0.5 : 1)
@@ -78,9 +80,7 @@ struct AppTileView: View {
             let inset = shouldApplyCircleClip ? transparencyCompensationInset + 2 : 0
             let edgeInsets: CGFloat = hasOverride ? -transparencyCompensationInset * 4 : inset
 
-            Image(nsImage: icon)
-                .resizable()
-                .interpolation(.high)
+            appIcon(overrideURL: resolvedOverrideURL)
                 .aspectRatio(contentMode: shouldApplyCircleClip ? .fill : .fit)
                 .frame(width: size.width + edgeInsets / 2, height: size.height + edgeInsets / 2)
                 .frame(width: size.width - edgeInsets * 2, height: size.height - edgeInsets * 2)
@@ -92,17 +92,18 @@ struct AppTileView: View {
         clipShape == .circle
     }
 
-    private var icon: NSImage {
-        if let iconOverrideURL,
-           let image = IconCacheService.shared.image(forImageFileURL: iconOverrideURL) {
-            return image
+    private func appIcon(overrideURL: URL?) -> some View {
+        CachedAsyncAppImage(
+            bundleIdentifier: tile.bundleIdentifier,
+            overrideURL: overrideURL,
+            placeholder: {
+                Image(systemName: "app.fill")
+                    .resizable()
+            }
+        ) { image in
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
         }
-
-        if let overrideURL = preferences.effectiveAppIconOverrideURL(forBundleIdentifier: tile.bundleIdentifier),
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-
-        return IconCacheService.shared.icon(forBundleIdentifier: tile.bundleIdentifier)
     }
 }

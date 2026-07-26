@@ -39,10 +39,19 @@ final class TileStore: ObservableObject {
     ]
 
     private var pinnedTiles: [Tile] = []
+    private var systemPinnedTiles: [Tile] = []
     private var systemOtherTiles: [Tile] = []
     private var systemOtherTilesByID: [String: Tile] = [:]
     private var trailingTiles: [Tile] = []
     private var dockPinnedTilesByBundleIdentifier: [String: Tile] = [:]
+    private var applicationTilesByBundleIdentifier: [String: AppTile] = [:]
+    private var missingApplicationBundleIdentifiers: Set<String> = []
+    private var applicationMetadataTasks:
+        [String: Task<Void, Never>] = [:]
+    private var systemDockReloadTask: Task<Void, Never>?
+    private var systemDockReloadGeneration: UInt64 = 0
+    private var pendingSystemDockPreferenceSync = false
+    private var pendingSystemDockImportCompletion = false
     private var expandedInlineAppFolderIDs: Set<String> = [] {
         didSet {
             guard expandedInlineAppFolderIDs != oldValue else { return }
@@ -64,6 +73,9 @@ final class TileStore: ObservableObject {
         if let storedExpandedIDs = defaults.stringArray(forKey: Self.expandedInlineAppFolderIDsKey) {
             expandedInlineAppFolderIDs = Set(storedExpandedIDs)
         }
+        refreshPinnedTilesFromPreferences()
+        refreshTrailingTilesFromPreferences()
+        rebuildTiles()
         reloadSystemDockState(syncPreferencesFromSystemDock: false)
         notificationObserver = DistributedNotificationCenter.default().addObserver(
             forName: Self.changeNotification,
@@ -74,7 +86,11 @@ final class TileStore: ObservableObject {
         }
         WorkspaceService.shared.$runningApps
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.rebuildTiles() }
+            .sink { [weak self] runningApps in
+                self?.adoptRunningApplicationMetadata(runningApps)
+                self?.refreshPinnedTilesFromPreferences()
+                self?.rebuildTiles()
+            }
             .store(in: &cancellables)
         WorkspaceService.shared.$minimizedWindows
             .receive(on: DispatchQueue.main)
@@ -138,6 +154,8 @@ final class TileStore: ObservableObject {
     }
 
     deinit {
+        systemDockReloadTask?.cancel()
+        applicationMetadataTasks.values.forEach { $0.cancel() }
         if let notificationObserver {
             DistributedNotificationCenter.default().removeObserver(notificationObserver)
         }
@@ -161,13 +179,60 @@ final class TileStore: ObservableObject {
             return
         }
 
-        reloadSystemDockState(syncPreferencesFromSystemDock: true)
-        hasImportedSystemDockPreferences = true
+        reloadSystemDockState(
+            syncPreferencesFromSystemDock: true,
+            marksSystemImportComplete: true
+        )
     }
 
-    private func reloadSystemDockState(syncPreferencesFromSystemDock: Bool) {
-        guard let plist = DockPlistReader.read() else {
+    private func reloadSystemDockState(
+        syncPreferencesFromSystemDock: Bool,
+        marksSystemImportComplete: Bool = false
+    ) {
+        pendingSystemDockPreferenceSync =
+            pendingSystemDockPreferenceSync
+            || syncPreferencesFromSystemDock
+        pendingSystemDockImportCompletion =
+            pendingSystemDockImportCompletion
+            || marksSystemImportComplete
+
+        systemDockReloadGeneration &+= 1
+        let generation = systemDockReloadGeneration
+        let shouldSyncPreferences = pendingSystemDockPreferenceSync
+        let shouldMarkImportComplete =
+            pendingSystemDockImportCompletion
+
+        systemDockReloadTask?.cancel()
+        systemDockReloadTask = Task { [weak self] in
+            let snapshot = await Task.detached(priority: .userInitiated) {
+                Self.loadSystemDockSnapshot()
+            }.value
+
+            guard !Task.isCancelled, let self,
+                  self.systemDockReloadGeneration == generation else {
+                return
+            }
+
+            self.systemDockReloadTask = nil
+            self.pendingSystemDockPreferenceSync = false
+            self.pendingSystemDockImportCompletion = false
+            self.applySystemDockSnapshot(
+                snapshot,
+                syncPreferencesFromSystemDock: shouldSyncPreferences
+            )
+            if shouldMarkImportComplete, snapshot != nil {
+                self.hasImportedSystemDockPreferences = true
+            }
+        }
+    }
+
+    private func applySystemDockSnapshot(
+        _ snapshot: SystemDockSnapshot?,
+        syncPreferencesFromSystemDock: Bool
+    ) {
+        guard let snapshot else {
             dockPinnedTilesByBundleIdentifier = [:]
+            systemPinnedTiles = []
             pinnedTiles = []
             systemOtherTiles = []
             systemOtherTilesByID = [:]
@@ -176,11 +241,10 @@ final class TileStore: ObservableObject {
             rebuildTiles()
             return
         }
-        let apps = (plist["persistent-apps"] as? [[String: Any]]) ?? []
-        let others = (plist["persistent-others"] as? [[String: Any]]) ?? []
-        let refreshedPinnedTiles = apps.enumerated().compactMap { index, entry in
-            Self.parse(entry: entry, fallbackID: Self.fallbackTileID(for: entry, at: index, section: "persistent-apps"))
-        }
+
+        let refreshedPinnedTiles = snapshot.pinnedTiles
+        systemPinnedTiles = refreshedPinnedTiles
+        adoptSystemDockApplicationMetadata(refreshedPinnedTiles)
         dockPinnedTilesByBundleIdentifier = Dictionary(
             refreshedPinnedTiles.compactMap { tile in
                 bundleIdentifier(of: tile).map { ($0, tile) }
@@ -193,15 +257,47 @@ final class TileStore: ObservableObject {
         }
         synchronizeAppWidgetDisplaysWithFolders()
         refreshPinnedTilesFromPreferences()
-        systemOtherTiles = others.enumerated().compactMap { index, entry in
-            Self.parse(entry: entry, fallbackID: Self.fallbackTileID(for: entry, at: index, section: "persistent-others"))
-        }
+        systemOtherTiles = snapshot.otherTiles
         systemOtherTilesByID = Dictionary(uniqueKeysWithValues: systemOtherTiles.map { ($0.id, $0) })
         if syncPreferencesFromSystemDock {
             refreshTrailingPreferencesIfNeeded()
         }
         refreshTrailingTilesFromPreferences()
         rebuildTiles()
+    }
+
+    nonisolated private static func loadSystemDockSnapshot()
+        -> SystemDockSnapshot? {
+        guard let plist = DockPlistReader.read() else {
+            return nil
+        }
+
+        let apps =
+            (plist["persistent-apps"] as? [[String: Any]]) ?? []
+        let others =
+            (plist["persistent-others"] as? [[String: Any]]) ?? []
+        return SystemDockSnapshot(
+            pinnedTiles: apps.enumerated().compactMap { index, entry in
+                parse(
+                    entry: entry,
+                    fallbackID: fallbackTileID(
+                        for: entry,
+                        at: index,
+                        section: "persistent-apps"
+                    )
+                )
+            },
+            otherTiles: others.enumerated().compactMap { index, entry in
+                parse(
+                    entry: entry,
+                    fallbackID: fallbackTileID(
+                        for: entry,
+                        at: index,
+                        section: "persistent-others"
+                    )
+                )
+            }
+        )
     }
 
     private var hasImportedSystemDockPreferences: Bool {
@@ -291,7 +387,6 @@ final class TileStore: ObservableObject {
             return
         }
 
-        let allItemIDs = preferences.pinnedItems.map { Self.pinnedTileID(for: $0) }
         let idsSet = Set(ids)
         let filteredItems = preferences.pinnedItems.filter { idsSet.contains(Self.pinnedTileID(for: $0)) }
 
@@ -332,14 +427,6 @@ final class TileStore: ObservableObject {
 
     @discardableResult
     func resetPinnedItemsToSystemDock() -> Int {
-        guard let plist = DockPlistReader.read() else {
-            return 0
-        }
-
-        let apps = (plist["persistent-apps"] as? [[String: Any]]) ?? []
-        let systemPinnedTiles = apps.enumerated().compactMap { index, entry in
-            Self.parse(entry: entry, fallbackID: Self.fallbackTileID(for: entry, at: index, section: "persistent-apps"))
-        }
         let systemPinnedItems = systemPinnedTiles.compactMap(Self.pinnedItem(from:))
         guard !systemPinnedItems.isEmpty else {
             return 0
@@ -488,7 +575,9 @@ final class TileStore: ObservableObject {
             }
 
             let folderBundleIdentifiers = [targetBundleIdentifier] + sourceBundleIdentifiers
-            let folderApps = folderBundleIdentifiers.compactMap(Self.makeAppTile(bundleIdentifier:))
+            let folderApps = folderBundleIdentifiers.compactMap {
+                makeAppTile(bundleIdentifier: $0)
+            }
             let seededFolderName = appFolderSeedName(for: folderApps)
             let createdFolder = PinnedTileItem.appFolder(
                 displayName: seededFolderName,
@@ -1791,8 +1880,114 @@ final class TileStore: ObservableObject {
         preferences.pinnedItems = pinnedItems
     }
 
+    private func adoptSystemDockApplicationMetadata(_ tiles: [Tile]) {
+        for tile in tiles {
+            guard case .app(let app) = tile.content,
+                  !app.bundleIdentifier.isEmpty,
+                  !app.displayName.isEmpty,
+                  app.displayName != "Unknown" else {
+                continue
+            }
+            applicationTilesByBundleIdentifier[app.bundleIdentifier] =
+                AppTile(
+                    bundleIdentifier: app.bundleIdentifier,
+                    displayName: app.displayName
+                )
+            missingApplicationBundleIdentifiers.remove(
+                app.bundleIdentifier
+            )
+        }
+    }
+
+    private func adoptRunningApplicationMetadata(_ apps: [RunningApp]) {
+        for app in apps {
+            guard !app.bundleIdentifier.isEmpty,
+                  !app.localizedName.isEmpty else {
+                continue
+            }
+            applicationTilesByBundleIdentifier[app.bundleIdentifier] =
+                AppTile(
+                    bundleIdentifier: app.bundleIdentifier,
+                    displayName: app.localizedName
+                )
+            missingApplicationBundleIdentifiers.remove(
+                app.bundleIdentifier
+            )
+        }
+    }
+
     private func refreshPinnedTilesFromPreferences() {
         pinnedTiles = preferences.pinnedItems.compactMap(tile(for:))
+    }
+
+    private func scheduleApplicationMetadataResolution(
+        for bundleIdentifier: String
+    ) {
+        guard !bundleIdentifier.isEmpty,
+              applicationTilesByBundleIdentifier[bundleIdentifier] == nil,
+              !missingApplicationBundleIdentifiers.contains(
+                bundleIdentifier
+              ),
+              applicationMetadataTasks[bundleIdentifier] == nil else {
+            return
+        }
+
+        let task = Task { [weak self] in
+            let metadata = await Self.resolveApplicationMetadata(
+                for: bundleIdentifier
+            )
+            guard !Task.isCancelled, let self else {
+                return
+            }
+
+            self.applicationMetadataTasks.removeValue(
+                forKey: bundleIdentifier
+            )
+            if let metadata {
+                self.applicationTilesByBundleIdentifier[bundleIdentifier] =
+                    AppTile(
+                        bundleIdentifier: bundleIdentifier,
+                        displayName: metadata.displayName
+                    )
+                self.missingApplicationBundleIdentifiers.remove(
+                    bundleIdentifier
+                )
+            } else if self.applicationTilesByBundleIdentifier[
+                bundleIdentifier
+            ] == nil {
+                self.missingApplicationBundleIdentifiers.insert(
+                    bundleIdentifier
+                )
+            } else {
+                return
+            }
+
+            self.refreshPinnedTilesFromPreferences()
+            self.rebuildTiles()
+        }
+        applicationMetadataTasks[bundleIdentifier] = task
+    }
+
+    nonisolated private static func resolveApplicationMetadata(
+        for bundleIdentifier: String
+    ) async -> ResolvedApplicationMetadata? {
+        guard let url =
+                await ApplicationURLResolver.shared.applicationURL(
+                    for: bundleIdentifier
+                ),
+              !Task.isCancelled else {
+            return nil
+        }
+
+        let displayName = await Task.detached(priority: .utility) {
+            FileManager.default.displayName(atPath: url.path)
+        }.value
+        guard !Task.isCancelled, !displayName.isEmpty else {
+            return nil
+        }
+        return ResolvedApplicationMetadata(
+            displayName: displayName
+        )
     }
 
     private func mergePinnedPreferencesAdditionsIfNeeded(from refreshed: [Tile]) {
@@ -1896,7 +2091,9 @@ final class TileStore: ObservableObject {
         NSLog("[Docky] \(message): \(summary)")
     }
 
-    private static func trailingItemDebugDescription(_ item: TrailingTileItem) -> String {
+    private nonisolated static func trailingItemDebugDescription(
+        _ item: TrailingTileItem
+    ) -> String {
         switch item.kind {
         case .folder:
             if let sourceTileID = item.sourceTileID {
@@ -2084,11 +2281,14 @@ final class TileStore: ObservableObject {
             if let tile = dockPinnedTilesByBundleIdentifier[bundleIdentifier] {
                 return Self.makePinnedTile(from: tile, item: item)
             }
-            return Self.makePinnedTile(bundleIdentifier: bundleIdentifier, item: item)
+            return makePinnedTile(
+                bundleIdentifier: bundleIdentifier,
+                item: item
+            )
         case .appFolder:
             let apps = item.folderBundleIdentifiers
                 .filter { !preferences.isAppHiddenInDocky(bundleIdentifier: $0) }
-                .compactMap(Self.makeAppTile(bundleIdentifier:))
+                .compactMap { makeAppTile(bundleIdentifier: $0) }
             guard !apps.isEmpty else {
                 return nil
             }
@@ -2171,7 +2371,13 @@ final class TileStore: ObservableObject {
                 id: Self.trailingTileID(for: item),
                 content: .folder(FolderTile(
                     url: folderURL,
-                    displayName: item.folderDisplayName ?? FileManager.default.displayName(atPath: folderURL.path),
+                    // Legacy payloads may not have captured a localized name.
+                    // Reconstruct lexically so startup never probes a protected
+                    // folder before the user explicitly opens it.
+                    displayName: item.folderDisplayName
+                        ?? (folderURL.lastPathComponent.isEmpty
+                            ? "Folder"
+                            : folderURL.lastPathComponent),
                     displayMode: resolvedFolderDisplayMode(for: item),
                     contentViewMode: resolvedFolderContentViewMode(for: item),
                     sortMode: resolvedFolderSortMode(for: item)
@@ -2253,7 +2459,7 @@ final class TileStore: ObservableObject {
             ? pinnedWithoutFinder
             : pinnedWithoutFinder + runningTiles
 
-        let leadingFinder: [Tile] = hidesFinder ? [] : [Self.finderTile()]
+        let leadingFinder: [Tile] = hidesFinder ? [] : [finderTile()]
         var result: [Tile] = tilesWithWidgets(appendedTo: leadingFinder)
         result.append(contentsOf: tilesWithWidgets(appendedTo: mergedPinnedTiles))
         if preferences.effectiveShowsActivePinnedSeparator, !runningTiles.isEmpty {
@@ -2586,15 +2792,16 @@ final class TileStore: ObservableObject {
         return false
     }
 
-    private static func finderTile() -> Tile {
-        let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: finderBundleID)
-        let name = url.map { FileManager.default.displayName(atPath: $0.path) } ?? "Finder"
+    private func finderTile() -> Tile {
+        let app =
+            makeAppTile(bundleIdentifier: Self.finderBundleID)
+            ?? AppTile(
+                bundleIdentifier: Self.finderBundleID,
+                displayName: "Finder"
+            )
         return Tile(
-            id: "pinned:\(finderBundleID)",
-            content: .app(AppTile(
-                bundleIdentifier: finderBundleID,
-                displayName: name
-            ))
+            id: "pinned:\(Self.finderBundleID)",
+            content: .app(app)
         )
     }
 
@@ -2731,7 +2938,10 @@ final class TileStore: ObservableObject {
 
     // MARK: - Parsing plist entries
 
-    private static func parse(entry: [String: Any], fallbackID: String) -> Tile? {
+    nonisolated private static func parse(
+        entry: [String: Any],
+        fallbackID: String
+    ) -> Tile? {
         let tileType = entry["tile-type"] as? String
         let tileData = entry["tile-data"] as? [String: Any] ?? [:]
         let guid = (entry["GUID"] as? NSNumber)?.stringValue ?? fallbackID
@@ -2748,7 +2958,10 @@ final class TileStore: ObservableObject {
         }
     }
 
-    private static func parseAppTile(id: String, data: [String: Any]) -> Tile? {
+    nonisolated private static func parseAppTile(
+        id: String,
+        data: [String: Any]
+    ) -> Tile? {
         let label = (data["file-label"] as? String) ?? "Unknown"
         let fileData = data["file-data"] as? [String: Any]
         let urlString = fileData?["_CFURLString"] as? String
@@ -2773,26 +2986,45 @@ final class TileStore: ObservableObject {
         )
     }
 
-    private static func makePinnedTile(bundleIdentifier: String, item: PinnedTileItem) -> Tile? {
+    private func makePinnedTile(
+        bundleIdentifier: String,
+        item: PinnedTileItem
+    ) -> Tile? {
         guard let app = makeAppTile(bundleIdentifier: bundleIdentifier) else {
             return nil
         }
 
         return Tile(
-            id: pinnedTileID(for: item),
+            id: Self.pinnedTileID(for: item),
             content: .app(app)
         )
     }
 
-    nonisolated private static func makeAppTile(bundleIdentifier: String) -> AppTile? {
-        guard !bundleIdentifier.isEmpty,
-              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
+    private func makeAppTile(bundleIdentifier: String) -> AppTile? {
+        guard !bundleIdentifier.isEmpty else {
             return nil
         }
 
+        if let cached =
+                applicationTilesByBundleIdentifier[bundleIdentifier] {
+            return cached
+        }
+        if missingApplicationBundleIdentifiers.contains(bundleIdentifier) {
+            return nil
+        }
+
+        scheduleApplicationMetadataResolution(for: bundleIdentifier)
+        let fallbackName: String
+        if bundleIdentifier == Self.finderBundleID {
+            fallbackName = "Finder"
+        } else {
+            fallbackName =
+                bundleIdentifier.split(separator: ".").last.map(String.init)
+                ?? bundleIdentifier
+        }
         return AppTile(
             bundleIdentifier: bundleIdentifier,
-            displayName: FileManager.default.displayName(atPath: url.path)
+            displayName: fallbackName
         )
     }
 
@@ -2812,7 +3044,10 @@ final class TileStore: ObservableObject {
         )
     }
 
-    private static func parseFolderTile(id: String, data: [String: Any]) -> Tile? {
+    nonisolated private static func parseFolderTile(
+        id: String,
+        data: [String: Any]
+    ) -> Tile? {
         let label = (data["file-label"] as? String) ?? "Folder"
         let fileData = data["file-data"] as? [String: Any]
         guard let urlString = fileData?["_CFURLString"] as? String,
@@ -2833,7 +3068,9 @@ final class TileStore: ObservableObject {
         )
     }
 
-    private static func parseFolderDisplayMode(from rawValue: Any?) -> FolderTileDisplayMode {
+    nonisolated private static func parseFolderDisplayMode(
+        from rawValue: Any?
+    ) -> FolderTileDisplayMode {
         guard (rawValue as? NSNumber)?.intValue == 1 else {
             return .contents
         }
@@ -2841,7 +3078,9 @@ final class TileStore: ObservableObject {
         return .folder
     }
 
-    private static func parseFolderContentViewMode(from rawValue: Any?) -> FolderTileContentViewMode {
+    nonisolated private static func parseFolderContentViewMode(
+        from rawValue: Any?
+    ) -> FolderTileContentViewMode {
         switch (rawValue as? NSNumber)?.intValue {
         case 3:
             return .list
@@ -2852,12 +3091,18 @@ final class TileStore: ObservableObject {
         }
     }
 
-    private static func inferBundleIdentifier(from url: URL?) -> String? {
+    nonisolated private static func inferBundleIdentifier(
+        from url: URL?
+    ) -> String? {
         guard let url else { return nil }
         return Bundle(url: url)?.bundleIdentifier
     }
 
-    private static func fallbackTileID(for entry: [String: Any], at index: Int, section: String) -> String {
+    nonisolated private static func fallbackTileID(
+        for entry: [String: Any],
+        at index: Int,
+        section: String
+    ) -> String {
         let tileType = (entry["tile-type"] as? String) ?? "unknown"
         let tileData = entry["tile-data"] as? [String: Any] ?? [:]
         let fileData = tileData["file-data"] as? [String: Any]
@@ -2887,4 +3132,13 @@ final class TileStore: ObservableObject {
             ))
         )
     }
+}
+
+private struct SystemDockSnapshot: @unchecked Sendable {
+    let pinnedTiles: [Tile]
+    let otherTiles: [Tile]
+}
+
+private struct ResolvedApplicationMetadata: Sendable {
+    let displayName: String
 }

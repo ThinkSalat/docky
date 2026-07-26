@@ -11,6 +11,7 @@ final class LaunchpadOverlayWindowController: NSWindowController {
     private weak var mainWindow: MainWindow?
     private var cancellables: Set<AnyCancellable> = []
     private var mainWindowInteractionLease: MainWindowInteractionLease?
+    private var presentationGeneration = PresentationGeneration()
     private let animationDuration: TimeInterval = 0.18
     private let preferences = DockyPreferences.shared
     /// The screen the launchpad is currently anchored to. Resolved at present
@@ -80,6 +81,7 @@ final class LaunchpadOverlayWindowController: NSWindowController {
     private func presentOverlay() {
         guard let window else { return }
 
+        _ = presentationGeneration.advance()
         anchoredScreen = screenForCursor()
         updateWallpaper(for: anchoredScreen)
         updateFrame()
@@ -105,14 +107,20 @@ final class LaunchpadOverlayWindowController: NSWindowController {
     }
 
     private func dismissOverlay() {
+        let dismissal = presentationGeneration.advance()
         animateWindowAlpha(to: 0) { [weak self] in
-            guard let self, let window = self.window else { return }
+            guard let self else { return }
+            guard self.presentationGeneration.isCurrent(dismissal),
+                  !LaunchpadOverlayService.shared.isPresented else {
+                return
+            }
+            defer { self.endMainWindowInteraction() }
+            guard let window = self.window else { return }
 
             window.ignoresMouseEvents = true
             window.orderOut(nil)
             self.mainWindow?.makeKey()
         }
-        endMainWindowInteraction()
     }
 
     private func prepareOverlayWindow() {
@@ -134,9 +142,11 @@ final class LaunchpadOverlayWindowController: NSWindowController {
     private func configureHiddenWindowState() {
         guard let window else { return }
 
+        _ = presentationGeneration.advance()
         window.alphaValue = 0
         window.ignoresMouseEvents = true
         window.orderOut(nil)
+        endMainWindowInteraction()
     }
 
     private func animateWindowAlpha(to alphaValue: CGFloat, completion: (() -> Void)? = nil) {
@@ -542,7 +552,7 @@ private struct LaunchpadOverlayView: View {
     }
 
     /// Loads the launchpad's full-screen backdrop image. Prefers the
-    /// user-configured `launchpadBackgroundImagePath`; falls back to the
+    /// user-configured managed background image; falls back to the
     /// cached desktop wallpaper for the active screen. The blur is done
     /// in-window (rather than via the SkyLight backdrop on the window)
     /// so we can guarantee that the visible base is an image — not
@@ -551,7 +561,9 @@ private struct LaunchpadOverlayView: View {
     /// crisp when the user picks one.
     @ViewBuilder
     private func wallpaperBackground(in size: CGSize) -> some View {
-        if let image = launchpadBackgroundImage {
+        let backgroundURL = preferences.effectiveLaunchpadBackgroundImageURL
+            ?? overlay.wallpaperURL
+        CachedAsyncImageFile(url: backgroundURL) { image in
             Image(nsImage: image)
                 .resizable()
                 .scaledToFill()
@@ -560,21 +572,6 @@ private struct LaunchpadOverlayView: View {
                 .clipped()
                 .allowsHitTesting(false)
         }
-    }
-
-    private var launchpadBackgroundImage: NSImage? {
-        if let path = preferences.launchpadBackgroundImagePath,
-           !path.isEmpty {
-            let url = URL(fileURLWithPath: path)
-            if let image = IconCacheService.shared.image(forImageFileURL: url) {
-                return image
-            }
-        }
-        if let url = overlay.wallpaperURL,
-           let image = IconCacheService.shared.image(forImageFileURL: url) {
-            return image
-        }
-        return nil
     }
 
     private func pageGrid(
@@ -1622,46 +1619,27 @@ private struct AsyncAppIcon: View {
     let side: CGFloat
     let padding: CGFloat
 
-    @State private var image: NSImage?
-
     var body: some View {
-        Group {
-            if let image {
+        CachedAsyncAppImage(
+            bundleIdentifier: bundleIdentifier,
+            overrideURL: overrideURL,
+            placeholder: {
+                RoundedRectangle(
+                    cornerRadius: side * 0.22,
+                    style: .continuous
+                )
+                .fill(.primary.opacity(0.06))
+                .frame(width: side, height: side)
+                .padding(padding)
+            }
+        ) { image in
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
                     .frame(width: side, height: side)
                     .padding(padding)
-            } else {
-                RoundedRectangle(cornerRadius: side * 0.22, style: .continuous)
-                    .fill(.primary.opacity(0.06))
-                    .frame(width: side, height: side)
-                    .padding(padding)
-            }
         }
-        .task(id: cacheKey) {
-            await loadIcon()
-        }
-        .animation(.easeOut(duration: 0.12), value: image)
-    }
-
-    private var cacheKey: String {
-        "\(bundleIdentifier)|\(overrideURL?.path ?? "")"
-    }
-
-    private func loadIcon() async {
-        if let overrideURL,
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            image = overrideImage
-            return
-        }
-        if let cached = IconCacheService.shared.cachedIcon(forBundleIdentifier: bundleIdentifier) {
-            image = cached
-            return
-        }
-        let loaded = await IconCacheService.shared.loadIconAsync(forBundleIdentifier: bundleIdentifier)
-        image = loaded
     }
 }
 
@@ -1756,13 +1734,6 @@ private struct LaunchpadFolderCard: View {
         return preferences.appIconOverridePadding(forBundleIdentifier: bundleIdentifier) * side
     }
 
-    private func icon(forBundleIdentifier bundleIdentifier: String) -> NSImage {
-        if let overrideURL = preferences.effectiveAppIconOverrideURL(forBundleIdentifier: bundleIdentifier),
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-        return IconCacheService.shared.icon(forBundleIdentifier: bundleIdentifier)
-    }
 }
 
 /// Expanded folder card shown when the user opens a folder on the launchpad.

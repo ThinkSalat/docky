@@ -151,7 +151,6 @@ struct AppFolderTileView: View {
     private func inlineExpandedPlaceholder(in size: CGSize) -> some View {
         let minSide = min(size.width, size.height)
         let chevronSize = min(minSide * 0.32, 20)
-        let inset = min(minSide * 0.1, 6)
 
         return ZStack {
             preview(in: size)
@@ -307,13 +306,25 @@ struct AppFolderTileView: View {
 
     private func baseGridIcon(forBundleIdentifier bundleIdentifier: String, side: CGFloat) -> some View {
         let inset = shouldApplyCircleClip(to: bundleIdentifier) ? floor(side * 3 / 32) : 0
-        let overridePadding = preferences.effectiveAppIconOverrideURL(forBundleIdentifier: bundleIdentifier) != nil
+        let overrideURL = preferences.effectiveAppIconOverrideURL(
+            forBundleIdentifier: bundleIdentifier
+        )
+        let overridePadding = overrideURL != nil
             ? preferences.appIconOverridePadding(forBundleIdentifier: bundleIdentifier) * side
             : 0
 
-        return Image(nsImage: icon(forBundleIdentifier: bundleIdentifier))
-            .resizable()
-            .interpolation(.high)
+        return CachedAsyncAppImage(
+            bundleIdentifier: bundleIdentifier,
+            overrideURL: overrideURL,
+            placeholder: {
+                Image(systemName: "app.fill")
+                    .resizable()
+            }
+        ) { image in
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+        }
             .aspectRatio(contentMode: .fit)
             .frame(width: side + inset * 2, height: side + inset * 2)
             .frame(width: side - inset * 2, height: side - inset * 2)
@@ -324,14 +335,6 @@ struct AppFolderTileView: View {
         preferences.effectiveTileClipShape == .circle
     }
 
-    private func icon(forBundleIdentifier bundleIdentifier: String) -> NSImage {
-        if let overrideURL = preferences.effectiveAppIconOverrideURL(forBundleIdentifier: bundleIdentifier),
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-
-        return IconCacheService.shared.icon(forBundleIdentifier: bundleIdentifier)
-    }
 }
 
 /// In-flight reorder state for the launchpad-style folder rearrange.
@@ -373,6 +376,7 @@ struct AppFolderPopoverView: View {
     @State private var isReorderMode = false
     @State private var dragState: AppFolderReorderDragState?
     @State private var cellFrames: [String: CGRect] = [:]
+    @State private var applicationURLsByBundleIdentifier: [String: URL] = [:]
     @FocusState private var isTitleFieldFocused: Bool
 
     fileprivate static let columns = 3
@@ -456,6 +460,11 @@ struct AppFolderPopoverView: View {
                 isReorderMode = false
             }
         }
+        .task(id: AppFolderApplicationURLRequest(
+            bundleIdentifiers: tile.bundleIdentifiers
+        )) {
+            await preloadApplicationURLs()
+        }
     }
 
     /// Apps in the order they should be rendered right now. With no
@@ -523,9 +532,21 @@ struct AppFolderPopoverView: View {
 
     @ViewBuilder
     private func iconImage(for app: AppTile) -> some View {
-        Image(nsImage: icon(forBundleIdentifier: app.bundleIdentifier))
-            .resizable()
-            .interpolation(.high)
+        let overrideURL = preferences.effectiveAppIconOverrideURL(
+            forBundleIdentifier: app.bundleIdentifier
+        )
+        CachedAsyncAppImage(
+            bundleIdentifier: app.bundleIdentifier,
+            overrideURL: overrideURL,
+            placeholder: {
+                Image(systemName: "app.fill")
+                    .resizable()
+            }
+        ) { image in
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+        }
             .aspectRatio(contentMode: .fit)
             .frame(width: Self.itemWidth, height: Self.itemHeight)
             .padding(overrideIconPadding(for: app.bundleIdentifier, side: Self.itemWidth))
@@ -711,15 +732,6 @@ struct AppFolderPopoverView: View {
         return CGSize(width: width, height: height)
     }
 
-    private func icon(forBundleIdentifier bundleIdentifier: String) -> NSImage {
-        if let overrideURL = preferences.effectiveAppIconOverrideURL(forBundleIdentifier: bundleIdentifier),
-           let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-            return overrideImage
-        }
-
-        return IconCacheService.shared.icon(forBundleIdentifier: bundleIdentifier)
-    }
-
     private func overrideIconPadding(for bundleIdentifier: String, side: CGFloat) -> CGFloat {
         guard preferences.effectiveAppIconOverrideURL(forBundleIdentifier: bundleIdentifier) != nil else {
             return 0
@@ -818,7 +830,11 @@ struct AppFolderPopoverView: View {
     /// the screen level so dropping on the desktop or another dock tile
     /// is unaffected by the popover's visibility.
     private func beginDragOutOfFolder(for app: AppTile) -> NSItemProvider {
-        let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleIdentifier)
+        let url =
+            applicationURLsByBundleIdentifier[app.bundleIdentifier]
+            ?? workspace.runningApps.first {
+                $0.bundleIdentifier == app.bundleIdentifier
+            }?.bundleURL
         DockDragService.shared.sourceFolderTileID = tileID
         DockDragService.shared.sourceFolderBundleIdentifier = app.bundleIdentifier
         // Set kind synchronously so the dock's drag visibility hold engages
@@ -837,8 +853,93 @@ struct AppFolderPopoverView: View {
         if let url {
             return NSItemProvider(object: url as NSURL)
         }
-        return NSItemProvider()
+        return deferredApplicationItemProvider(
+            bundleIdentifier: app.bundleIdentifier
+        )
     }
+
+    private func preloadApplicationURLs() async {
+        let bundleIdentifiers = tile.bundleIdentifiers
+        let runningURLs = Dictionary(
+            uniqueKeysWithValues: workspace.runningApps.compactMap { app in
+                app.bundleURL.map { (app.bundleIdentifier, $0) }
+            }
+        )
+
+        let resolvedPairs = await withTaskGroup(
+            of: AppFolderResolvedApplicationURL?.self
+        ) { group in
+            for bundleIdentifier in bundleIdentifiers
+            where runningURLs[bundleIdentifier] == nil {
+                group.addTask {
+                    guard !Task.isCancelled,
+                          let url = await ApplicationURLResolver.shared
+                            .applicationURL(for: bundleIdentifier),
+                          !Task.isCancelled else {
+                        return nil
+                    }
+                    return AppFolderResolvedApplicationURL(
+                        bundleIdentifier: bundleIdentifier,
+                        url: url
+                    )
+                }
+            }
+
+            var resolved: [AppFolderResolvedApplicationURL] = []
+            for await pair in group {
+                guard let pair else { continue }
+                resolved.append(pair)
+            }
+            return resolved
+        }
+
+        guard !Task.isCancelled,
+              bundleIdentifiers == tile.bundleIdentifiers else {
+            return
+        }
+
+        applicationURLsByBundleIdentifier = resolvedPairs.reduce(
+            into: runningURLs
+        ) { result, pair in
+            result[pair.bundleIdentifier] = pair.url
+        }
+    }
+
+    private func deferredApplicationItemProvider(
+        bundleIdentifier: String
+    ) -> NSItemProvider {
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(
+            forTypeIdentifier: UTType.fileURL.identifier,
+            visibility: .all
+        ) { completion in
+            let task = Task {
+                guard let url = await ApplicationURLResolver.shared
+                        .applicationURL(for: bundleIdentifier),
+                      !Task.isCancelled else {
+                    completion(nil, nil)
+                    return
+                }
+                completion(url.dataRepresentation, nil)
+            }
+
+            let progress = Progress(totalUnitCount: 1)
+            progress.cancellationHandler = {
+                task.cancel()
+            }
+            return progress
+        }
+        return provider
+    }
+}
+
+private struct AppFolderApplicationURLRequest: Hashable, Sendable {
+    let bundleIdentifiers: [String]
+}
+
+private struct AppFolderResolvedApplicationURL: Sendable {
+    let bundleIdentifier: String
+    let url: URL
 }
 
 struct AppFolderListMenuPresenter: NSViewRepresentable {
@@ -859,9 +960,7 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
         context.coordinator.update(tile: tile, tileID: tileID, isPresented: $isPresented, preferredEdge: preferredEdge)
 
         if isPresented {
-            DispatchQueue.main.async {
-                context.coordinator.show(relativeTo: nsView)
-            }
+            context.coordinator.scheduleShow(relativeTo: nsView)
         } else {
             context.coordinator.close()
         }
@@ -877,7 +976,12 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
         private var isPresented: Binding<Bool>
         private var preferredEdge: NSRectEdge
         private var isShowing = false
+        private var activePresentation: PresentationGeneration.Token?
+        private var pendingDismissal: PresentationGeneration.Token?
+        private var activeMenu: NSMenu?
         private var mainWindowInteractionLease: MainWindowInteractionLease?
+        private var presentationGeneration = PresentationGeneration()
+        private var iconPreloadTask: Task<Void, Never>?
 
         init(tile: AppFolderTile, tileID: String, isPresented: Binding<Bool>, preferredEdge: NSRectEdge) {
             self.tile = tile
@@ -888,37 +992,101 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
         }
 
         func update(tile: AppFolderTile, tileID: String, isPresented: Binding<Bool>, preferredEdge: NSRectEdge) {
+            if self.tileID != tileID {
+                retireCurrentPresentation()
+            }
             self.tile = tile
             self.tileID = tileID
             self.isPresented = isPresented
             self.preferredEdge = preferredEdge
         }
 
-        func show(relativeTo view: NSView) {
+        func scheduleShow(relativeTo view: NSView) {
+            guard !isShowing, pendingDismissal == nil else { return }
+            startIconPreload(for: tile.apps)
+            let presentation = presentationGeneration.advance()
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self, let view,
+                      self.presentationGeneration.isCurrent(presentation),
+                      self.isPresented.wrappedValue else {
+                    return
+                }
+                self.show(
+                    relativeTo: view,
+                    presentation: presentation
+                )
+            }
+        }
+
+        private func show(
+            relativeTo view: NSView,
+            presentation: PresentationGeneration.Token
+        ) {
             guard view.window != nil, !isShowing else { return }
+            guard presentationGeneration.isCurrent(presentation),
+                  isPresented.wrappedValue else {
+                return
+            }
 
             isShowing = true
+            activePresentation = presentation
             beginAutohideInterruption(for: view)
-            popUp(menu: buildMenu(), in: view)
+            let menu = buildMenu()
+            activeMenu = menu
+            popUp(menu: menu, in: view)
+
+            // NSMenu runs a nested event loop. close/dismantle—or a newer
+            // presentation—can run before popUp returns, so stale work must
+            // not tear down the state now owned by that transition.
+            guard activePresentation == presentation else { return }
+            if activeMenu === menu {
+                activeMenu = nil
+            }
+            activePresentation = nil
             endAutohideInterruption()
             isShowing = false
+            pendingDismissal = presentation
 
-            DispatchQueue.main.async { [isPresented] in
-                guard isPresented.wrappedValue else { return }
-                isPresented.wrappedValue = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.presentationGeneration.isCurrent(presentation),
+                      self.pendingDismissal == presentation,
+                      !self.isShowing else {
+                    return
+                }
+                self.pendingDismissal = nil
+                guard self.isPresented.wrappedValue else { return }
+                self.isPresented.wrappedValue = false
             }
         }
 
         func close() {
+            retireCurrentPresentation()
+        }
+
+        private func retireCurrentPresentation() {
+            _ = presentationGeneration.advance()
+            activeMenu?.cancelTracking()
+            activeMenu = nil
+            activePresentation = nil
+            pendingDismissal = nil
+            iconPreloadTask?.cancel()
+            iconPreloadTask = nil
             endAutohideInterruption()
             isShowing = false
         }
 
         private func buildMenu() -> NSMenu {
-            let menu = NSMenu(title: tile.displayName)
+            // Freeze every action target for this menu epoch. SwiftUI can
+            // update the representable while NSMenu is running its nested
+            // tracking loop; no action may read the coordinator's newer tile.
+            let presentedTile = tile
+            let presentedTileID = tileID
+            let menu = NSMenu(title: presentedTile.displayName)
 
             let showsBadges = DockyPreferences.shared.showsAppBadges
-            for app in tile.apps {
+            var iconByBundleIdentifier: [String: NSImage] = [:]
+            for app in presentedTile.apps {
                 var title = app.displayName
                 // Surface each app's unread count inline, e.g. "Mail (5)".
                 // Plain text keeps the native menu look (no red pill).
@@ -929,7 +1097,9 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
                 let item = NSMenuItem(title: title, action: #selector(openApp(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = app.bundleIdentifier
-                item.image = listMenuIcon(for: app.bundleIdentifier)
+                let icon = listMenuIcon(for: app.bundleIdentifier)
+                iconByBundleIdentifier[app.bundleIdentifier] = icon
+                item.image = icon
                 menu.addItem(item)
             }
 
@@ -937,12 +1107,18 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
                 menu.addItem(.separator())
             }
 
-            let openAll = NSMenuItem(title: "Open All", action: #selector(openAllApps), keyEquivalent: "")
+            let openAll = NSMenuItem(
+                title: "Open All",
+                action: #selector(openAllApps(_:)),
+                keyEquivalent: ""
+            )
             openAll.target = self
-            openAll.isEnabled = !tile.apps.isEmpty
+            openAll.representedObject =
+                presentedTile.apps.map(\.bundleIdentifier)
+            openAll.isEnabled = !presentedTile.apps.isEmpty
             menu.addItem(openAll)
 
-            if !tile.apps.isEmpty {
+            if !presentedTile.apps.isEmpty {
                 menu.addItem(.separator())
                 let removeRoot = NSMenuItem(
                     title: String(localized: "Remove from Folder"),
@@ -951,15 +1127,20 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
                 )
                 removeRoot.image = NSImage(systemSymbolName: "folder.badge.minus", accessibilityDescription: nil)
                 let removeSubmenu = NSMenu(title: String(localized: "Remove from Folder"))
-                for app in tile.apps {
+                for app in presentedTile.apps {
                     let item = NSMenuItem(
                         title: app.displayName,
                         action: #selector(removeApp(_:)),
                         keyEquivalent: ""
                     )
                     item.target = self
-                    item.representedObject = app.bundleIdentifier
-                    item.image = listMenuIcon(for: app.bundleIdentifier)
+                    item.representedObject = AppFolderRemovalMenuTarget(
+                        tileID: presentedTileID,
+                        bundleIdentifier: app.bundleIdentifier
+                    )
+                    item.image =
+                        iconByBundleIdentifier[app.bundleIdentifier]
+                        ?? listMenuIcon(for: app.bundleIdentifier)
                     removeSubmenu.addItem(item)
                 }
                 removeRoot.submenu = removeSubmenu
@@ -971,11 +1152,21 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
 
         private func listMenuIcon(for bundleIdentifier: String) -> NSImage {
             let baseIcon: NSImage
-            if let overrideURL = DockyPreferences.shared.effectiveAppIconOverrideURL(forBundleIdentifier: bundleIdentifier),
-               let overrideImage = IconCacheService.shared.image(forImageFileURL: overrideURL) {
-                baseIcon = overrideImage
+            if let overrideURL =
+                DockyPreferences.shared.effectiveAppIconOverrideURL(
+                    forBundleIdentifier: bundleIdentifier
+                ) {
+                baseIcon =
+                    IconCacheService.shared.cachedIcon(
+                        forFileURL: overrideURL
+                    )
+                    ?? Self.genericAppIcon
             } else {
-                baseIcon = IconCacheService.shared.icon(forBundleIdentifier: bundleIdentifier)
+                baseIcon =
+                    IconCacheService.shared.cachedIcon(
+                        forBundleIdentifier: bundleIdentifier
+                    )
+                    ?? Self.genericAppIcon
             }
 
             let icon = baseIcon.copy() as? NSImage ?? baseIcon
@@ -983,37 +1174,102 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
             return icon
         }
 
+        private static let genericAppIcon =
+            NSImage(
+                systemSymbolName: "app.fill",
+                accessibilityDescription: nil
+            ) ?? NSImage()
+
+        private func startIconPreload(for apps: [AppTile]) {
+            iconPreloadTask?.cancel()
+            let requests = apps.map {
+                AppFolderListIconRequest(
+                    bundleIdentifier: $0.bundleIdentifier,
+                    overrideURL:
+                        DockyPreferences.shared
+                            .effectiveAppIconOverrideURL(
+                                forBundleIdentifier: $0.bundleIdentifier
+                            )
+                )
+            }
+            iconPreloadTask = Task {
+                await withTaskGroup(of: Void.self) { group in
+                    for request in requests {
+                        group.addTask {
+                            guard !Task.isCancelled else { return }
+                            if let overrideURL = request.overrideURL {
+                                _ = await IconCacheService.shared
+                                    .loadImageAsync(
+                                        forImageFileURL: overrideURL
+                                    )
+                            } else {
+                                _ = await IconCacheService.shared
+                                    .loadIconAsync(
+                                        forBundleIdentifier:
+                                            request.bundleIdentifier
+                                    )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         @objc private func openApp(_ sender: NSMenuItem) {
             guard let bundleIdentifier = sender.representedObject as? String else { return }
             WorkspaceService.shared.activateOrOpen(bundleIdentifier: bundleIdentifier)
         }
 
-        @objc private func openAllApps() {
-            for app in tile.apps {
-                WorkspaceService.shared.activateOrOpen(bundleIdentifier: app.bundleIdentifier)
+        @objc private func openAllApps(_ sender: NSMenuItem) {
+            guard let bundleIdentifiers =
+                    sender.representedObject as? [String] else {
+                return
+            }
+            for bundleIdentifier in bundleIdentifiers {
+                WorkspaceService.shared.activateOrOpen(
+                    bundleIdentifier: bundleIdentifier
+                )
             }
         }
 
         @objc private func removeApp(_ sender: NSMenuItem) {
-            guard let bundleIdentifier = sender.representedObject as? String else { return }
+            guard let target =
+                    sender.representedObject
+                        as? AppFolderRemovalMenuTarget else {
+                return
+            }
             TileStore.shared.removeAppFromFolder(
-                tileID: tileID,
-                bundleIdentifier: bundleIdentifier
+                tileID: target.tileID,
+                bundleIdentifier: target.bundleIdentifier
             )
         }
 
         private func popUp(menu: NSMenu, in view: NSView) {
-            let selector = NSSelectorFromString("_popUpMenuRelativeToRect:inView:preferredEdge:")
-            if menu.responds(to: selector) {
-                typealias Fn = @convention(c) (NSMenu, Selector, NSRect, NSView?, NSRectEdge) -> Void
-                let imp = menu.method(for: selector)
-                let fn = unsafeBitCast(imp, to: Fn.self)
-                fn(menu, selector, view.bounds, view, preferredEdge)
-                return
-            }
-
             menu.update()
-            menu.popUp(positioning: nil, at: NSPoint(x: view.bounds.midX - menu.size.width / 2, y: view.bounds.maxY), in: view)
+            let anchorRect = view.bounds
+            let anchor: NSPoint
+            switch preferredEdge {
+            case .minX:
+                anchor = NSPoint(x: anchorRect.minX, y: anchorRect.midY)
+            case .maxX:
+                anchor = NSPoint(x: anchorRect.maxX, y: anchorRect.midY)
+            case .minY:
+                anchor = NSPoint(
+                    x: anchorRect.midX - menu.size.width / 2,
+                    y: anchorRect.minY
+                )
+            case .maxY:
+                anchor = NSPoint(
+                    x: anchorRect.midX - menu.size.width / 2,
+                    y: anchorRect.maxY
+                )
+            @unknown default:
+                anchor = NSPoint(
+                    x: anchorRect.midX - menu.size.width / 2,
+                    y: anchorRect.maxY
+                )
+            }
+            menu.popUp(positioning: nil, at: anchor, in: view)
         }
 
         private func beginAutohideInterruption(for view: NSView) {
@@ -1028,6 +1284,21 @@ struct AppFolderListMenuPresenter: NSViewRepresentable {
     }
 }
 
+private struct AppFolderListIconRequest: Sendable {
+    let bundleIdentifier: String
+    let overrideURL: URL?
+}
+
+private final class AppFolderRemovalMenuTarget: NSObject {
+    let tileID: String
+    let bundleIdentifier: String
+
+    init(tileID: String, bundleIdentifier: String) {
+        self.tileID = tileID
+        self.bundleIdentifier = bundleIdentifier
+    }
+}
+
 struct AppFolderPopoverPresenter: NSViewRepresentable {
     let tile: AppFolderTile
     let tileID: String
@@ -1039,21 +1310,26 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> AppFolderPopoverAnchorView {
-        AppFolderPopoverAnchorView()
+        let view = AppFolderPopoverAnchorView()
+        view.onWindowChanged = {
+            [weak coordinator = context.coordinator, weak view] window in
+            guard window != nil, let view else { return }
+            coordinator?.anchorDidMoveToWindow(view)
+        }
+        return view
     }
 
     func updateNSView(_ nsView: AppFolderPopoverAnchorView, context: Context) {
         context.coordinator.update(tile: tile, tileID: tileID, isPresented: $isPresented, preferredEdge: preferredEdge)
-
-        if isPresented {
-            context.coordinator.show(relativeTo: nsView)
-        } else {
-            context.coordinator.close()
-        }
+        context.coordinator.setPresented(
+            isPresented,
+            relativeTo: nsView
+        )
     }
 
     static func dismantleNSView(_ nsView: AppFolderPopoverAnchorView, coordinator: Coordinator) {
-        coordinator.close()
+        nsView.onWindowChanged = nil
+        coordinator.tearDown()
     }
 
     final class Coordinator: NSObject, NSPopoverDelegate {
@@ -1070,6 +1346,15 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
         private var isPresented: Binding<Bool>
         private var preferredEdge: NSRectEdge
         private var mainWindowInteractionLease: MainWindowInteractionLease?
+        private var presentationGeneration = PresentationGeneration()
+        private weak var anchorView: NSView?
+        private var requestedPresented: Bool?
+        private var activePresentation:
+            PresentationGeneration.Token?
+        private var closeTransition:
+            PresentationGeneration.Token?
+        private var pendingReopen:
+            PresentationGeneration.Token?
         private var globalClickMonitor: Any?
         private var localClickMonitor: Any?
         private var dragEndSubscription: AnyCancellable?
@@ -1102,8 +1387,53 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
             )
         }
 
-        func show(relativeTo view: NSView) {
-            guard view.window != nil, !popover.isShown else { return }
+        func setPresented(_ presented: Bool, relativeTo view: NSView) {
+            anchorView = view
+            if requestedPresented == presented {
+                // The first representable update can precede window
+                // attachment. Retry the still-current intent once the anchor
+                // enters its AppKit window.
+                if presented,
+                   !popover.isShown,
+                   closeTransition == nil,
+                   pendingReopen == nil {
+                    requestOpen(relativeTo: view)
+                }
+                return
+            }
+
+            requestedPresented = presented
+            if presented {
+                requestOpen(relativeTo: view)
+            } else {
+                requestClose()
+            }
+        }
+
+        func anchorDidMoveToWindow(_ view: NSView) {
+            guard view.window != nil,
+                  requestedPresented == true,
+                  isPresented.wrappedValue,
+                  !popover.isShown,
+                  closeTransition == nil,
+                  pendingReopen == nil else {
+                return
+            }
+            requestOpen(relativeTo: view)
+        }
+
+        private func requestOpen(relativeTo view: NSView) {
+            guard view.window != nil else { return }
+
+            if closeTransition != nil {
+                pendingReopen = presentationGeneration.advance()
+                return
+            }
+            guard !popover.isShown else { return }
+
+            let presentation = presentationGeneration.advance()
+            activePresentation = presentation
+            pendingReopen = nil
             beginAutohideInterruption(for: view)
             // Size the popover for the current tile BEFORE showing.
             // Why: relying on SwiftUI's .onAppear to resize after show left the
@@ -1112,23 +1442,91 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
             // hit-test region.
             updateContentSize(AppFolderPopoverView.popoverSize(forAppCount: tile.apps.count))
             popover.show(relativeTo: anchorRect(in: view.bounds), of: view, preferredEdge: preferredEdge)
-            installClickAwayMonitors()
-            installDragEndSubscriptionIfNeeded()
+            installClickAwayMonitors(for: presentation)
+            installDragEndSubscriptionIfNeeded(for: presentation)
         }
 
-        func close() {
+        private func requestClose() {
+            let closure = presentationGeneration.advance()
+            activePresentation = nil
+            pendingReopen = nil
+            closeTransition = closure
+            removeClickAwayMonitors()
+            cancelDragEndSubscription()
+
+            if popover.isShown {
+                popover.performClose(nil)
+            } else {
+                closeTransition = nil
+                endAutohideInterruption()
+            }
+        }
+
+        func tearDown() {
+            requestedPresented = false
+            _ = presentationGeneration.advance()
+            activePresentation = nil
+            closeTransition = nil
+            pendingReopen = nil
             removeClickAwayMonitors()
             cancelDragEndSubscription()
             endAutohideInterruption()
+            popover.delegate = nil
             popover.performClose(nil)
         }
 
-        func popoverDidClose(_ notification: Notification) {
+        func popoverWillClose(_ notification: Notification) {
+            if closeTransition == nil {
+                closeTransition = presentationGeneration.advance()
+            }
+            activePresentation = nil
             removeClickAwayMonitors()
             cancelDragEndSubscription()
+        }
+
+        func popoverDidClose(_ notification: Notification) {
+            guard !popover.isShown else { return }
+            let completedClose = closeTransition
+            closeTransition = nil
+            activePresentation = nil
+            removeClickAwayMonitors()
+            cancelDragEndSubscription()
+
+            if let reopen = pendingReopen,
+               presentationGeneration.isCurrent(reopen),
+               requestedPresented == true,
+               isPresented.wrappedValue,
+               let anchorView {
+                pendingReopen = nil
+                DispatchQueue.main.async { [weak self, weak anchorView] in
+                    guard let self, let anchorView,
+                          self.presentationGeneration.isCurrent(reopen),
+                          self.requestedPresented == true,
+                          self.isPresented.wrappedValue,
+                          !self.popover.isShown else {
+                        return
+                    }
+                    self.requestOpen(relativeTo: anchorView)
+                }
+                return
+            }
+
+            pendingReopen = nil
             endAutohideInterruption()
-            guard isPresented.wrappedValue else { return }
-            DispatchQueue.main.async { [isPresented] in
+
+            guard let completedClose,
+                  presentationGeneration.isCurrent(completedClose),
+                  requestedPresented == true,
+                  isPresented.wrappedValue else {
+                return
+            }
+            DispatchQueue.main.async { [weak self, isPresented] in
+                guard let self,
+                      self.presentationGeneration.isCurrent(completedClose),
+                      self.requestedPresented == true,
+                      !self.popover.isShown else {
+                    return
+                }
                 isPresented.wrappedValue = false
             }
         }
@@ -1137,7 +1535,9 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
         /// observe the drag service so the popover closes the moment the drag
         /// ends — drop on us, drop elsewhere, or Esc. The dropFirst() skips
         /// the initial value so we only react to subsequent transitions.
-        private func installDragEndSubscriptionIfNeeded() {
+        private func installDragEndSubscriptionIfNeeded(
+            for presentation: PresentationGeneration.Token
+        ) {
             cancelDragEndSubscription()
             guard DockDragService.shared.kind != nil else { return }
             dragEndSubscription = DockDragService.shared.$kind
@@ -1145,7 +1545,9 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] kind in
                     guard kind == nil else { return }
-                    self?.dismissAfterDragEnd()
+                    self?.dismissAfterDragEnd(
+                        for: presentation
+                    )
                 }
         }
 
@@ -1154,16 +1556,23 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
             dragEndSubscription = nil
         }
 
-        private func dismissAfterDragEnd() {
+        private func dismissAfterDragEnd(
+            for presentation: PresentationGeneration.Token
+        ) {
+            guard presentationGeneration.isCurrent(presentation),
+                  activePresentation == presentation else {
+                return
+            }
             cancelDragEndSubscription()
             // Tiny delay lets any in-flight drop handler (which may also be
             // setting isPresented = false) finish cleanly before we close.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, isPresented] in
-                guard let self else { return }
-                if isPresented.wrappedValue {
-                    self.popover.performClose(nil)
-                    isPresented.wrappedValue = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self,
+                      self.presentationGeneration.isCurrent(presentation),
+                      self.activePresentation == presentation else {
+                    return
                 }
+                self.dismissPresentation(ifCurrent: presentation)
             }
         }
 
@@ -1171,17 +1580,31 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
         /// clicks, but it's unreliable when the host window is non-activating
         /// (Docky's dock window). Belt-and-suspenders: explicit monitors
         /// catch any mouse-down outside the popover and close it.
-        private func installClickAwayMonitors() {
+        private func installClickAwayMonitors(
+            for presentation: PresentationGeneration.Token
+        ) {
             removeClickAwayMonitors()
             let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
             globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
-                self?.dismissForClickAway()
+                DispatchQueue.main.async {
+                    self?.dismissPresentation(
+                        ifCurrent: presentation
+                    )
+                }
             }
             localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
                 guard let self else { return event }
+                guard self.presentationGeneration.isCurrent(presentation),
+                      self.activePresentation == presentation else {
+                    return event
+                }
                 let popoverWindow = self.popover.contentViewController?.view.window
                 if event.window !== popoverWindow {
-                    self.dismissForClickAway()
+                    DispatchQueue.main.async { [weak self] in
+                        self?.dismissPresentation(
+                            ifCurrent: presentation
+                        )
+                    }
                 }
                 return event
             }
@@ -1198,14 +1621,19 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
             }
         }
 
-        private func dismissForClickAway() {
-            removeClickAwayMonitors()
-            DispatchQueue.main.async { [weak self, isPresented] in
-                self?.popover.performClose(nil)
-                if isPresented.wrappedValue {
-                    isPresented.wrappedValue = false
-                }
+        private func dismissPresentation(
+            ifCurrent presentation: PresentationGeneration.Token
+        ) {
+            guard presentationGeneration.isCurrent(presentation),
+                  activePresentation == presentation,
+                  requestedPresented == true else {
+                return
             }
+            requestedPresented = false
+            if isPresented.wrappedValue {
+                isPresented.wrappedValue = false
+            }
+            requestClose()
         }
 
         private func beginAutohideInterruption(for view: NSView) {
@@ -1243,6 +1671,13 @@ struct AppFolderPopoverPresenter: NSViewRepresentable {
 }
 
 final class AppFolderPopoverAnchorView: NSView {
+    var onWindowChanged: ((NSWindow?) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onWindowChanged?(window)
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
     }

@@ -14,8 +14,10 @@ final class TrashService: ObservableObject {
     @Published private(set) var isEmpty = true
 
     private let trashURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash", isDirectory: true)
-    private var trashFileDescriptor: CInt = -1
+    private let worker = TrashFilesystemWorker()
     private var trashSource: DispatchSourceFileSystemObject?
+    private var refreshGeneration: UInt64 = 0
+    private var watcherGeneration: UInt64 = 0
 
     private init() {
         refresh()
@@ -24,45 +26,91 @@ final class TrashService: ObservableObject {
 
     deinit {
         trashSource?.cancel()
-        if trashFileDescriptor >= 0 {
-            close(trashFileDescriptor)
-        }
     }
 
     func refresh() {
-        let fileManager = FileManager.default
-        let contents = try? fileManager.contentsOfDirectory(
-            at: trashURL,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )
-
-        isEmpty = contents?.isEmpty != false
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let empty = await worker.isEmpty(trashURL)
+            guard !Task.isCancelled,
+                  refreshGeneration == generation else {
+                return
+            }
+            isEmpty = empty
+        }
     }
 
     private func startWatchingTrashDirectory() {
-        let descriptor = open(trashURL.path, O_EVTONLY)
-        guard descriptor >= 0 else {
-            return
+        watcherGeneration &+= 1
+        let generation = watcherGeneration
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let descriptor = await worker.openWatcher(trashURL)
+            guard !Task.isCancelled,
+                  watcherGeneration == generation,
+                  descriptor >= 0 else {
+                if descriptor >= 0 {
+                    close(descriptor)
+                }
+                return
+            }
+
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: descriptor,
+                eventMask: [.write, .rename, .delete],
+                queue: DispatchQueue.main
+            )
+            source.setEventHandler { [weak self] in
+                self?.refresh()
+            }
+            source.setCancelHandler { [descriptor] in
+                close(descriptor)
+            }
+            trashSource = source
+            source.resume()
         }
+    }
+}
 
-        trashFileDescriptor = descriptor
+/// Keeps even the first directory read and vnode descriptor open off the UI
+/// actor. Trash can contain thousands of entries or live on a slow home
+/// volume; neither condition should delay dock clicks.
+private nonisolated final class TrashFilesystemWorker:
+    @unchecked Sendable {
+    private let queue = DispatchQueue(
+        label: "gt.quintero.Docky.trash-filesystem",
+        qos: .utility,
+        attributes: .concurrent
+    )
 
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: descriptor,
-            eventMask: [.write, .rename, .delete],
-            queue: DispatchQueue.main
-        )
-
-        source.setEventHandler { [weak self] in
-            self?.refresh()
+    func isEmpty(_ trashURL: URL) async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                let enumerator = FileManager.default.enumerator(
+                    at: trashURL,
+                    includingPropertiesForKeys: nil,
+                    options: [
+                        .skipsHiddenFiles,
+                        .skipsPackageDescendants,
+                    ]
+                )
+                continuation.resume(returning: enumerator?.nextObject() == nil)
+            }
         }
+    }
 
-        source.setCancelHandler { [descriptor] in
-            close(descriptor)
+    func openWatcher(_ trashURL: URL) async -> CInt {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                continuation.resume(
+                    returning: open(
+                        trashURL.path,
+                        O_EVTONLY | O_CLOEXEC
+                    )
+                )
+            }
         }
-
-        trashSource = source
-        source.resume()
     }
 }

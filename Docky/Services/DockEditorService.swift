@@ -9,46 +9,59 @@ import Foundation
 final class DockEditorService {
     static let shared = DockEditorService()
 
-    private static let dockBundleIdentifier = "com.apple.dock"
-    private static let finderBundleIdentifier = "com.apple.finder"
-    private static let dockPlistFilename = "com.apple.dock.plist"
+    nonisolated private static let dockBundleIdentifier = "com.apple.dock"
+    nonisolated private static let finderBundleIdentifier = "com.apple.finder"
+    nonisolated private static let dockPlistFilename =
+        "com.apple.dock.plist"
+    private let worker = DockPlistEditingWorker()
 
     private init() {}
 
     @discardableResult
-    func removePinnedApp(bundleIdentifier: String) -> Bool {
-        setPinnedApp(bundleIdentifier: bundleIdentifier, pinned: false)
+    func removePinnedApp(bundleIdentifier: String) async -> Bool {
+        await setPinnedApp(bundleIdentifier: bundleIdentifier, pinned: false)
     }
 
     @discardableResult
-    func setPinnedApp(bundleIdentifier: String, pinned: Bool) -> Bool {
+    func setPinnedApp(
+        bundleIdentifier: String,
+        pinned: Bool
+    ) async -> Bool {
         guard !bundleIdentifier.isEmpty, bundleIdentifier != Self.finderBundleIdentifier else {
             return false
         }
 
-        let updated = updateDockPlist { plist in
-            guard var apps = plist["persistent-apps"] as? [[String: Any]] else {
-                return false
-            }
-
-            let existingIndex = apps.firstIndex { entry in
-                pinnedAppBundleIdentifier(in: entry) == bundleIdentifier
-            }
-
-            if pinned {
-                guard existingIndex == nil, let entry = makePinnedAppEntry(bundleIdentifier: bundleIdentifier, plist: plist) else {
+        let updated = await worker.perform {
+            Self.updateDockPlist { plist in
+                guard var apps =
+                        plist["persistent-apps"] as? [[String: Any]] else {
                     return false
                 }
-                apps.append(entry)
-            } else {
-                guard let existingIndex else {
-                    return false
-                }
-                apps.remove(at: existingIndex)
-            }
 
-            plist["persistent-apps"] = apps
-            return true
+                let existingIndex = apps.firstIndex { entry in
+                    Self.pinnedAppBundleIdentifier(in: entry)
+                        == bundleIdentifier
+                }
+
+                if pinned {
+                    guard existingIndex == nil,
+                          let entry = Self.makePinnedAppEntry(
+                            bundleIdentifier: bundleIdentifier,
+                            plist: plist
+                          ) else {
+                        return false
+                    }
+                    apps.append(entry)
+                } else {
+                    guard let existingIndex else {
+                        return false
+                    }
+                    apps.remove(at: existingIndex)
+                }
+
+                plist["persistent-apps"] = apps
+                return true
+            }
         }
 
         guard updated else {
@@ -61,28 +74,38 @@ final class DockEditorService {
     }
 
     @discardableResult
-    func setPinnedItemOrder(ids: [String]) -> Bool {
+    func setPinnedItemOrder(ids: [String]) async -> Bool {
         guard !ids.isEmpty else {
             return false
         }
 
-        let updated = updateDockPlist { plist in
-            guard let apps = plist["persistent-apps"] as? [[String: Any]],
-                  apps.count == ids.count else {
-                return false
+        let updated = await worker.perform {
+            Self.updateDockPlist { plist in
+                guard let apps =
+                        plist["persistent-apps"] as? [[String: Any]],
+                      apps.count == ids.count else {
+                    return false
+                }
+
+                let appsByID = Dictionary(
+                    uniqueKeysWithValues: apps.enumerated().map {
+                        index,
+                        entry in
+                        (
+                            Self.pinnedItemID(in: entry, at: index),
+                            entry
+                        )
+                    }
+                )
+
+                let orderedApps = ids.compactMap { appsByID[$0] }
+                guard orderedApps.count == apps.count else {
+                    return false
+                }
+
+                plist["persistent-apps"] = orderedApps
+                return true
             }
-
-            let appsByID = Dictionary(uniqueKeysWithValues: apps.enumerated().map { index, entry in
-                (pinnedItemID(in: entry, at: index), entry)
-            })
-
-            let orderedApps = ids.compactMap { appsByID[$0] }
-            guard orderedApps.count == apps.count else {
-                return false
-            }
-
-            plist["persistent-apps"] = orderedApps
-            return true
         }
 
         guard updated else {
@@ -94,14 +117,16 @@ final class DockEditorService {
         return true
     }
 
-    private func updateDockPlist(_ mutate: (inout [String: Any]) -> Bool) -> Bool {
+    nonisolated private static func updateDockPlist(
+        _ mutate: (inout [String: Any]) -> Bool
+    ) -> Bool {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Preferences")
             .appendingPathComponent(Self.dockPlistFilename)
         return updateDockPlist(at: url, mutate)
     }
 
-    private func updateDockPlist(
+    nonisolated private static func updateDockPlist(
         at url: URL,
         _ mutate: (inout [String: Any]) -> Bool
     ) -> Bool {
@@ -144,7 +169,9 @@ final class DockEditorService {
             .forEach { $0.forceTerminate() }
     }
 
-    private func pinnedAppBundleIdentifier(in entry: [String: Any]) -> String? {
+    nonisolated private static func pinnedAppBundleIdentifier(
+        in entry: [String: Any]
+    ) -> String? {
         let tileData = entry["tile-data"] as? [String: Any]
         let fileData = tileData?["file-data"] as? [String: Any]
         let urlString = fileData?["_CFURLString"] as? String
@@ -154,7 +181,10 @@ final class DockEditorService {
             ?? url.flatMap { Bundle(url: $0)?.bundleIdentifier }
     }
 
-    private func pinnedItemID(in entry: [String: Any], at index: Int) -> String {
+    nonisolated private static func pinnedItemID(
+        in entry: [String: Any],
+        at index: Int
+    ) -> String {
         if let guid = (entry["GUID"] as? NSNumber)?.stringValue {
             return guid
         }
@@ -177,9 +207,14 @@ final class DockEditorService {
         return "persistent-apps:\(index):\(signature)"
     }
 
-    private func makePinnedAppEntry(bundleIdentifier: String, plist: [String: Any]) -> [String: Any]? {
+    nonisolated private static func makePinnedAppEntry(
+        bundleIdentifier: String,
+        plist: [String: Any]
+    ) -> [String: Any]? {
         if let recentApps = plist["recent-apps"] as? [[String: Any]],
-           let existing = recentApps.first(where: { pinnedAppBundleIdentifier(in: $0) == bundleIdentifier }) {
+           let existing = recentApps.first(where: {
+               pinnedAppBundleIdentifier(in: $0) == bundleIdentifier
+           }) {
             var copied = existing
             copied["GUID"] = NSNumber(value: Int.random(in: 1...Int(UInt32.max)))
             return copied
@@ -223,7 +258,17 @@ final class DockEditorService {
         ]
     }
 
-    private func plistDateValue(_ date: Date) -> NSNumber {
+    nonisolated private static func plistDateValue(
+        _ date: Date
+    ) -> NSNumber {
         NSNumber(value: Int64(date.timeIntervalSinceReferenceDate * 1_000_000))
+    }
+}
+
+private actor DockPlistEditingWorker {
+    func perform(
+        _ operation: @Sendable () -> Bool
+    ) -> Bool {
+        operation()
     }
 }

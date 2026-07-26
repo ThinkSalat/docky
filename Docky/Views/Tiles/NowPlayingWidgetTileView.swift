@@ -7,6 +7,79 @@ import AppKit
 import CoreImage
 import SwiftUI
 
+private nonisolated struct NowPlayingArtworkRequest:
+    Hashable,
+    Sendable {
+    let bundleIdentifier: String
+    let revision: String
+}
+
+private nonisolated final class NowPlayingArtworkPresentation:
+    @unchecked Sendable {
+    let request: NowPlayingArtworkRequest
+    let image: NSImage
+    let tintColor: NSColor
+
+    init(
+        request: NowPlayingArtworkRequest,
+        image: NSImage,
+        tintColor: NSColor
+    ) {
+        self.request = request
+        self.image = image
+        self.tintColor = tintColor
+    }
+}
+
+private nonisolated enum NowPlayingArtworkWorker {
+    static func prepare(
+        data: Data,
+        request: NowPlayingArtworkRequest
+    ) -> NowPlayingArtworkPresentation? {
+        guard let decoded = LocalImageDecoder.decode(data: data) else {
+            return nil
+        }
+        let tint = prominentColor(from: decoded.cgImage)
+            ?? (NSColor.windowBackgroundColor.blended(
+                withFraction: 0.18,
+                of: .black
+            ) ?? .windowBackgroundColor)
+        return NowPlayingArtworkPresentation(
+            request: request,
+            image: decoded.image,
+            tintColor: tint.usingColorSpace(.deviceRGB) ?? tint
+        )
+    }
+
+    private static func prominentColor(from image: CGImage) -> NSColor? {
+        let ciImage = CIImage(cgImage: image)
+        let extent = ciImage.extent
+        guard !extent.isEmpty,
+              let filter = CIFilter(name: "CIAreaAverage") else {
+            return nil
+        }
+        filter.setValue(ciImage, forKey: kCIInputImageKey)
+        filter.setValue(CIVector(cgRect: extent), forKey: kCIInputExtentKey)
+        guard let outputImage = filter.outputImage else { return nil }
+
+        var rgba = [UInt8](repeating: 0, count: 4)
+        CIContext(options: nil).render(
+            outputImage,
+            toBitmap: &rgba,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return NSColor(
+            red: CGFloat(rgba[0]) / 255,
+            green: CGFloat(rgba[1]) / 255,
+            blue: CGFloat(rgba[2]) / 255,
+            alpha: 1
+        ).withSystemEffect(.pressed)
+    }
+}
+
 struct NowPlayingWidgetTileView: View {
     let tile: WidgetTile
     let cornerRadius: CGFloat
@@ -17,6 +90,8 @@ struct NowPlayingWidgetTileView: View {
     @ObservedObject private var mediaPlayback = MediaPlaybackService.shared
     @State private var isHovering = false
     @State private var isLyricsOverlayPresented = false
+    @State private var artworkPresentation:
+        NowPlayingArtworkPresentation?
 
     var body: some View {
         #if DEBUG
@@ -61,6 +136,9 @@ struct NowPlayingWidgetTileView: View {
         .opacity(isExpandedPreviewOpen && !isExpanded ? 0.5 : 1)
         .animation(.easeOut(duration: 0.12), value: isExpandedPreviewOpen)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .task(id: artworkRequest) {
+            await updateArtwork(for: artworkRequest)
+        }
     }
 
     @ViewBuilder
@@ -398,8 +476,7 @@ struct NowPlayingWidgetTileView: View {
 
     @ViewBuilder
     private func artworkView(size: CGFloat?, artworkCornerRadius: CGFloat) -> some View {
-        if let artworkData = playbackState?.artworkData,
-           let artworkImage = NSImage(data: artworkData),
+        if let artworkImage = currentArtworkPresentation?.image,
            playbackState?.isPresentable == true {
             Image(nsImage: artworkImage)
                 .resizable()
@@ -511,18 +588,39 @@ struct NowPlayingWidgetTileView: View {
         mediaPlayback.state(for: effectiveBundleIdentifier)
     }
 
+    private var artworkRequest: NowPlayingArtworkRequest? {
+        guard let state = playbackState,
+              state.isPresentable,
+              state.artworkData != nil,
+              let revision = state.artworkRevision else {
+            return nil
+        }
+        return NowPlayingArtworkRequest(
+            bundleIdentifier: state.bundleIdentifier,
+            revision: revision
+        )
+    }
+
+    private var currentArtworkPresentation:
+        NowPlayingArtworkPresentation? {
+        guard artworkPresentation?.request == artworkRequest else {
+            return nil
+        }
+        return artworkPresentation
+    }
+
     private var prominentTintColor: NSColor {
         guard playbackState?.isPresentable == true else {
-            return (NSColor.windowBackgroundColor.blended(withFraction: 0.18, of: .black) ?? .windowBackgroundColor)
+            return fallbackTintColor
         }
-        
-        if let artworkData = playbackState?.artworkData,
-           let artworkImage = NSImage(data: artworkData),
-           let extractedColor = Self.prominentColor(from: artworkImage) {
-            return extractedColor.usingColorSpace(.deviceRGB) ?? extractedColor
-        }
+        return currentArtworkPresentation?.tintColor ?? fallbackTintColor
+    }
 
-        return (NSColor.windowBackgroundColor.blended(withFraction: 0.18, of: .black) ?? .windowBackgroundColor)
+    private var fallbackTintColor: NSColor {
+        NSColor.windowBackgroundColor.blended(
+            withFraction: 0.18,
+            of: .black
+        ) ?? .windowBackgroundColor
     }
 
     private var usesDarkForeground: Bool {
@@ -538,10 +636,18 @@ struct NowPlayingWidgetTileView: View {
     }
 
     private var ownerDisplayName: String {
-        playbackState?.displayName
-            ?? (NSWorkspace.shared.urlForApplication(withBundleIdentifier: effectiveBundleIdentifier).map {
-                FileManager.default.displayName(atPath: $0.path)
-            } ?? "")
+        if let displayName = playbackState?.displayName,
+           !displayName.isEmpty {
+            return displayName
+        }
+        if effectiveBundleIdentifier
+            == MediaPlaybackService.genericNowPlayingOwnerBundleIdentifier {
+            return String(localized: "Now Playing")
+        }
+        // The service resolves application names asynchronously through the
+        // shared LaunchServices resolver. Until that arrives, keep the UI
+        // human-readable instead of exposing a raw reverse-DNS identifier.
+        return String(localized: "Now Playing")
     }
 
     private var playbackTitle: String {
@@ -582,45 +688,30 @@ struct NowPlayingWidgetTileView: View {
         }
     }
 
-    private static let ciContext = CIContext(options: nil)
-
-    private static func prominentColor(from image: NSImage) -> NSColor? {
-        guard let tiffData = image.tiffRepresentation,
-              let ciImage = CIImage(data: tiffData) else {
-            return nil
+    private func updateArtwork(
+        for request: NowPlayingArtworkRequest?
+    ) async {
+        guard let request,
+              let state = playbackState,
+              state.bundleIdentifier == request.bundleIdentifier,
+              state.artworkRevision == request.revision,
+              let data = state.artworkData else {
+            artworkPresentation = nil
+            return
         }
-
-        let extent = ciImage.extent
-        guard !extent.isEmpty,
-              let filter = CIFilter(name: "CIAreaAverage") else {
-            return nil
+        let prepared = await Task.detached(
+            priority: .userInitiated
+        ) {
+            NowPlayingArtworkWorker.prepare(
+                data: data,
+                request: request
+            )
+        }.value
+        guard !Task.isCancelled,
+              artworkRequest == request else {
+            return
         }
-
-        filter.setValue(ciImage, forKey: kCIInputImageKey)
-        filter.setValue(CIVector(cgRect: extent), forKey: kCIInputExtentKey)
-
-        guard let outputImage = filter.outputImage else {
-            return nil
-        }
-
-        var rgba = [UInt8](repeating: 0, count: 4)
-        ciContext.render(
-            outputImage,
-            toBitmap: &rgba,
-            rowBytes: 4,
-            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
-            format: .RGBA8,
-            colorSpace: CGColorSpaceCreateDeviceRGB()
-        )
-
-        let baseColor = NSColor(
-            red: CGFloat(rgba[0]) / 255,
-            green: CGFloat(rgba[1]) / 255,
-            blue: CGFloat(rgba[2]) / 255,
-            alpha: 1
-        )
-
-        return baseColor.withSystemEffect(.pressed)
+        artworkPresentation = prepared
     }
 }
 

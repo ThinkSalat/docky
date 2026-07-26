@@ -9,7 +9,7 @@
 
 import Foundation
 
-enum DockPlistReader {
+nonisolated enum DockPlistReader {
     private static let domain = "com.apple.dock" as CFString
     private static let keys: [String] = [
         "orientation", "tilesize", "largesize", "magnification",

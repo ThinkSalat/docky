@@ -11,6 +11,7 @@ final class SmartOrganizeProgressChipWindowController: NSWindowController {
     private weak var mainWindow: MainWindow?
     private var cancellables: Set<AnyCancellable> = []
     private var mainWindowInteractionLease: MainWindowInteractionLease?
+    private var presentationGeneration = PresentationGeneration()
     private let animationDuration: TimeInterval = 0.16
     private let chipGap: CGFloat = 10
     private let preferences = DockyPreferences.shared
@@ -86,6 +87,7 @@ final class SmartOrganizeProgressChipWindowController: NSWindowController {
 
     private func presentChip() {
         guard let window else { return }
+        _ = presentationGeneration.advance()
         updateFrame()
         beginMainWindowInteraction()
         window.orderFront(nil)
@@ -93,8 +95,14 @@ final class SmartOrganizeProgressChipWindowController: NSWindowController {
     }
 
     private func dismissChip() {
+        let dismissal = presentationGeneration.advance()
         animateWindowAlpha(to: 0) { [weak self] in
-            self?.endMainWindowInteraction()
+            guard let self else { return }
+            guard self.presentationGeneration.isCurrent(dismissal),
+                  !SmartOrganizeProgressService.shared.isPresented else {
+                return
+            }
+            self.endMainWindowInteraction()
         }
     }
 
@@ -141,8 +149,10 @@ final class SmartOrganizeProgressChipWindowController: NSWindowController {
 
     private func configureHiddenWindowState() {
         guard let window else { return }
+        _ = presentationGeneration.advance()
         window.alphaValue = 0
         window.ignoresMouseEvents = true
+        endMainWindowInteraction()
     }
 
     private func animateWindowAlpha(to alphaValue: CGFloat, completion: (() -> Void)? = nil) {
