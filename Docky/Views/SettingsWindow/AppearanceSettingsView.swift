@@ -109,7 +109,11 @@ struct AppearanceSettingsView: View {
 
                         if preferences.activeIndicatorImagePath != nil {
                             Button("Clear") {
-                                preferences.activeIndicatorImagePath = nil
+                                preferences.clearUserAsset(
+                                    slot: "appearance:active-indicator"
+                                ) {
+                                    preferences.activeIndicatorImagePath = nil
+                                }
                             }
                         }
                     }
@@ -171,7 +175,13 @@ struct AppearanceSettingsView: View {
                 title: "Center",
                 path: preferences.dividerImagePath,
                 onChoose: { chooseDividerImage(slot: .global) },
-                onClear: { preferences.dividerImagePath = nil }
+                onClear: {
+                    preferences.clearUserAsset(
+                        slot: "appearance:divider-global"
+                    ) {
+                        preferences.dividerImagePath = nil
+                    }
+                }
             )
 
             Divider()
@@ -180,7 +190,13 @@ struct AppearanceSettingsView: View {
                 title: "Left Side",
                 path: preferences.leftDividerImagePath,
                 onChoose: { chooseDividerImage(slot: .left) },
-                onClear: { preferences.leftDividerImagePath = nil }
+                onClear: {
+                    preferences.clearUserAsset(
+                        slot: "appearance:divider-left"
+                    ) {
+                        preferences.leftDividerImagePath = nil
+                    }
+                }
             )
 
             Divider()
@@ -198,7 +214,13 @@ struct AppearanceSettingsView: View {
                         title: nil,
                         path: preferences.rightDividerImagePath,
                         onChoose: { chooseDividerImage(slot: .right) },
-                        onClear: { preferences.rightDividerImagePath = nil }
+                        onClear: {
+                            preferences.clearUserAsset(
+                                slot: "appearance:divider-right"
+                            ) {
+                                preferences.rightDividerImagePath = nil
+                            }
+                        }
                     )
                 }
             }
@@ -461,7 +483,13 @@ struct AppearanceSettingsView: View {
                     Spacer()
                     Button("Choose Image...") { chooseTileHoverBackgroundImage() }
                     if preferences.tileHoverBackgroundImagePath != nil {
-                        Button("Clear") { preferences.tileHoverBackgroundImagePath = nil }
+                        Button("Clear") {
+                            preferences.clearUserAsset(
+                                slot: "appearance:tile-hover-background"
+                            ) {
+                                preferences.tileHoverBackgroundImagePath = nil
+                            }
+                        }
                     }
                 }
 
@@ -538,7 +566,13 @@ struct AppearanceSettingsView: View {
                     Spacer()
                     Button("Choose Image...") { chooseTileActiveBackgroundImage() }
                     if preferences.tileActiveBackgroundImagePath != nil {
-                        Button("Clear") { preferences.tileActiveBackgroundImagePath = nil }
+                        Button("Clear") {
+                            preferences.clearUserAsset(
+                                slot: "appearance:tile-active-background"
+                            ) {
+                                preferences.tileActiveBackgroundImagePath = nil
+                            }
+                        }
                     }
                 }
 
@@ -879,7 +913,11 @@ struct AppearanceSettingsView: View {
 
                     if preferences.windowBackgroundImagePath != nil {
                         Button("Clear") {
-                            preferences.windowBackgroundImagePath = nil
+                            preferences.clearUserAsset(
+                                slot: "appearance:window-background"
+                            ) {
+                                preferences.windowBackgroundImagePath = nil
+                            }
                         }
                     }
                 }
@@ -1174,7 +1212,20 @@ struct AppearanceSettingsView: View {
             return
         }
 
-        preferences.activeIndicatorImagePath = url.path
+        Task { @MainActor in
+            guard let path = await preferences.importUserAssetPath(
+                from: url,
+                slot: "appearance:active-indicator"
+            ) else {
+                return
+            }
+            preferences.commitImportedUserAssetPath(
+                path,
+                slot: "appearance:active-indicator"
+            ) {
+                preferences.activeIndicatorImagePath = $0
+            }
+        }
     }
 
     private func chooseWindowBackgroundImage() {
@@ -1189,7 +1240,20 @@ struct AppearanceSettingsView: View {
             return
         }
 
-        preferences.windowBackgroundImagePath = url.path
+        Task { @MainActor in
+            guard let path = await preferences.importUserAssetPath(
+                from: url,
+                slot: "appearance:window-background"
+            ) else {
+                return
+            }
+            preferences.commitImportedUserAssetPath(
+                path,
+                slot: "appearance:window-background"
+            ) {
+                preferences.windowBackgroundImagePath = $0
+            }
+        }
     }
 
     private func chooseTileActiveBackgroundImage() {
@@ -1204,7 +1268,20 @@ struct AppearanceSettingsView: View {
             return
         }
 
-        preferences.tileActiveBackgroundImagePath = url.path
+        Task { @MainActor in
+            guard let path = await preferences.importUserAssetPath(
+                from: url,
+                slot: "appearance:tile-active-background"
+            ) else {
+                return
+            }
+            preferences.commitImportedUserAssetPath(
+                path,
+                slot: "appearance:tile-active-background"
+            ) {
+                preferences.tileActiveBackgroundImagePath = $0
+            }
+        }
     }
 
     private var selectedActiveBackgroundImageName: String? {
@@ -1272,7 +1349,20 @@ struct AppearanceSettingsView: View {
             return
         }
 
-        preferences.tileHoverBackgroundImagePath = url.path
+        Task { @MainActor in
+            guard let path = await preferences.importUserAssetPath(
+                from: url,
+                slot: "appearance:tile-hover-background"
+            ) else {
+                return
+            }
+            preferences.commitImportedUserAssetPath(
+                path,
+                slot: "appearance:tile-hover-background"
+            ) {
+                preferences.tileHoverBackgroundImagePath = $0
+            }
+        }
     }
 
     private var selectedHoverBackgroundImageName: String? {
@@ -1417,13 +1507,48 @@ struct AppearanceSettingsView: View {
             return
         }
 
-        switch slot {
-        case .global:
-            preferences.dividerImagePath = url.path
-        case .left:
-            preferences.leftDividerImagePath = url.path
-        case .right:
-            preferences.rightDividerImagePath = url.path
+        Task { @MainActor in
+            switch slot {
+            case .global:
+                guard let path = await preferences.importUserAssetPath(
+                    from: url,
+                    slot: "appearance:divider-global"
+                ) else {
+                    return
+                }
+                preferences.commitImportedUserAssetPath(
+                    path,
+                    slot: "appearance:divider-global"
+                ) {
+                    preferences.dividerImagePath = $0
+                }
+            case .left:
+                guard let path = await preferences.importUserAssetPath(
+                    from: url,
+                    slot: "appearance:divider-left"
+                ) else {
+                    return
+                }
+                preferences.commitImportedUserAssetPath(
+                    path,
+                    slot: "appearance:divider-left"
+                ) {
+                    preferences.leftDividerImagePath = $0
+                }
+            case .right:
+                guard let path = await preferences.importUserAssetPath(
+                    from: url,
+                    slot: "appearance:divider-right"
+                ) else {
+                    return
+                }
+                preferences.commitImportedUserAssetPath(
+                    path,
+                    slot: "appearance:divider-right"
+                ) {
+                    preferences.rightDividerImagePath = $0
+                }
+            }
         }
     }
 }

@@ -59,26 +59,46 @@ nonisolated private struct DiagnosticTraceEvent: Sendable {
     let fields: [String: DiagnosticTraceValue]
 }
 
+/// A Sendable export capability captured from DiagnosticsTrace on MainActor.
+/// Feedback preparation invokes it on its own worker; the underlying writer
+/// still serializes the copy behind all previously-enqueued trace writes.
+nonisolated struct DiagnosticsTraceExportSource: Sendable {
+    private let copyAction: @Sendable (URL) throws -> Void
+
+    fileprivate init(
+        copyAction: @escaping @Sendable (URL) throws -> Void
+    ) {
+        self.copyAction = copyAction
+    }
+
+    func copyRetainedLogs(to destinationDirectory: URL) throws {
+        try copyAction(destinationDirectory)
+    }
+}
+
 /// Owns all potentially blocking work. Events reach this object only after
 /// the main-actor caller has captured a small, Sendable value snapshot.
 nonisolated private final class DiagnosticTraceWriter: @unchecked Sendable {
-    private static let maximumFileBytes: UInt64 = 2 * 1_024 * 1_024
+    private static let maximumFileBytes = 2 * 1_024 * 1_024
     private static let subsystem = "gt.quintero.Docky"
 
     private let queue = DispatchQueue(
         label: "gt.quintero.Docky.DiagnosticsTrace",
         qos: .utility
     )
-    private let currentLogURL: URL
-    private let previousLogURL: URL
+    private let logStore: SecureBoundedLogStore
     private let timestampFormatter = ISO8601DateFormatter()
-    private var didSecureStorage = false
     private var lastWriteErrorType: String?
     private var lastWriteErrorUptime: TimeInterval = 0
 
-    init(currentLogURL: URL, previousLogURL: URL) {
-        self.currentLogURL = currentLogURL
-        self.previousLogURL = previousLogURL
+    init(applicationSupportURL: URL) {
+        logStore = SecureBoundedLogStore.applicationSupport(
+            at: applicationSupportURL,
+            descending: ["Docky", "Diagnostics"],
+            currentName: "docky-events.jsonl",
+            previousName: "docky-events.previous.jsonl",
+            maximumFileBytes: Self.maximumFileBytes
+        )
     }
 
     func enqueue(_ event: DiagnosticTraceEvent) {
@@ -89,29 +109,7 @@ nonisolated private final class DiagnosticTraceWriter: @unchecked Sendable {
 
     func copyRetainedLogs(to destinationDirectory: URL) throws {
         try queue.sync {
-            let fileManager = FileManager.default
-            try fileManager.createDirectory(
-                at: destinationDirectory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
-            try fileManager.setAttributes(
-                [.posixPermissions: 0o700],
-                ofItemAtPath: destinationDirectory.path
-            )
-            for source in [previousLogURL, currentLogURL]
-                where fileManager.fileExists(atPath: source.path) {
-                let destination = destinationDirectory
-                    .appending(path: source.lastPathComponent)
-                if fileManager.fileExists(atPath: destination.path) {
-                    try fileManager.removeItem(at: destination)
-                }
-                try fileManager.copyItem(at: source, to: destination)
-                try fileManager.setAttributes(
-                    [.posixPermissions: 0o600],
-                    ofItemAtPath: destination.path
-                )
-            }
+            try logStore.copyRetainedLogs(to: destinationDirectory)
         }
     }
 
@@ -159,85 +157,8 @@ nonisolated private final class DiagnosticTraceWriter: @unchecked Sendable {
     }
 
     private func append(_ data: Data) {
-        let fileManager = FileManager.default
         do {
-            let directory = currentLogURL.deletingLastPathComponent()
-            if !fileManager.fileExists(atPath: directory.path) {
-                try fileManager.createDirectory(
-                    at: directory,
-                    withIntermediateDirectories: true,
-                    attributes: [.posixPermissions: 0o700]
-                )
-                didSecureStorage = true
-            } else if !didSecureStorage {
-                try fileManager.setAttributes(
-                    [.posixPermissions: 0o700],
-                    ofItemAtPath: directory.path
-                )
-                for url in [previousLogURL, currentLogURL]
-                    where fileManager.fileExists(atPath: url.path) {
-                    try fileManager.setAttributes(
-                        [.posixPermissions: 0o600],
-                        ofItemAtPath: url.path
-                    )
-                }
-                didSecureStorage = true
-            }
-
-            let currentSize = (
-                try? currentLogURL.resourceValues(
-                    forKeys: [.fileSizeKey]
-                ).fileSize
-            ).map(UInt64.init) ?? 0
-
-            if currentSize + UInt64(data.count) > Self.maximumFileBytes,
-               fileManager.fileExists(atPath: currentLogURL.path) {
-                let replacementURL = directory.appending(
-                    path: ".docky-events-\(UUID().uuidString).tmp"
-                )
-                defer {
-                    try? fileManager.removeItem(at: replacementURL)
-                }
-
-                // Copy first, then atomically replace the older generation.
-                // A failed copy or replace leaves the retained generation
-                // intact instead of deleting it before the new one is ready.
-                try fileManager.copyItem(
-                    at: currentLogURL,
-                    to: replacementURL
-                )
-                try fileManager.setAttributes(
-                    [.posixPermissions: 0o600],
-                    ofItemAtPath: replacementURL.path
-                )
-                if fileManager.fileExists(atPath: previousLogURL.path) {
-                    _ = try fileManager.replaceItemAt(
-                        previousLogURL,
-                        withItemAt: replacementURL
-                    )
-                } else {
-                    try fileManager.moveItem(
-                        at: replacementURL,
-                        to: previousLogURL
-                    )
-                }
-                try fileManager.removeItem(at: currentLogURL)
-            }
-
-            if !fileManager.fileExists(atPath: currentLogURL.path) {
-                _ = fileManager.createFile(
-                    atPath: currentLogURL.path,
-                    contents: nil,
-                    attributes: [.posixPermissions: 0o600]
-                )
-            }
-
-            let handle = try FileHandle(forWritingTo: currentLogURL)
-            defer {
-                try? handle.close()
-            }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: data)
+            try logStore.append(data)
         } catch {
             let errorType = String(describing: type(of: error))
             let now = ProcessInfo.processInfo.systemUptime
@@ -304,13 +225,13 @@ final class DiagnosticsTrace {
                 appropriateFor: nil,
                 create: false
             )
-        ) ?? fileManager.temporaryDirectory
-        let directory = applicationSupport
-            .appending(path: "Docky", directoryHint: .isDirectory)
-            .appending(path: "Diagnostics", directoryHint: .isDirectory)
+        ) ?? fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support",
+                isDirectory: true
+            )
         writer = DiagnosticTraceWriter(
-            currentLogURL: directory.appending(path: "docky-events.jsonl"),
-            previousLogURL: directory.appending(path: "docky-events.previous.jsonl")
+            applicationSupportURL: applicationSupport
         )
     }
 
@@ -373,7 +294,14 @@ final class DiagnosticsTrace {
                 processIdentifier: ProcessInfo.processInfo.processIdentifier,
                 category: category.rawValue,
                 event: event,
-                fields: fields.mapValues(Self.traceValue)
+                fields: Dictionary(
+                    uniqueKeysWithValues: fields.map { key, value in
+                        (
+                            key,
+                            Self.traceValue(field: key, value: value)
+                        )
+                    }
+                )
             )
         )
     }
@@ -390,6 +318,16 @@ final class DiagnosticsTrace {
     /// append, so draining the serial queue is sufficient for consistency.
     func copyRetainedLogs(to destinationDirectory: URL) throws {
         try writer.copyRetainedLogs(to: destinationDirectory)
+    }
+
+    /// Captures only a Sendable copy capability. Calling it later does not
+    /// touch DiagnosticsTrace's MainActor state; file I/O remains serialized
+    /// by the writer queue.
+    func makeExportSource() -> DiagnosticsTraceExportSource {
+        let writer = writer
+        return DiagnosticsTraceExportSource { destinationDirectory in
+            try writer.copyRetainedLogs(to: destinationDirectory)
+        }
     }
 
     /// Drains queued writes. Used only during orderly termination and export;
@@ -491,10 +429,18 @@ final class DiagnosticsTrace {
         }
     }
 
-    nonisolated private static func traceValue(_ value: Any) -> DiagnosticTraceValue {
+    nonisolated private static func traceValue(
+        field: String,
+        value: Any
+    ) -> DiagnosticTraceValue {
         switch value {
         case let value as String:
-            return .string(value)
+            return .string(
+                DiagnosticPrivacy.sanitizeTraceString(
+                    field: field,
+                    value: value
+                )
+            )
         case let value as Bool:
             return .bool(value)
         case let value as Int:
@@ -527,7 +473,14 @@ final class DiagnosticsTrace {
             }
             return .double(value.doubleValue)
         case let value as [String]:
-            return .strings(value)
+            return .strings(
+                value.map {
+                    DiagnosticPrivacy.sanitizeTraceString(
+                        field: field,
+                        value: $0
+                    )
+                }
+            )
         case let value as [Int]:
             return .signedIntegers(value.map(Int64.init))
         default:

@@ -28,11 +28,10 @@
 //      while the theme is in use.
 //
 
-import AppKit
 import Foundation
 
 /// Top-level manifest stored at `<bundle>/theme.json`.
-struct ThemeManifest: Codable, Equatable {
+nonisolated struct ThemeManifest: Codable, Equatable, Sendable {
     /// Bumped when the manifest format changes in a non-additive way.
     /// New optional fields don't require a bump, readers ignore
     /// unknown keys via `Codable`'s default behavior.
@@ -63,11 +62,11 @@ struct ThemeManifest: Codable, Equatable {
     var layout: ThemeLayout?
 }
 
-struct ThemeLayout: Codable, Equatable {
+nonisolated struct ThemeLayout: Codable, Equatable, Sendable {
     var insertions: [ThemeLayoutInsertion]?
 }
 
-struct ThemeLayoutInsertion: Codable, Equatable {
+nonisolated struct ThemeLayoutInsertion: Codable, Equatable, Sendable {
     /// Tile content to inject. Structural primitives: `"spacer"`,
     /// `"flexibleSpacer"`, `"divider"`. Widget kinds also accepted ,
     /// any raw value of `WidgetKind` (e.g. `"search"`, `"calendar"`,
@@ -91,7 +90,7 @@ struct ThemeLayoutInsertion: Codable, Equatable {
     var span: Int?
 }
 
-struct ThemeBehavior: Codable, Equatable {
+nonisolated struct ThemeBehavior: Codable, Equatable, Sendable {
     /// Raw value of `DockWindowAxisSizing` ("fitContent" or "fullAxis").
     var windowAxisSizing: String?
     /// Resting tile (icon) size in points.
@@ -106,7 +105,7 @@ struct ThemeBehavior: Codable, Equatable {
     var showsActivePinnedSeparator: Bool?
 }
 
-struct ThemeAppearance: Codable, Equatable {
+nonisolated struct ThemeAppearance: Codable, Equatable, Sendable {
     var disablesGlassLook: Bool?
     var tile: ThemeTile?
     var window: ThemeWindow?
@@ -122,14 +121,14 @@ struct ThemeAppearance: Codable, Equatable {
     var widgets: ThemeWidgets?
 }
 
-struct ThemeWidgets: Codable, Equatable {
+nonisolated struct ThemeWidgets: Codable, Equatable, Sendable {
     var oneX: ThemeWidgetSpan?
     var twoX: ThemeWidgetSpan?
     var threeX: ThemeWidgetSpan?
     var fourX: ThemeWidgetSpan?
 }
 
-struct ThemeWidgetSpan: Codable, Equatable {
+nonisolated struct ThemeWidgetSpan: Codable, Equatable, Sendable {
     /// Inner padding between the tile bounds and the widget content.
     /// `0` makes the widget bleed all the way to the tile edge.
     var contentPadding: CGFloat?
@@ -144,7 +143,7 @@ struct ThemeWidgetSpan: Codable, Equatable {
     var ignoresAddedPaddings: Bool?
 }
 
-struct ThemeTile: Codable, Equatable {
+nonisolated struct ThemeTile: Codable, Equatable, Sendable {
     /// Raw value of `DockClipShape` (e.g. "rounded", "circle").
     var clipShape: String?
     var verticalPadding: CGFloat?
@@ -163,14 +162,14 @@ struct ThemeTile: Codable, Equatable {
     var active: ThemeTileActive?
 }
 
-struct ThemeTileActive: Codable, Equatable {
+nonisolated struct ThemeTileActive: Codable, Equatable, Sendable {
     var backgroundColor: ThemeColor?
     var backgroundImage: String?
     var backgroundOpacity: CGFloat?
     var backgroundCornerRadius: CGFloat?
 }
 
-struct ThemeTileHover: Codable, Equatable {
+nonisolated struct ThemeTileHover: Codable, Equatable, Sendable {
     /// Multiplied into the tile's opacity while hovered.
     var opacity: CGFloat?
     /// Scale applied to the icon contents while hovered.
@@ -187,7 +186,7 @@ struct ThemeTileHover: Codable, Equatable {
     var backgroundCornerRadius: CGFloat?
 }
 
-struct ThemeWindow: Codable, Equatable {
+nonisolated struct ThemeWindow: Codable, Equatable, Sendable {
     /// Raw value of `DockClipShape`.
     var clipShape: String?
     var cornerRadius: CGFloat?
@@ -215,21 +214,21 @@ struct ThemeWindow: Codable, Equatable {
     var borderWidth: CGFloat?
 }
 
-struct ThemeEdgeValues: Codable, Equatable {
+nonisolated struct ThemeEdgeValues: Codable, Equatable, Sendable {
     var top: CGFloat?
     var leading: CGFloat?
     var bottom: CGFloat?
     var trailing: CGFloat?
 }
 
-struct ThemeCornerValues: Codable, Equatable {
+nonisolated struct ThemeCornerValues: Codable, Equatable, Sendable {
     var topLeading: CGFloat?
     var topTrailing: CGFloat?
     var bottomLeading: CGFloat?
     var bottomTrailing: CGFloat?
 }
 
-struct ThemeIndicators: Codable, Equatable {
+nonisolated struct ThemeIndicators: Codable, Equatable, Sendable {
     /// Raw value of `DockTileIndicatorShape`.
     var shape: String?
     /// Path relative to `<bundle>/`.
@@ -240,7 +239,7 @@ struct ThemeIndicators: Codable, Equatable {
     var divider: ThemeDivider?
 }
 
-struct ThemeDivider: Codable, Equatable {
+nonisolated struct ThemeDivider: Codable, Equatable, Sendable {
     /// Path relative to `<bundle>/`.
     var left: String?
     /// Path relative to `<bundle>/`.
@@ -261,13 +260,13 @@ struct ThemeDivider: Codable, Equatable {
 /// Color + radius + opacity triple. Used by `ThemeAppearance.iconShadow`
 /// and easy to repurpose for any other drop-shadow appearance field
 /// (e.g. text shadow, window shadow) without inventing another schema.
-struct ThemeShadow: Codable, Equatable {
+nonisolated struct ThemeShadow: Codable, Equatable, Sendable {
     var color: ThemeColor?
     var radius: CGFloat?
     var opacity: CGFloat?
 }
 
-struct ThemeColor: Codable, Equatable {
+nonisolated struct ThemeColor: Codable, Equatable, Sendable {
     /// Component-based variants set r/g/b (0…1). Named variants set
     /// `name` and may omit components entirely. Both are optional so
     /// either form decodes without bespoke `init(from:)`.
@@ -286,54 +285,4 @@ struct ThemeColor: Codable, Equatable {
     ///   `white`, `black`, `clear`
     var name: String?
 
-    /// Snapshot RGB representation. Returns the named color's current
-    /// RGB sample when only `name` is set, so anything that has to
-    /// persist a value (user overrides) can capture a moment in time.
-    /// `nil` when neither RGB nor a resolvable name was supplied.
-    var dockColor: DockColor? {
-        if let nsColor {
-            return DockColor(nsColor: nsColor)
-        }
-        return nil
-    }
-
-    /// Live NSColor, named colors are looked up on every read so theme
-    /// fields like `"accent"` track the user's current system tint.
-    var nsColor: NSColor? {
-        if let name, let resolved = Self.resolveNamedColor(name) {
-            return resolved
-        }
-        if let r, let g, let b {
-            return NSColor(deviceRed: r, green: g, blue: b, alpha: 1)
-        }
-        return nil
-    }
-
-    static func resolveNamedColor(_ name: String) -> NSColor? {
-        switch name.lowercased() {
-        case "accent", "tint", "controlaccent": return .controlAccentColor
-        case "label": return .labelColor
-        case "secondarylabel": return .secondaryLabelColor
-        case "tertiarylabel": return .tertiaryLabelColor
-        case "quaternarylabel": return .quaternaryLabelColor
-        case "systemblue": return .systemBlue
-        case "systemred": return .systemRed
-        case "systemgreen": return .systemGreen
-        case "systemyellow": return .systemYellow
-        case "systemorange": return .systemOrange
-        case "systempurple": return .systemPurple
-        case "systempink": return .systemPink
-        case "systemteal": return .systemTeal
-        case "systemindigo": return .systemIndigo
-        case "systemmint":
-            if #available(macOS 12.0, *) { return .systemMint }
-            return .systemTeal
-        case "systembrown": return .systemBrown
-        case "systemgray": return .systemGray
-        case "white": return .white
-        case "black": return .black
-        case "clear": return .clear
-        default: return nil
-        }
-    }
 }

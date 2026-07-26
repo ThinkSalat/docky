@@ -5,28 +5,47 @@
 
 import Foundation
 
-enum WidgetOwnerBundleIdentifiers {
-    static let calendar = "com.apple.iCal"
-    static let reminders = "com.apple.reminders"
-    static let batteries = "gt.quintero.Docky.batteries"
-    static let systemStatus = "gt.quintero.Docky.system-status"
-    static let weather = "gt.quintero.Docky.weather"
-    static let genericNowPlaying = "gt.quintero.Docky.now-playing"
-    static let search = "gt.quintero.Docky.search"
-    static let photoFrame = "gt.quintero.Docky.photo-frame"
+nonisolated enum WidgetOwnerBundleIdentifiers {
+    nonisolated static let calendar = "com.apple.iCal"
+    nonisolated static let reminders = "com.apple.reminders"
+    nonisolated static let batteries = "gt.quintero.Docky.batteries"
+    nonisolated static let systemStatus = "gt.quintero.Docky.system-status"
+    nonisolated static let weather = "gt.quintero.Docky.weather"
+    nonisolated static let genericNowPlaying =
+        "gt.quintero.Docky.now-playing"
+    nonisolated static let search = "gt.quintero.Docky.search"
+    nonisolated static let photoFrame = "gt.quintero.Docky.photo-frame"
 }
 
-struct WidgetRegistration: Equatable, Identifiable {
+nonisolated struct WidgetRegistration:
+    Equatable,
+    Identifiable,
+    Sendable {
     let kind: WidgetKind
     let ownerBundleIdentifier: String
     let defaultSpan: TileSpan
     let includesInPalette: Bool
     let includesInSmartStack: Bool
 
-    var id: String {
+    nonisolated init(
+        kind: WidgetKind,
+        ownerBundleIdentifier: String,
+        defaultSpan: TileSpan,
+        includesInPalette: Bool,
+        includesInSmartStack: Bool
+    ) {
+        self.kind = kind
+        self.ownerBundleIdentifier = ownerBundleIdentifier
+        self.defaultSpan = defaultSpan
+        self.includesInPalette = includesInPalette
+        self.includesInSmartStack = includesInSmartStack
+    }
+
+    nonisolated var id: String {
         "\(ownerBundleIdentifier):\(kind.rawValue)"
     }
 
+    @MainActor
     func makeTile(span: TileSpan? = nil) -> WidgetTile {
         WidgetTile(
             identifier: id,
@@ -38,8 +57,8 @@ struct WidgetRegistration: Equatable, Identifiable {
     }
 }
 
-enum WidgetCatalog {
-    static let calendar = WidgetRegistration(
+nonisolated enum WidgetCatalog {
+    nonisolated static let calendar = WidgetRegistration(
         kind: .calendar,
         ownerBundleIdentifier: WidgetOwnerBundleIdentifiers.calendar,
         defaultSpan: .three,
@@ -47,7 +66,7 @@ enum WidgetCatalog {
         includesInSmartStack: true
     )
 
-    static let reminders = WidgetRegistration(
+    nonisolated static let reminders = WidgetRegistration(
         kind: .reminders,
         ownerBundleIdentifier: WidgetOwnerBundleIdentifiers.reminders,
         defaultSpan: .three,
@@ -55,7 +74,7 @@ enum WidgetCatalog {
         includesInSmartStack: true
     )
 
-    static let calendarDate = WidgetRegistration(
+    nonisolated static let calendarDate = WidgetRegistration(
         kind: .calendarDate,
         ownerBundleIdentifier: WidgetOwnerBundleIdentifiers.calendar,
         defaultSpan: .one,
@@ -63,7 +82,7 @@ enum WidgetCatalog {
         includesInSmartStack: false
     )
 
-    static let batteries = WidgetRegistration(
+    nonisolated static let batteries = WidgetRegistration(
         kind: .batteries,
         ownerBundleIdentifier: WidgetOwnerBundleIdentifiers.batteries,
         defaultSpan: .three,
@@ -71,7 +90,7 @@ enum WidgetCatalog {
         includesInSmartStack: true
     )
 
-    static let systemStatus = WidgetRegistration(
+    nonisolated static let systemStatus = WidgetRegistration(
         kind: .systemStatus,
         ownerBundleIdentifier: WidgetOwnerBundleIdentifiers.systemStatus,
         defaultSpan: .three,
@@ -79,7 +98,7 @@ enum WidgetCatalog {
         includesInSmartStack: true
     )
 
-    static let weather = WidgetRegistration(
+    nonisolated static let weather = WidgetRegistration(
         kind: .weather,
         ownerBundleIdentifier: WidgetOwnerBundleIdentifiers.weather,
         defaultSpan: .three,
@@ -87,7 +106,7 @@ enum WidgetCatalog {
         includesInSmartStack: true
     )
 
-    static let genericNowPlaying = WidgetRegistration(
+    nonisolated static let genericNowPlaying = WidgetRegistration(
         kind: .nowPlaying,
         ownerBundleIdentifier: WidgetOwnerBundleIdentifiers.genericNowPlaying,
         defaultSpan: .three,
@@ -95,7 +114,7 @@ enum WidgetCatalog {
         includesInSmartStack: false
     )
 
-    static let search = WidgetRegistration(
+    nonisolated static let search = WidgetRegistration(
         kind: .search,
         ownerBundleIdentifier: WidgetOwnerBundleIdentifiers.search,
         defaultSpan: .two,
@@ -106,7 +125,7 @@ enum WidgetCatalog {
         includesInSmartStack: false
     )
 
-    static let photoFrame = WidgetRegistration(
+    nonisolated static let photoFrame = WidgetRegistration(
         kind: .photoFrame,
         ownerBundleIdentifier: WidgetOwnerBundleIdentifiers.photoFrame,
         defaultSpan: .two,
@@ -114,7 +133,7 @@ enum WidgetCatalog {
         includesInSmartStack: false
     )
 
-    static let builtInRegistrations: [WidgetRegistration] = [
+    nonisolated static let builtInRegistrations: [WidgetRegistration] = [
         calendar,
         calendarDate,
         reminders,
@@ -128,15 +147,15 @@ enum WidgetCatalog {
 
     /// Only built-in registrations are executable. Legacy external-widget
     /// records remain in profiles but are never added to the palette.
-    static var staticRegistrations: [WidgetRegistration] {
+    nonisolated static var staticRegistrations: [WidgetRegistration] {
         builtInRegistrations
     }
 
-    static var paletteRegistrations: [WidgetRegistration] {
+    nonisolated static var paletteRegistrations: [WidgetRegistration] {
         staticRegistrations.filter(\.includesInPalette)
     }
 
-    static var smartStackRegistrations: [WidgetRegistration] {
+    nonisolated static var smartStackRegistrations: [WidgetRegistration] {
         staticRegistrations.filter(\.includesInSmartStack)
     }
 
@@ -146,7 +165,8 @@ enum WidgetCatalog {
     /// Now-Playing widgets are discovered dynamically and aren't part
     /// of `smartStackRegistrations`, so they appear automatically as
     /// soon as a supported media app starts playing.
-    static let defaultVisibleSmartStackOwnerBundleIdentifiers: Set<String> = [
+    nonisolated static let
+        defaultVisibleSmartStackOwnerBundleIdentifiers: Set<String> = [
         WidgetOwnerBundleIdentifiers.calendar,
         WidgetOwnerBundleIdentifiers.weather,
     ]
@@ -155,7 +175,8 @@ enum WidgetCatalog {
     /// `defaultVisibleSmartStackOwnerBundleIdentifiers` — formatted as
     /// the `hiddenWidgetOwnerBundleIdentifiers` argument the
     /// persistence layer expects when creating a new smart stack item.
-    static let defaultHiddenSmartStackOwnerBundleIdentifiers: [String] =
+    nonisolated static let
+        defaultHiddenSmartStackOwnerBundleIdentifiers: [String] =
         smartStackRegistrations
             .map(\.ownerBundleIdentifier)
             .filter { !defaultVisibleSmartStackOwnerBundleIdentifiers.contains($0) }

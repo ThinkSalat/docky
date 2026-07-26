@@ -333,6 +333,7 @@ private struct SettingsDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            LegacyUserAssetRecoveryView()
             selectedView
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }

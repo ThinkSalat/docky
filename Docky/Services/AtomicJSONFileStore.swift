@@ -6,11 +6,871 @@
 //  crash without exposing a partially-written document. The primary and
 //  backup are complete JSON documents; callers provide semantic validation.
 //
+//  Before a replacement is renamed into place, its contents and metadata are
+//  synchronized with F_FULLFSYNC (or fsync when the filesystem does not
+//  support F_FULLFSYNC). After the atomic rename, the parent directory is
+//  synchronized on a best-effort basis. A post-rename directory-sync failure
+//  is deliberately not reported: the replacement is already authoritative
+//  and cannot be rolled back safely. Consequently, all supported filesystems
+//  get process-crash atomicity; filesystems supporting the full file and
+//  directory sync sequence additionally get the strongest sudden-power-loss
+//  durability macOS exposes.
+//
 
 import Foundation
 import Darwin
 
-struct AtomicJSONFileStore<Value: Codable> {
+nonisolated enum SecureOwnedStorageError: Error, LocalizedError {
+    case invalidDirectoryURL(String)
+    case invalidPathComponent(String)
+    case invalidFileName(String)
+    case unexpectedType(String)
+    case unexpectedOwner(String)
+    case unexpectedLinkCount(String)
+    case fileTooLarge(name: String, maximumBytes: Int)
+    case writeTooLarge(name: String, maximumBytes: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidDirectoryURL:
+            return "The secure-storage directory URL is invalid."
+        case .invalidPathComponent:
+            return "A secure-storage path component is invalid."
+        case .invalidFileName:
+            return "A secure-storage file name is invalid."
+        case .unexpectedType:
+            return "A secure-storage entry has an unexpected file type."
+        case .unexpectedOwner:
+            return "A secure-storage entry is not owned by the current user."
+        case .unexpectedLinkCount:
+            return "A secure-storage file is not uniquely linked."
+        case .fileTooLarge(_, let maximumBytes):
+            return "A secure-storage file exceeds the \(maximumBytes)-byte limit."
+        case .writeTooLarge(_, let maximumBytes):
+            return "A secure-storage write exceeds the \(maximumBytes)-byte limit."
+        }
+    }
+}
+
+/// Retains a verified directory descriptor and performs every child operation
+/// relative to it. Production callers anchor this under the canonical user
+/// Application Support directory; tests can anchor an isolated temporary
+/// directory without weakening the production path.
+nonisolated final class SecureOwnedDirectory: @unchecked Sendable {
+    let url: URL
+
+    private let descriptor: Int32
+    private let ownerUID: uid_t
+
+    private init(url: URL, descriptor: Int32, ownerUID: uid_t) {
+        self.url = url
+        self.descriptor = descriptor
+        self.ownerUID = ownerUID
+    }
+
+    deinit {
+        _ = Darwin.close(descriptor)
+    }
+
+    static func applicationSupport(
+        at applicationSupportURL: URL,
+        descending components: [String]
+    ) throws -> SecureOwnedDirectory {
+        let canonicalURL = try canonicalExistingDirectoryURL(
+            applicationSupportURL
+        )
+        let rootDescriptor = try openCanonicalDirectoryTree(
+            at: canonicalURL,
+            ownerUID: getuid()
+        )
+        return try descend(
+            from: rootDescriptor,
+            rootURL: canonicalURL,
+            components: components,
+            ownerUID: getuid(),
+            secureRootMode: false
+        )
+    }
+
+    /// Test/injection entry point. The nearest existing lexical ancestor is
+    /// opened without following its final component, and every missing
+    /// descendant is then created and opened with `mkdirat`/`openat`.
+    static func openOrCreate(
+        at directoryURL: URL
+    ) throws -> SecureOwnedDirectory {
+        guard directoryURL.isFileURL, directoryURL.path.hasPrefix("/") else {
+            throw SecureOwnedStorageError.invalidDirectoryURL(
+                directoryURL.path
+            )
+        }
+
+        let targetURL = directoryURL.standardizedFileURL
+        var existingAncestor = targetURL
+        var missingComponents: [String] = []
+
+        while !(try pathEntryExists(at: existingAncestor)) {
+            let parent = existingAncestor.deletingLastPathComponent()
+            guard parent.path != existingAncestor.path else {
+                throw SecureOwnedStorageError.invalidDirectoryURL(
+                    targetURL.path
+                )
+            }
+            let component = existingAncestor.lastPathComponent
+            try validateComponent(component)
+            missingComponents.insert(component, at: 0)
+            existingAncestor = parent
+        }
+
+        let rootDescriptor = try openVerifiedDirectory(
+            at: existingAncestor,
+            ownerUID: getuid()
+        )
+        return try descend(
+            from: rootDescriptor,
+            rootURL: existingAncestor,
+            components: missingComponents,
+            ownerUID: getuid(),
+            secureRootMode: missingComponents.isEmpty
+        )
+    }
+
+    func entryExists(named name: String) throws -> Bool {
+        try validateFileName(name)
+        return try metadataIfPresent(named: name) != nil
+    }
+
+    func readRegularFile(
+        named name: String,
+        maximumBytes: Int
+    ) throws -> Data? {
+        try validateFileName(name)
+        guard maximumBytes >= 0 else {
+            throw SecureOwnedStorageError.fileTooLarge(
+                name: name,
+                maximumBytes: maximumBytes
+            )
+        }
+
+        let fileDescriptor = name.withCString {
+            Darwin.openat(
+                descriptor,
+                $0,
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+            )
+        }
+        guard fileDescriptor >= 0 else {
+            let errorCode = errno
+            if errorCode == ENOENT {
+                return nil
+            }
+            throw Self.posixError(
+                errorCode,
+                path: url.appendingPathComponent(name).path
+            )
+        }
+        defer { _ = Darwin.close(fileDescriptor) }
+
+        let metadata = try verifiedRegularFileMetadata(
+            descriptor: fileDescriptor,
+            name: name
+        )
+        guard metadata.st_size >= 0,
+              UInt64(metadata.st_size) <= UInt64(maximumBytes) else {
+            throw SecureOwnedStorageError.fileTooLarge(
+                name: name,
+                maximumBytes: maximumBytes
+            )
+        }
+
+        var data = Data()
+        data.reserveCapacity(Int(metadata.st_size))
+        var buffer = [UInt8](
+            repeating: 0,
+            count: min(64 * 1_024, max(maximumBytes + 1, 1))
+        )
+        while true {
+            let count = buffer.withUnsafeMutableBytes {
+                Darwin.read(
+                    fileDescriptor,
+                    $0.baseAddress,
+                    $0.count
+                )
+            }
+            if count == 0 {
+                return data
+            }
+            if count < 0 {
+                if errno == EINTR {
+                    continue
+                }
+                throw Self.posixError(
+                    errno,
+                    path: url.appendingPathComponent(name).path
+                )
+            }
+            guard data.count <= maximumBytes - count else {
+                throw SecureOwnedStorageError.fileTooLarge(
+                    name: name,
+                    maximumBytes: maximumBytes
+                )
+            }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+    }
+
+    func writeRegularFileAtomically(
+        _ data: Data,
+        named name: String,
+        maximumBytes: Int,
+        beforeSynchronize: ((URL) throws -> Void)? = nil,
+        afterRename: ((URL) throws -> Void)? = nil
+    ) throws {
+        try validateFileName(name)
+        guard data.count <= maximumBytes else {
+            throw SecureOwnedStorageError.writeTooLarge(
+                name: name,
+                maximumBytes: maximumBytes
+            )
+        }
+
+        // Reject a symlink, directory, device, or foreign-owned destination
+        // rather than letting renameat silently replace it.
+        if let metadata = try metadataIfPresent(named: name) {
+            try verifyRegularFileMetadata(metadata, name: name)
+        }
+
+        let temporaryName = ".\(name).\(UUID().uuidString).tmp"
+        let temporaryURL = url.appendingPathComponent(temporaryName)
+        let temporaryDescriptor = temporaryName.withCString {
+            Darwin.openat(
+                descriptor,
+                $0,
+                O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                mode_t(0o600)
+            )
+        }
+        guard temporaryDescriptor >= 0 else {
+            throw Self.posixError(errno, path: temporaryURL.path)
+        }
+
+        var didRename = false
+        defer {
+            _ = Darwin.close(temporaryDescriptor)
+            if !didRename {
+                temporaryName.withCString {
+                    _ = Darwin.unlinkat(descriptor, $0, 0)
+                }
+            }
+        }
+
+        _ = try verifiedRegularFileMetadata(
+            descriptor: temporaryDescriptor,
+            name: temporaryName
+        )
+        guard Darwin.fchmod(temporaryDescriptor, mode_t(0o600)) == 0 else {
+            throw Self.posixError(errno, path: temporaryURL.path)
+        }
+        try Self.writeAll(data, to: temporaryDescriptor, path: temporaryURL.path)
+        try beforeSynchronize?(temporaryURL)
+        try Self.synchronizeFileDescriptor(
+            temporaryDescriptor,
+            path: temporaryURL.path
+        )
+
+        // Re-check the destination immediately before publication. The
+        // directory is private and retained, so other users cannot race this
+        // name between validation and rename.
+        if let metadata = try metadataIfPresent(named: name) {
+            try verifyRegularFileMetadata(metadata, name: name)
+        }
+        let renameResult = temporaryName.withCString { sourceName in
+            name.withCString { destinationName in
+                Darwin.renameat(
+                    descriptor,
+                    sourceName,
+                    descriptor,
+                    destinationName
+                )
+            }
+        }
+        guard renameResult == 0 else {
+            throw Self.posixError(
+                errno,
+                path: url.appendingPathComponent(name).path
+            )
+        }
+        didRename = true
+
+        // The rename is the commit point. Directory synchronization is
+        // best-effort because reporting failure after publication would make
+        // the caller's in-memory state diverge from the committed file.
+        try? afterRename?(url)
+        try? synchronizeDirectory()
+    }
+
+    /// Appends one entry without following a final symlink. Returns false
+    /// when the current generation must be rotated before the append.
+    func appendRegularFile(
+        _ data: Data,
+        named name: String,
+        maximumBytes: Int
+    ) throws -> Bool {
+        try validateFileName(name)
+        guard data.count <= maximumBytes else {
+            throw SecureOwnedStorageError.writeTooLarge(
+                name: name,
+                maximumBytes: maximumBytes
+            )
+        }
+
+        let fileURL = url.appendingPathComponent(name)
+        let fileDescriptor = name.withCString {
+            Darwin.openat(
+                descriptor,
+                $0,
+                O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC
+                    | O_NOFOLLOW | O_NONBLOCK,
+                mode_t(0o600)
+            )
+        }
+        guard fileDescriptor >= 0 else {
+            throw Self.posixError(errno, path: fileURL.path)
+        }
+        defer { _ = Darwin.close(fileDescriptor) }
+
+        let metadata = try verifiedRegularFileMetadata(
+            descriptor: fileDescriptor,
+            name: name
+        )
+        guard metadata.st_size >= 0,
+              UInt64(metadata.st_size) <= UInt64(maximumBytes) else {
+            throw SecureOwnedStorageError.fileTooLarge(
+                name: name,
+                maximumBytes: maximumBytes
+            )
+        }
+        let currentSize = Int(metadata.st_size)
+        guard currentSize <= maximumBytes - data.count else {
+            return false
+        }
+        guard Darwin.fchmod(fileDescriptor, mode_t(0o600)) == 0 else {
+            throw Self.posixError(errno, path: fileURL.path)
+        }
+        try Self.writeAll(data, to: fileDescriptor, path: fileURL.path)
+        return true
+    }
+
+    func rotateRegularFile(
+        from sourceName: String,
+        to destinationName: String
+    ) throws {
+        try validateFileName(sourceName)
+        try validateFileName(destinationName)
+
+        guard let sourceMetadata = try metadataIfPresent(named: sourceName)
+        else {
+            return
+        }
+        try verifyRegularFileMetadata(sourceMetadata, name: sourceName)
+        if let destinationMetadata =
+            try metadataIfPresent(named: destinationName) {
+            try verifyRegularFileMetadata(
+                destinationMetadata,
+                name: destinationName
+            )
+        }
+
+        let result = sourceName.withCString { source in
+            destinationName.withCString { destination in
+                Darwin.renameat(
+                    descriptor,
+                    source,
+                    descriptor,
+                    destination
+                )
+            }
+        }
+        guard result == 0 else {
+            throw Self.posixError(
+                errno,
+                path: url.appendingPathComponent(destinationName).path
+            )
+        }
+        try? synchronizeDirectory()
+    }
+
+    private func metadataIfPresent(named name: String) throws -> stat? {
+        var metadata = stat()
+        let result = name.withCString {
+            Darwin.fstatat(
+                descriptor,
+                $0,
+                &metadata,
+                AT_SYMLINK_NOFOLLOW
+            )
+        }
+        if result == 0 {
+            return metadata
+        }
+        let errorCode = errno
+        if errorCode == ENOENT {
+            return nil
+        }
+        throw Self.posixError(
+            errorCode,
+            path: url.appendingPathComponent(name).path
+        )
+    }
+
+    private func verifiedRegularFileMetadata(
+        descriptor fileDescriptor: Int32,
+        name: String
+    ) throws -> stat {
+        var metadata = stat()
+        guard Darwin.fstat(fileDescriptor, &metadata) == 0 else {
+            throw Self.posixError(
+                errno,
+                path: url.appendingPathComponent(name).path
+            )
+        }
+        try verifyRegularFileMetadata(metadata, name: name)
+        return metadata
+    }
+
+    private func verifyRegularFileMetadata(
+        _ metadata: stat,
+        name: String
+    ) throws {
+        guard metadata.st_mode & S_IFMT == S_IFREG else {
+            throw SecureOwnedStorageError.unexpectedType(name)
+        }
+        guard metadata.st_uid == ownerUID else {
+            throw SecureOwnedStorageError.unexpectedOwner(name)
+        }
+        guard metadata.st_nlink == 1 else {
+            throw SecureOwnedStorageError.unexpectedLinkCount(name)
+        }
+    }
+
+    private func synchronizeDirectory() throws {
+        guard Darwin.fsync(descriptor) == 0 else {
+            throw Self.posixError(errno, path: url.path)
+        }
+    }
+
+    private static func descend(
+        from rootDescriptor: Int32,
+        rootURL: URL,
+        components: [String],
+        ownerUID: uid_t,
+        secureRootMode: Bool
+    ) throws -> SecureOwnedDirectory {
+        var currentDescriptor = rootDescriptor
+        var currentURL = rootURL
+        var ownsCurrentDescriptor = true
+
+        do {
+            if secureRootMode {
+                guard Darwin.fchmod(
+                    currentDescriptor,
+                    mode_t(0o700)
+                ) == 0 else {
+                    throw posixError(errno, path: currentURL.path)
+                }
+            }
+
+            for component in components {
+                try validateComponent(component)
+                let createResult = component.withCString {
+                    Darwin.mkdirat(
+                        currentDescriptor,
+                        $0,
+                        mode_t(0o700)
+                    )
+                }
+                if createResult != 0, errno != EEXIST {
+                    throw posixError(
+                        errno,
+                        path: currentURL.appendingPathComponent(component).path
+                    )
+                }
+
+                let childDescriptor = component.withCString {
+                    Darwin.openat(
+                        currentDescriptor,
+                        $0,
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+                    )
+                }
+                guard childDescriptor >= 0 else {
+                    throw posixError(
+                        errno,
+                        path: currentURL.appendingPathComponent(component).path
+                    )
+                }
+                do {
+                    try verifyDirectoryDescriptor(
+                        childDescriptor,
+                        path: currentURL
+                            .appendingPathComponent(component).path,
+                        ownerUID: ownerUID
+                    )
+                    guard Darwin.fchmod(
+                        childDescriptor,
+                        mode_t(0o700)
+                    ) == 0 else {
+                        throw posixError(
+                            errno,
+                            path: currentURL
+                                .appendingPathComponent(component).path
+                        )
+                    }
+                } catch {
+                    _ = Darwin.close(childDescriptor)
+                    throw error
+                }
+
+                _ = Darwin.close(currentDescriptor)
+                currentDescriptor = childDescriptor
+                currentURL.appendPathComponent(component, isDirectory: true)
+            }
+
+            ownsCurrentDescriptor = false
+            return SecureOwnedDirectory(
+                url: currentURL,
+                descriptor: currentDescriptor,
+                ownerUID: ownerUID
+            )
+        } catch {
+            if ownsCurrentDescriptor {
+                _ = Darwin.close(currentDescriptor)
+            }
+            throw error
+        }
+    }
+
+    private static func openVerifiedDirectory(
+        at url: URL,
+        ownerUID: uid_t
+    ) throws -> Int32 {
+        let descriptor = url.path.withCString {
+            Darwin.open(
+                $0,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+        }
+        guard descriptor >= 0 else {
+            throw posixError(errno, path: url.path)
+        }
+        do {
+            try verifyDirectoryDescriptor(
+                descriptor,
+                path: url.path,
+                ownerUID: ownerUID
+            )
+            return descriptor
+        } catch {
+            _ = Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    /// Opens every component of an already-canonical absolute path relative to
+    /// the previously-verified directory descriptor. This closes the
+    /// realpath/open gap where an intermediate component could otherwise be
+    /// replaced with a symlink after canonicalization.
+    private static func openCanonicalDirectoryTree(
+        at url: URL,
+        ownerUID: uid_t
+    ) throws -> Int32 {
+        guard url.isFileURL, url.path.hasPrefix("/") else {
+            throw SecureOwnedStorageError.invalidDirectoryURL(url.path)
+        }
+
+        var currentDescriptor = Darwin.open(
+            "/",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard currentDescriptor >= 0 else {
+            throw posixError(errno, path: "/")
+        }
+
+        let components = url.pathComponents.dropFirst()
+        var currentPath = ""
+        do {
+            for (index, component) in components.enumerated() {
+                try validateComponent(component)
+                currentPath += "/\(component)"
+                let childDescriptor = component.withCString {
+                    Darwin.openat(
+                        currentDescriptor,
+                        $0,
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+                    )
+                }
+                guard childDescriptor >= 0 else {
+                    throw posixError(errno, path: currentPath)
+                }
+                do {
+                    try verifyDirectoryDescriptor(
+                        childDescriptor,
+                        path: currentPath,
+                        ownerUID:
+                            index == components.count - 1
+                            ? ownerUID
+                            : nil
+                    )
+                } catch {
+                    _ = Darwin.close(childDescriptor)
+                    throw error
+                }
+                _ = Darwin.close(currentDescriptor)
+                currentDescriptor = childDescriptor
+            }
+            return currentDescriptor
+        } catch {
+            _ = Darwin.close(currentDescriptor)
+            throw error
+        }
+    }
+
+    private static func verifyDirectoryDescriptor(
+        _ descriptor: Int32,
+        path: String,
+        ownerUID: uid_t?
+    ) throws {
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0 else {
+            throw posixError(errno, path: path)
+        }
+        guard metadata.st_mode & S_IFMT == S_IFDIR else {
+            throw SecureOwnedStorageError.unexpectedType(path)
+        }
+        guard ownerUID == nil || metadata.st_uid == ownerUID else {
+            throw SecureOwnedStorageError.unexpectedOwner(path)
+        }
+    }
+
+    private static func canonicalExistingDirectoryURL(
+        _ url: URL
+    ) throws -> URL {
+        guard url.isFileURL, url.path.hasPrefix("/") else {
+            throw SecureOwnedStorageError.invalidDirectoryURL(url.path)
+        }
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let resolvedPath: String? = url.path.withCString { source in
+            buffer.withUnsafeMutableBufferPointer { destination in
+                guard Darwin.realpath(
+                    source,
+                    destination.baseAddress
+                ) != nil else {
+                    return nil
+                }
+                return String(cString: destination.baseAddress!)
+            }
+        }
+        guard let resolvedPath else {
+            throw posixError(errno, path: url.path)
+        }
+        return URL(fileURLWithPath: resolvedPath, isDirectory: true)
+    }
+
+    private static func pathEntryExists(at url: URL) throws -> Bool {
+        var metadata = stat()
+        let result = url.path.withCString {
+            Darwin.lstat($0, &metadata)
+        }
+        if result == 0 {
+            return true
+        }
+        if errno == ENOENT {
+            return false
+        }
+        throw posixError(errno, path: url.path)
+    }
+
+    private static func validateComponent(_ component: String) throws {
+        guard !component.isEmpty,
+              component != ".",
+              component != "..",
+              !component.contains("/"),
+              !component.contains("\0") else {
+            throw SecureOwnedStorageError.invalidPathComponent(component)
+        }
+    }
+
+    private func validateFileName(_ name: String) throws {
+        guard !name.isEmpty,
+              name != ".",
+              name != "..",
+              !name.contains("/"),
+              !name.contains("\0") else {
+            throw SecureOwnedStorageError.invalidFileName(name)
+        }
+    }
+
+    private static func writeAll(
+        _ data: Data,
+        to descriptor: Int32,
+        path: String
+    ) throws {
+        try data.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return }
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.write(
+                    descriptor,
+                    baseAddress.advanced(by: offset),
+                    bytes.count - offset
+                )
+                if count < 0 {
+                    if errno == EINTR {
+                        continue
+                    }
+                    throw posixError(errno, path: path)
+                }
+                guard count > 0 else {
+                    throw posixError(EIO, path: path)
+                }
+                offset += count
+            }
+        }
+    }
+
+    private static func synchronizeFileDescriptor(
+        _ descriptor: Int32,
+        path: String
+    ) throws {
+        if Darwin.fcntl(descriptor, F_FULLFSYNC) == 0 {
+            return
+        }
+        let fullSyncError = errno
+        guard fullSyncError == ENOTSUP
+                || fullSyncError == EINVAL
+                || fullSyncError == ENOTTY else {
+            throw posixError(fullSyncError, path: path)
+        }
+        guard Darwin.fsync(descriptor) == 0 else {
+            throw posixError(errno, path: path)
+        }
+    }
+
+    fileprivate static func posixError(
+        _ code: Int32,
+        path: String
+    ) -> NSError {
+        NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(code),
+            userInfo: [NSFilePathErrorKey: path]
+        )
+    }
+}
+
+/// Two-generation bounded JSONL storage used by the diagnostics writer. It is
+/// hostless so symlink and rotation behavior can be tested without launching
+/// Docky or touching the user's actual Application Support directory.
+nonisolated final class SecureBoundedLogStore: @unchecked Sendable {
+    private let directoryResult: Result<SecureOwnedDirectory, Error>
+    private let currentName: String
+    private let previousName: String
+    private let maximumFileBytes: Int
+
+    init(
+        directoryResult: Result<SecureOwnedDirectory, Error>,
+        currentName: String,
+        previousName: String,
+        maximumFileBytes: Int
+    ) {
+        self.directoryResult = directoryResult
+        self.currentName = currentName
+        self.previousName = previousName
+        self.maximumFileBytes = maximumFileBytes
+    }
+
+    convenience init(
+        directoryURL: URL,
+        currentName: String,
+        previousName: String,
+        maximumFileBytes: Int
+    ) {
+        self.init(
+            directoryResult: Result {
+                try SecureOwnedDirectory.openOrCreate(at: directoryURL)
+            },
+            currentName: currentName,
+            previousName: previousName,
+            maximumFileBytes: maximumFileBytes
+        )
+    }
+
+    static func applicationSupport(
+        at applicationSupportURL: URL,
+        descending components: [String],
+        currentName: String,
+        previousName: String,
+        maximumFileBytes: Int
+    ) -> SecureBoundedLogStore {
+        SecureBoundedLogStore(
+            directoryResult: Result {
+                try SecureOwnedDirectory.applicationSupport(
+                    at: applicationSupportURL,
+                    descending: components
+                )
+            },
+            currentName: currentName,
+            previousName: previousName,
+            maximumFileBytes: maximumFileBytes
+        )
+    }
+
+    func append(_ data: Data) throws {
+        let directory = try directoryResult.get()
+        guard try directory.appendRegularFile(
+            data,
+            named: currentName,
+            maximumBytes: maximumFileBytes
+        ) else {
+            try directory.rotateRegularFile(
+                from: currentName,
+                to: previousName
+            )
+            guard try directory.appendRegularFile(
+                data,
+                named: currentName,
+                maximumBytes: maximumFileBytes
+            ) else {
+                throw SecureOwnedStorageError.writeTooLarge(
+                    name: currentName,
+                    maximumBytes: maximumFileBytes
+                )
+            }
+            return
+        }
+    }
+
+    func copyRetainedLogs(to destinationDirectoryURL: URL) throws {
+        let sourceDirectory = try directoryResult.get()
+        let destinationDirectory = try SecureOwnedDirectory.openOrCreate(
+            at: destinationDirectoryURL
+        )
+        for name in [previousName, currentName] {
+            guard let data = try sourceDirectory.readRegularFile(
+                named: name,
+                maximumBytes: maximumFileBytes
+            ) else {
+                continue
+            }
+            try destinationDirectory.writeRegularFileAtomically(
+                data,
+                named: name,
+                maximumBytes: maximumFileBytes
+            )
+        }
+    }
+}
+
+nonisolated struct AtomicJSONFileStore<Value: Codable> {
     enum Source: String, Equatable {
         case primary
         case backup
@@ -21,14 +881,17 @@ struct AtomicJSONFileStore<Value: Codable> {
         let source: Source
         let recoveredPrimary: Bool
         let primaryFailureDescription: String?
+        let primaryRepairFailureDescription: String?
     }
 
     enum StoreError: Error, LocalizedError {
         case noValidCopy(primary: String?, backup: String?)
         case primaryRecoveryRejected(String)
+        case primaryReadFailed(String)
         case existingPrimaryInvalid(String)
         case primaryMissingWhileBackupExists
         case encodedValueFailedValidation(String)
+        case documentTooLarge(maximumBytes: Int)
 
         var errorDescription: String? {
             switch self {
@@ -41,12 +904,16 @@ struct AtomicJSONFileStore<Value: Codable> {
                 .joined(separator: "; ")
             case .primaryRecoveryRejected(let reason):
                 return "The primary document cannot be replaced by its backup: \(reason)"
+            case .primaryReadFailed(let reason):
+                return "The primary document could not be read and was left untouched: \(reason)"
             case .existingPrimaryInvalid(let reason):
                 return "The existing primary document is invalid: \(reason)"
             case .primaryMissingWhileBackupExists:
                 return "The primary document is missing while a backup still exists."
             case .encodedValueFailedValidation(let reason):
                 return "The encoded document failed its own validation: \(reason)"
+            case .documentTooLarge(let maximumBytes):
+                return "The profile document exceeds the \(maximumBytes)-byte limit."
             }
         }
     }
@@ -54,37 +921,105 @@ struct AtomicJSONFileStore<Value: Codable> {
     let primaryURL: URL
     let backupURL: URL
 
-    private let fileManager: FileManager
+    private static var defaultMaximumDocumentBytes: Int {
+        16 * 1_024 * 1_024
+    }
+
+    private let directoryResult: Result<SecureOwnedDirectory, Error>
+    private let readDataOverride: ((URL) throws -> Data)?
+    private let pathEntryExistsOverride: ((URL) throws -> Bool)?
+    private let synchronizeFileBeforeRename: ((URL) throws -> Void)?
+    private let synchronizeDirectoryAfterRename: ((URL) throws -> Void)?
+    private let maximumDocumentBytes: Int
 
     init(
         primaryURL: URL,
         backupURL: URL,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        readData: ((URL) throws -> Data)? = nil,
+        pathEntryExists: ((URL) throws -> Bool)? = nil,
+        synchronizeFileBeforeRename: ((URL) throws -> Void)? = nil,
+        synchronizeDirectoryAfterRename: ((URL) throws -> Void)? = nil,
+        maximumDocumentBytes: Int = Self.defaultMaximumDocumentBytes
     ) {
-        self.primaryURL = primaryURL
-        self.backupURL = backupURL
-        self.fileManager = fileManager
+        _ = fileManager
+        self.primaryURL = primaryURL.standardizedFileURL
+        self.backupURL = backupURL.standardizedFileURL
+        let primaryDirectory =
+            self.primaryURL.deletingLastPathComponent()
+        let backupDirectory =
+            self.backupURL.deletingLastPathComponent()
+        if primaryDirectory.path == backupDirectory.path {
+            directoryResult = Result {
+                try SecureOwnedDirectory.openOrCreate(at: primaryDirectory)
+            }
+        } else {
+            directoryResult = .failure(
+                SecureOwnedStorageError.invalidDirectoryURL(
+                    backupDirectory.path
+                )
+            )
+        }
+        readDataOverride = readData
+        pathEntryExistsOverride = pathEntryExists
+        self.synchronizeFileBeforeRename = synchronizeFileBeforeRename
+        self.synchronizeDirectoryAfterRename = synchronizeDirectoryAfterRename
+        self.maximumDocumentBytes = maximumDocumentBytes
+    }
+
+    /// Production initializer. The returned directory descriptor is anchored
+    /// under the canonical user Application Support directory before Docky
+    /// and Profiles are descended component-by-component.
+    init(
+        applicationSupportURL: URL,
+        relativeDirectoryComponents: [String],
+        primaryFileName: String,
+        backupFileName: String,
+        maximumDocumentBytes: Int = Self.defaultMaximumDocumentBytes
+    ) {
+        let directoryURL = relativeDirectoryComponents.reduce(
+            applicationSupportURL.standardizedFileURL
+        ) {
+            $0.appendingPathComponent($1, isDirectory: true)
+        }
+        primaryURL = directoryURL.appendingPathComponent(primaryFileName)
+        backupURL = directoryURL.appendingPathComponent(backupFileName)
+        directoryResult = Result {
+            try SecureOwnedDirectory.applicationSupport(
+                at: applicationSupportURL,
+                descending: relativeDirectoryComponents
+            )
+        }
+        readDataOverride = nil
+        pathEntryExistsOverride = nil
+        synchronizeFileBeforeRename = nil
+        synchronizeDirectoryAfterRename = nil
+        self.maximumDocumentBytes = maximumDocumentBytes
     }
 
     func load(
         validate: (Value) throws -> Void,
         canRecoverPrimaryFailure: (Error) -> Bool = { _ in true }
     ) throws -> LoadResult? {
-        let primaryExists = fileManager.fileExists(atPath: primaryURL.path)
-        let backupExists = fileManager.fileExists(atPath: backupURL.path)
-        guard primaryExists || backupExists else {
-            return nil
-        }
-
         var primaryFailure: Error?
-        if primaryExists {
+        let primaryData: Data?
+        do {
+            primaryData = try dataIfPresent(at: primaryURL)
+        } catch {
+            // A read or presence-probe failure says nothing about document
+            // validity. Never replace a possibly-newer primary merely because
+            // its bytes were temporarily unavailable.
+            throw StoreError.primaryReadFailed(Self.describe(error))
+        }
+        if let primaryData {
             do {
-                let value = try decodedValue(at: primaryURL, validate: validate)
+                let value = try decodedValue(from: primaryData, validate: validate)
                 return LoadResult(
                     value: value,
                     source: .primary,
                     recoveredPrimary: false,
-                    primaryFailureDescription: nil
+                    primaryFailureDescription: nil,
+                    primaryRepairFailureDescription: nil
                 )
             } catch {
                 guard canRecoverPrimaryFailure(error) else {
@@ -95,21 +1030,42 @@ struct AtomicJSONFileStore<Value: Codable> {
         }
 
         var backupFailure: Error?
-        if backupExists {
+        let backupData: Data?
+        do {
+            backupData = try dataIfPresent(at: backupURL)
+        } catch {
+            backupData = nil
+            backupFailure = error
+        }
+        if let backupData {
             do {
-                let backupData = try Data(contentsOf: backupURL)
                 let value = try decodedValue(from: backupData, validate: validate)
-                try ensureParentDirectory()
-                try atomicWrite(backupData, to: primaryURL)
+                var repairFailure: Error?
+                do {
+                    try ensureParentDirectory()
+                    try atomicWrite(backupData, to: primaryURL)
+                } catch {
+                    // The backup is still a valid authoritative value even
+                    // when repairing the primary is temporarily impossible.
+                    // Surface the blocked persistence state to the caller
+                    // without discarding good user configuration.
+                    repairFailure = error
+                }
                 return LoadResult(
                     value: value,
                     source: .backup,
-                    recoveredPrimary: true,
-                    primaryFailureDescription: primaryFailure.map(Self.describe)
+                    recoveredPrimary: repairFailure == nil,
+                    primaryFailureDescription: primaryFailure.map(Self.describe),
+                    primaryRepairFailureDescription:
+                        repairFailure.map(Self.describe)
                 )
             } catch {
                 backupFailure = error
             }
+        }
+
+        if primaryData == nil, backupData == nil, backupFailure == nil {
+            return nil
         }
 
         throw StoreError.noValidCopy(
@@ -128,6 +1084,11 @@ struct AtomicJSONFileStore<Value: Codable> {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let encoded = try encoder.encode(value)
+        guard encoded.count <= maximumDocumentBytes else {
+            throw StoreError.documentTooLarge(
+                maximumBytes: maximumDocumentBytes
+            )
+        }
 
         do {
             let roundTripped = try JSONDecoder().decode(Value.self, from: encoded)
@@ -138,15 +1099,20 @@ struct AtomicJSONFileStore<Value: Codable> {
 
         try ensureParentDirectory()
 
-        if fileManager.fileExists(atPath: primaryURL.path) {
-            let currentPrimary = try Data(contentsOf: primaryURL)
+        let currentPrimary: Data?
+        do {
+            currentPrimary = try dataIfPresent(at: primaryURL)
+        } catch {
+            throw StoreError.primaryReadFailed(Self.describe(error))
+        }
+        if let currentPrimary {
             do {
                 _ = try decodedValue(from: currentPrimary, validate: validate)
             } catch {
                 throw StoreError.existingPrimaryInvalid(Self.describe(error))
             }
             try atomicWrite(currentPrimary, to: backupURL)
-        } else if fileManager.fileExists(atPath: backupURL.path) {
+        } else if try entryExists(at: backupURL) {
             // A missing primary with a surviving backup indicates an
             // interrupted or externally-modified store. Preserve it and
             // require an explicit load/recovery before accepting writes.
@@ -162,11 +1128,41 @@ struct AtomicJSONFileStore<Value: Codable> {
         return encoded.count
     }
 
-    private func decodedValue(
-        at url: URL,
-        validate: (Value) throws -> Void
-    ) throws -> Value {
-        try decodedValue(from: Data(contentsOf: url), validate: validate)
+    /// Production reads are fd-relative, no-follow, regular-file-only, and
+    /// bounded. Injected readers remain available for deterministic failure
+    /// tests, with the same fail-closed presence-probe behavior.
+    private func dataIfPresent(at url: URL) throws -> Data? {
+        guard let readDataOverride else {
+            return try directoryResult.get().readRegularFile(
+                named: url.lastPathComponent,
+                maximumBytes: maximumDocumentBytes
+            )
+        }
+        do {
+            let data = try readDataOverride(url)
+            guard data.count <= maximumDocumentBytes else {
+                throw SecureOwnedStorageError.fileTooLarge(
+                    name: url.lastPathComponent,
+                    maximumBytes: maximumDocumentBytes
+                )
+            }
+            return data
+        } catch {
+            guard Self.isNoSuchFile(error) else { throw error }
+            if try entryExists(at: url) {
+                throw error
+            }
+            return nil
+        }
+    }
+
+    private func entryExists(at url: URL) throws -> Bool {
+        if let pathEntryExistsOverride {
+            return try pathEntryExistsOverride(url)
+        }
+        return try directoryResult.get().entryExists(
+            named: url.lastPathComponent
+        )
     }
 
     private func decodedValue(
@@ -179,52 +1175,33 @@ struct AtomicJSONFileStore<Value: Codable> {
     }
 
     private func ensureParentDirectory() throws {
-        let directoryURL = primaryURL.deletingLastPathComponent()
-        try fileManager.createDirectory(
-            at: directoryURL,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: directoryURL.path
-        )
+        _ = try directoryResult.get()
     }
 
     private func atomicWrite(_ data: Data, to url: URL) throws {
-        let directoryURL = url.deletingLastPathComponent()
-        let temporaryURL = directoryURL.appendingPathComponent(
-            ".\(url.lastPathComponent).\(UUID().uuidString).tmp"
+        try directoryResult.get().writeRegularFileAtomically(
+            data,
+            named: url.lastPathComponent,
+            maximumBytes: maximumDocumentBytes,
+            beforeSynchronize: synchronizeFileBeforeRename,
+            afterRename: synchronizeDirectoryAfterRename
         )
-        defer {
-            if fileManager.fileExists(atPath: temporaryURL.path) {
-                try? fileManager.removeItem(at: temporaryURL)
-            }
-        }
+    }
 
-        // Prepare and permission the complete replacement before publishing
-        // it. This avoids the split-brain case where the rename succeeds, a
-        // later chmod fails, and the caller incorrectly believes the old
-        // document is still authoritative.
-        try data.write(to: temporaryURL, options: .withoutOverwriting)
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: temporaryURL.path
-        )
-
-        let renameResult = temporaryURL.path.withCString { sourcePath in
-            url.path.withCString { destinationPath in
-                Darwin.rename(sourcePath, destinationPath)
-            }
+    nonisolated private static func isNoSuchFile(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain,
+           nsError.code == Int(ENOENT) {
+            return true
         }
-        guard renameResult == 0 else {
-            let errorCode = errno
-            throw NSError(
-                domain: NSPOSIXErrorDomain,
-                code: Int(errorCode),
-                userInfo: [NSFilePathErrorKey: url.path]
-            )
+        if nsError.domain == NSCocoaErrorDomain,
+           nsError.code == NSFileReadNoSuchFileError {
+            return true
         }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+            return isNoSuchFile(underlying)
+        }
+        return false
     }
 
     nonisolated private static func describe(_ error: Error) -> String {

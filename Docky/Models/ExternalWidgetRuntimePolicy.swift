@@ -12,6 +12,7 @@ nonisolated enum ExternalWidgetRuntimePolicy {
     /// Keep both capabilities fail-closed until an isolated v2 exists.
     static let allowsInstallation = false
     static let allowsExecution = false
+    static let allowsRemoval = false
 
     static func acceptsInstallDeepLink(host: String) -> Bool {
         false
@@ -22,6 +23,7 @@ nonisolated enum ExternalWidgetRuntimePolicy {
         widgetsDirectory: URL,
         isSymbolicLink: Bool
     ) -> Bool {
+        guard allowsRemoval else { return false }
         guard !isSymbolicLink else { return false }
 
         let standardizedCandidate = candidate.standardizedFileURL
@@ -73,10 +75,12 @@ nonisolated enum ExternalWidgetRuntimePolicy {
             throw ExternalWidgetDirectoryPolicyError.symbolicLink
         }
 
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: widgetsDirectory.path
-        )
+        if createIfMissing {
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: widgetsDirectory.path
+            )
+        }
         return widgetsDirectory
     }
 

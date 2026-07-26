@@ -5,6 +5,7 @@ final class ExternalWidgetRuntimePolicyTests: XCTestCase {
     func testLegacyRuntimeFailsClosed() {
         XCTAssertFalse(ExternalWidgetRuntimePolicy.allowsInstallation)
         XCTAssertFalse(ExternalWidgetRuntimePolicy.allowsExecution)
+        XCTAssertFalse(ExternalWidgetRuntimePolicy.allowsRemoval)
         XCTAssertFalse(
             ExternalWidgetRuntimePolicy.acceptsInstallDeepLink(
                 host: "install-widget"
@@ -22,7 +23,7 @@ final class ExternalWidgetRuntimePolicyTests: XCTestCase {
             isDirectory: true
         )
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             ExternalWidgetRuntimePolicy.mayRemoveBundle(
                 candidate: directBundle,
                 widgetsDirectory: directory,
@@ -65,6 +66,22 @@ final class ExternalWidgetRuntimePolicyTests: XCTestCase {
                 isSymbolicLink: false
             )
         )
+    }
+
+    func testProductionLoaderDoesNotRecursivelyDeleteBundles() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Docky/Services/ExternalWidgetLoader.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("runtimeMutationDisabled"))
+        XCTAssertFalse(source.contains("FileManager.default.removeItem"))
+        XCTAssertFalse(source.contains("createIfMissing: true"))
     }
 
     func testDirectoryPreparationRejectsSymlinkedWidgetsDirectory()

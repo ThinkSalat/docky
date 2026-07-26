@@ -426,7 +426,9 @@ private struct FrontmostAppTriggerEditor: View {
     let profile: DockProfile
     let triggerID: String
     @State var model: FrontmostAppTrigger
+    @State private var resolvedDisplayName: String?
     @Bindable private var profileService = ProfileService.shared
+    @ObservedObject private var workspace = WorkspaceService.shared
 
     var body: some View {
         HStack(spacing: 8) {
@@ -435,12 +437,12 @@ private struct FrontmostAppTriggerEditor: View {
                 .foregroundStyle(.secondary)
 
             Menu {
-                ForEach(runningApps(), id: \.bundleIdentifier) { app in
+                ForEach(availableApps, id: \.bundleIdentifier) { app in
                     Button {
                         model.bundleIdentifier = app.bundleIdentifier
                         commit()
                     } label: {
-                        Text(app.displayName)
+                        Text(app.localizedName)
                     }
                 }
             } label: {
@@ -460,31 +462,25 @@ private struct FrontmostAppTriggerEditor: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        .task(id: model.bundleIdentifier) {
+            resolvedDisplayName = nil
+            resolvedDisplayName = await ProfileApplicationMetadataLoader
+                .displayName(for: model.bundleIdentifier)
+        }
     }
 
     private var displayLabel: String {
         if model.bundleIdentifier.isEmpty { return "Pick app…" }
-        if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: model.bundleIdentifier) {
-            return FileManager.default.displayName(atPath: app.path)
+        if let running = workspace.runningApps.first(where: {
+            $0.bundleIdentifier == model.bundleIdentifier
+        }) {
+            return running.localizedName
         }
-        return model.bundleIdentifier
+        return resolvedDisplayName ?? model.bundleIdentifier
     }
 
-    private struct AppEntry {
-        let bundleIdentifier: String
-        let displayName: String
-    }
-
-    private func runningApps() -> [AppEntry] {
-        NSWorkspace.shared.runningApplications
-            .compactMap { app -> AppEntry? in
-                guard let bundleID = app.bundleIdentifier,
-                      app.activationPolicy == .regular
-                else { return nil }
-                let name = app.localizedName ?? bundleID
-                return AppEntry(bundleIdentifier: bundleID, displayName: name)
-            }
-            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    private var availableApps: [RunningApp] {
+        workspace.runningApps.sorted(by: ProfileApplicationMetadataLoader.sort)
     }
 
     private func commit() {
@@ -496,7 +492,9 @@ private struct SpaceTriggerEditor: View {
     let profile: DockProfile
     let triggerID: String
     @State var model: SpaceTrigger
+    @State private var resolvedDisplayName: String?
     @Bindable private var profileService = ProfileService.shared
+    @ObservedObject private var workspace = WorkspaceService.shared
 
     var body: some View {
         HStack(spacing: 8) {
@@ -505,12 +503,12 @@ private struct SpaceTriggerEditor: View {
                 .foregroundStyle(.secondary)
 
             Menu {
-                ForEach(runningApps(), id: \.bundleIdentifier) { app in
+                ForEach(availableApps, id: \.bundleIdentifier) { app in
                     Button {
                         model.bundleIdentifier = app.bundleIdentifier
                         commit()
                     } label: {
-                        Text(app.displayName)
+                        Text(app.localizedName)
                     }
                 }
             } label: {
@@ -526,35 +524,63 @@ private struct SpaceTriggerEditor: View {
             .menuIndicator(.hidden)
             .fixedSize()
         }
+        .task(id: model.bundleIdentifier) {
+            resolvedDisplayName = nil
+            resolvedDisplayName = await ProfileApplicationMetadataLoader
+                .displayName(for: model.bundleIdentifier)
+        }
     }
 
     private var displayLabel: String {
         if model.bundleIdentifier.isEmpty { return "Pick app…" }
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: model.bundleIdentifier) {
-            return FileManager.default.displayName(atPath: url.path)
+        if let running = workspace.runningApps.first(where: {
+            $0.bundleIdentifier == model.bundleIdentifier
+        }) {
+            return running.localizedName
         }
-        return model.bundleIdentifier
+        return resolvedDisplayName ?? model.bundleIdentifier
     }
 
-    private struct AppEntry {
-        let bundleIdentifier: String
-        let displayName: String
-    }
-
-    private func runningApps() -> [AppEntry] {
-        NSWorkspace.shared.runningApplications
-            .compactMap { app -> AppEntry? in
-                guard let bundleID = app.bundleIdentifier,
-                      app.activationPolicy == .regular
-                else { return nil }
-                let name = app.localizedName ?? bundleID
-                return AppEntry(bundleIdentifier: bundleID, displayName: name)
-            }
-            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    private var availableApps: [RunningApp] {
+        workspace.runningApps.sorted(by: ProfileApplicationMetadataLoader.sort)
     }
 
     private func commit() {
         profileService.updateTrigger(.space(model), in: profile.id)
+    }
+}
+
+private enum ProfileApplicationMetadataLoader {
+    nonisolated static func displayName(
+        for bundleIdentifier: String
+    ) async -> String? {
+        guard !bundleIdentifier.isEmpty,
+              let url = await ApplicationURLResolver.shared.applicationURL(
+                for: bundleIdentifier
+              ),
+              !Task.isCancelled else {
+            return nil
+        }
+
+        let displayName = await Task.detached(priority: .utility) {
+            FileManager.default.displayName(atPath: url.path)
+        }.value
+        return Task.isCancelled ? nil : displayName
+    }
+
+    nonisolated static func sort(
+        _ lhs: RunningApp,
+        _ rhs: RunningApp
+    ) -> Bool {
+        let nameComparison = lhs.localizedName.localizedCaseInsensitiveCompare(
+            rhs.localizedName
+        )
+        if nameComparison == .orderedSame {
+            return lhs.bundleIdentifier.localizedCaseInsensitiveCompare(
+                rhs.bundleIdentifier
+            ) == .orderedAscending
+        }
+        return nameComparison == .orderedAscending
     }
 }
 

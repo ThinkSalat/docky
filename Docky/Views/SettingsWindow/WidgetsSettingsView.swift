@@ -11,7 +11,6 @@ import SwiftUI
 
 struct WidgetsSettingsView: View {
     @State private var bundleURLs: [URL] = []
-    @State private var bundleURLPendingDeletion: URL?
     @State private var removalErrorMessage: String?
 
     var body: some View {
@@ -26,7 +25,7 @@ struct WidgetsSettingsView: View {
                         Text("Third-party widgets are disabled")
                             .font(.headline)
                         Text(
-                            "Docky no longer installs or executes external widget bundles in its own process. Existing files and profile records are preserved while a signed, notarized, isolated extension system is developed."
+                            "Docky no longer installs, executes, or recursively removes external widget bundles in its own process. Existing files and profile records are preserved while a signed, notarized, isolated extension system is developed."
                         )
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -57,25 +56,8 @@ struct WidgetsSettingsView: View {
         .formStyle(.grouped)
         .navigationTitle("External Widgets")
         .onAppear(perform: refresh)
-        .confirmationDialog(
-            "Delete this inactive widget bundle?",
-            isPresented: deletionDialogBinding,
-            presenting: bundleURLPendingDeletion
-        ) { url in
-            Button("Delete", role: .destructive) {
-                deleteBundle(at: url)
-                bundleURLPendingDeletion = nil
-            }
-            Button("Cancel", role: .cancel) {
-                bundleURLPendingDeletion = nil
-            }
-        } message: { url in
-            Text(
-                "\(url.lastPathComponent) will be removed from disk. Saved profile records are not changed."
-            )
-        }
         .alert(
-            "Could not remove widget bundle",
+            "Could not reveal widget folder",
             isPresented: removalErrorBinding,
             presenting: removalErrorMessage
         ) { _ in
@@ -116,29 +98,11 @@ struct WidgetsSettingsView: View {
             .buttonStyle(.borderless)
             .help("Reveal in Finder")
 
-            Button(role: .destructive) {
-                bundleURLPendingDeletion = url
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .help("Delete this inactive bundle")
         }
     }
 
     private func refresh() {
         bundleURLs = ExternalWidgetLoader.shared.installedBundleURLs()
-    }
-
-    private func deleteBundle(at url: URL) {
-        do {
-            try ExternalWidgetLoader.shared.uninstallBundle(at: url)
-            refresh()
-        } catch {
-            removalErrorMessage =
-                (error as? LocalizedError)?.errorDescription
-                ?? error.localizedDescription
-        }
     }
 
     private func revealWidgetsFolder() {
@@ -151,17 +115,6 @@ struct WidgetsSettingsView: View {
                 (error as? LocalizedError)?.errorDescription
                 ?? "Docky's Widgets folder has an unsafe path."
         }
-    }
-
-    private var deletionDialogBinding: Binding<Bool> {
-        Binding(
-            get: { bundleURLPendingDeletion != nil },
-            set: { newValue in
-                if !newValue {
-                    bundleURLPendingDeletion = nil
-                }
-            }
-        )
     }
 
     private var removalErrorBinding: Binding<Bool> {

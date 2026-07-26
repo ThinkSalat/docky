@@ -14,7 +14,11 @@
 
 import Foundation
 
-enum ProfileTrigger: Codable, Equatable, Identifiable {
+nonisolated enum ProfileTrigger:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     case timeOfDay(TimeOfDayTrigger)
     case frontmostApp(FrontmostAppTrigger)
     case space(SpaceTrigger)
@@ -46,7 +50,11 @@ enum ProfileTrigger: Codable, Equatable, Identifiable {
 /// endMinuteOfDay)` on any of the listed weekdays. Minute-of-day is 0
 /// (00:00) up to 1439 (23:59). Wraparound (e.g. 22:00 → 06:00) is
 /// supported by `endMinuteOfDay < startMinuteOfDay`.
-struct TimeOfDayTrigger: Codable, Equatable, Identifiable {
+nonisolated struct TimeOfDayTrigger:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let id: String
     var startMinuteOfDay: Int
     var endMinuteOfDay: Int
@@ -86,7 +94,11 @@ struct TimeOfDayTrigger: Codable, Equatable, Identifiable {
 
 /// Fires while the user's frontmost application matches the bound
 /// bundle identifier.
-struct FrontmostAppTrigger: Codable, Equatable, Identifiable {
+nonisolated struct FrontmostAppTrigger:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let id: String
     var bundleIdentifier: String
 
@@ -101,7 +113,11 @@ struct FrontmostAppTrigger: Codable, Equatable, Identifiable {
 /// (rather than positional index) survives macOS's automatic space
 /// rearrangement based on most-recently-used apps. The common case is
 /// a fullscreen app on its own dedicated space.
-struct SpaceTrigger: Codable, Equatable, Identifiable {
+nonisolated struct SpaceTrigger:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let id: String
     var bundleIdentifier: String
 
@@ -118,7 +134,11 @@ struct SpaceTrigger: Codable, Equatable, Identifiable {
 /// Space IDs come from the private SkyLight `CGSGetActiveSpace` API.
 /// macOS exposes a public space-change notification but no public space
 /// identity, so exact per-space profiles require this SPI.
-struct ExactSpaceTrigger: Codable, Equatable, Identifiable {
+nonisolated struct ExactSpaceTrigger:
+    Codable,
+    Equatable,
+    Identifiable,
+    Sendable {
     let id: String
     var spaceID: UInt64
 

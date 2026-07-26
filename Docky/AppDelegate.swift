@@ -5,7 +5,6 @@
 //  Created by Jose Quintero on 17/04/26.
 //
 
-import ApplicationServices
 import Cocoa
 
 import Combine
@@ -28,10 +27,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DiagnosticsTrace.shared.start()
         DiagnosticsTrace.shared.record(.widgets, "runtimeDisabled")
 
-        // Bound every AX call to 1s so a hung app can't stall the main run loop.
-        // Must precede any other AX work — applies process-wide.
-        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
-
         window?.orderOut(nil)
         NSApplication.shared.setActivationPolicy(.accessory)
         configureMainMenu()
@@ -44,6 +39,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         _ = AppUpdateService.shared
         _ = LaunchpadHotKeyService.shared
         _ = LaunchpadOverlayService.shared
+        _ = MenuCatalogService.shared
+        Task { @MainActor in
+            do {
+                try await ThemeManager.shared.bootstrap()
+            } catch {
+                DiagnosticsTrace.shared.record(
+                    .lifecycle,
+                    "themeBootstrapFailed",
+                    fields: [
+                        "error":
+                            DiagnosticPrivacy.errorDescriptor(error),
+                    ]
+                )
+            }
+        }
         AppUpdateService.shared.checkForUpdatesInBackground()
         WindowReservationService.shared.start()
         DockBadgeService.shared.start()
@@ -64,7 +74,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Handles two entry points:
     ///  - Double-clicking a `.dockytheme` bundle (or `.zip` of one) in
-    ///    Finder → imports each via `ThemeManager` and opens Settings.
+    ///    Finder → explains that runtime theme import is unavailable.
     ///  - `docky://<host>/<path>` deep links from automation tools
     ///    (BTT, Raycast, Shortcuts, Stream Deck, ...). See
     ///    `handleDockyURL` for the routing table.
@@ -72,7 +82,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         guard !urls.isEmpty else { return }
 
         let dockyURLs = urls.filter { $0.scheme == "docky" }
-        let themeURLs = urls.filter { $0.scheme != "docky" }
+        let themeURLs = urls.filter {
+            guard $0.scheme != "docky", $0.isFileURL else { return false }
+            return ["dockytheme", "zip"].contains(
+                $0.pathExtension.lowercased()
+            )
+        }
 
         for url in dockyURLs {
             handleDockyURL(url)
@@ -80,33 +95,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         guard !themeURLs.isEmpty else { return }
 
-        var importedAny = false
-        var firstError: String?
-
-        for url in themeURLs {
-            do {
-                try ThemeManager.shared.importTheme(from: url)
-                importedAny = true
-            } catch {
-                if firstError == nil {
-                    firstError = (error as? LocalizedError)?.errorDescription
-                        ?? error.localizedDescription
-                }
-            }
-        }
-
-        if importedAny {
-            showSettingsWindow(nil)
-        }
-
-        if let firstError {
-            let alert = NSAlert()
-            alert.messageText = "Could not import theme"
-            alert.informativeText = firstError
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-        }
+        let alert = NSAlert()
+        alert.messageText = "Theme import is temporarily unavailable"
+        alert.informativeText =
+            ThemeRuntimeMutationPolicy.unavailableExplanation
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     /// Routes a `docky://` URL to the matching handler.
@@ -230,6 +225,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationWillTerminate(_ aNotification: Notification) {
         DiagnosticsTrace.shared.record(.lifecycle, "willTerminate")
+        ProfileService.shared.flushPersistence()
         if SystemDockVisibilityService.shared.hasSnapshot {
             SystemDockVisibilityService.shared.restore()
         }
