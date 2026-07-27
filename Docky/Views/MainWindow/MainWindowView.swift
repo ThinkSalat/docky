@@ -24,13 +24,24 @@ struct MainWindowView: View {
         let _ = Self._printChanges()
         #endif
 
-        let chromeFrameSize = resolvedChromeFrameSize
+        let chromeSurfaces = resolvedChromeSurfaces
         let dockEdge = dockEdgeAlignment
 
         ZStack(alignment: dockEdge) {
-            chromeBackground()
-                .frame(width: chromeFrameSize?.width, height: chromeFrameSize?.height)
+            chromeSurfaceBackgrounds(chromeSurfaces)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: dockEdge)
+                .offset(
+                    x: resolvedPosition.isVertical
+                        ? 0
+                        : chromeGroupCenterOffset(
+                            for: chromeSurfaces
+                        ),
+                    y: resolvedPosition.isVertical
+                        ? chromeGroupCenterOffset(
+                            for: chromeSurfaces
+                        )
+                        : 0
+                )
                 .allowsHitTesting(true)
                 // Suppress the implicit easeInOut while magnification is
                 // tracking the cursor — chrome growth updates per frame
@@ -39,7 +50,7 @@ struct MainWindowView: View {
                 // animate normally.
                 .animation(
                     isTrackingMagnification ? nil : chromeResizeAnimation,
-                    value: chromeFrameSize
+                    value: chromeSurfaces
                 )
 
             TileContainerView()
@@ -52,11 +63,91 @@ struct MainWindowView: View {
     }
 
     private var dockEdgeAlignment: Alignment {
-        switch preferences.windowPosition.resolved(systemOrientation: dockSettings.orientation) {
+        switch resolvedPosition {
         case .top: .top
         case .bottom: .bottom
         case .left: .leading
         case .right: .trailing
+        }
+    }
+
+    private var resolvedPosition:
+        ResolvedDockWindowPosition {
+        preferences.windowPosition.resolved(
+            systemOrientation: dockSettings.orientation
+        )
+    }
+
+    @ViewBuilder
+    private func chromeSurfaceBackgrounds(
+        _ surfaces: DockChromeSurfaceLayout
+    ) -> some View {
+        if resolvedPosition.isVertical {
+            VStack(
+                alignment: chromeStackHorizontalAlignment,
+                spacing: surfaces.interDockGap
+            ) {
+                if surfaces.primarySize.width > 0,
+                   surfaces.primarySize.height > 0 {
+                    chromeBackground()
+                        .frame(
+                            width: surfaces.primarySize.width,
+                            height: surfaces.primarySize.height
+                        )
+                }
+                if surfaces.hasHandoff {
+                    chromeBackground()
+                        .frame(
+                            width: surfaces.handoffSize.width,
+                            height: surfaces.handoffSize.height
+                        )
+                }
+            }
+        } else {
+            HStack(
+                alignment: chromeStackVerticalAlignment,
+                spacing: surfaces.interDockGap
+            ) {
+                if surfaces.primarySize.width > 0,
+                   surfaces.primarySize.height > 0 {
+                    chromeBackground()
+                        .frame(
+                            width: surfaces.primarySize.width,
+                            height: surfaces.primarySize.height
+                        )
+                }
+                if surfaces.hasHandoff {
+                    chromeBackground()
+                        .frame(
+                            width: surfaces.handoffSize.width,
+                            height: surfaces.handoffSize.height
+                        )
+                }
+            }
+        }
+    }
+
+    private var chromeStackVerticalAlignment:
+        VerticalAlignment {
+        switch resolvedPosition {
+        case .top:
+            return .top
+        case .bottom:
+            return .bottom
+        case .left, .right:
+            return .center
+        }
+    }
+
+    private var chromeStackHorizontalAlignment:
+        HorizontalAlignment {
+        switch resolvedPosition {
+        case .left:
+            return .leading
+        case .right:
+            return .trailing
+        case .top, .bottom:
+            return .center
         }
     }
 
@@ -189,30 +280,50 @@ struct MainWindowView: View {
         return (iconHeight + layoutService.scaled(preferences.effectiveTileVerticalPadding) * 2) / 2
     }
 
-    private var resolvedChromeFrameSize: CGSize? {
-        let chromeSize = layoutService.chromeSize
-        guard chromeSize.width > 0, chromeSize.height > 0 else {
-            return nil
-        }
-
+    private var resolvedChromeSurfaces:
+        DockChromeSurfaceLayout {
+        var surfaces = layoutService.chromeSurfaces
         // Precise per-frame total growth published by `TileContainerView`
         // as a byproduct of the tile walk it does for the anchor offset.
         // This naturally handles edge truncation and non-1×1 widgets in
         // the influence radius — both of which reduce the effective
         // total below the closed-form constant.
         let usesFullAxis = preferences.effectiveWindowAxisSizing == .fullAxis
-        let chromeGrowth = chromeMetrics.alongAxisGrowth
-        guard dockSettings.magnification, !usesFullAxis, chromeGrowth > 0 else {
-            return chromeSize
+        let growth = chromeMetrics.axisGrowth
+        guard dockSettings.magnification,
+              !usesFullAxis else {
+            return surfaces
         }
 
-        let isVertical = preferences.windowPosition
-            .resolved(systemOrientation: dockSettings.orientation)
-            .isVertical
-        if isVertical {
-            return CGSize(width: chromeSize.width, height: chromeSize.height + chromeGrowth)
+        if resolvedPosition.isVertical {
+            surfaces.primarySize.height += growth.primary
+            surfaces.handoffSize.height += growth.handoff
+        } else {
+            surfaces.primarySize.width += growth.primary
+            surfaces.handoffSize.width += growth.handoff
         }
-        return CGSize(width: chromeSize.width + chromeGrowth, height: chromeSize.height)
+        return surfaces
+    }
+
+    private func chromeGroupCenterOffset(
+        for surfaces: DockChromeSurfaceLayout
+    ) -> CGFloat {
+        guard surfaces.primarySize.width > 0,
+              surfaces.primarySize.height > 0 else {
+            return 0
+        }
+        guard surfaces.hasHandoff else {
+            return surfaces.primaryCenterOffset
+        }
+        let handoffAxisLength =
+            resolvedPosition.isVertical
+            ? surfaces.handoffSize.height
+            : surfaces.handoffSize.width
+        return surfaces.primaryCenterOffset
+            + (
+                surfaces.interDockGap
+                + handoffAxisLength
+            ) / 2
     }
 
 }

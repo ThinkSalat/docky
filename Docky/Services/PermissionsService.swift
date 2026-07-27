@@ -58,7 +58,7 @@ enum Permission: String, CaseIterable, Identifiable {
         case .finderAutomation:
             return "Docky uses Finder automation for reveal-in-Finder, open-folder, and Trash actions. Docky requests this only when you use one of those actions or explicitly enable it here."
         case .accessibility:
-            return "Accessibility access lets Docky inspect and resize app windows for Resize Windows, provide Dock-like reopen behavior and window menus, restore minimized windows beside the Trash, and click menu bar items for curated actions. Docky requests this only when a feature needs it."
+            return "Accessibility access lets Docky inspect and resize app windows for Resize Windows, provide Dock-like reopen behavior and window menus, mirror and continue Handoff suggestions, restore minimized windows beside the Trash, and click menu bar items for curated actions. Docky requests this only when a feature needs it."
         case .systemEventsAutomation:
             return "Docky uses System Events automation for curated menuClick actions. Requesting it here lets Docky click supported app menus without waiting for the first action to trigger a macOS prompt. Menu-click actions still require Accessibility too."
         case .screenCapture:

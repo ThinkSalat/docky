@@ -1679,6 +1679,18 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+    /// Whether a live Handoff suggestion is presented in its own compact
+    /// chrome surface beside the primary dock instead of inline with its tiles.
+    var separateHandoffDock: Bool {
+        didSet {
+            guard separateHandoffDock != oldValue else { return }
+            defaults.set(
+                separateHandoffDock,
+                forKey: Keys.separateHandoffDock
+            )
+        }
+    }
+
     /// Whether Docky's main window should slide off-screen until revealed.
     var autohidesWindow: Bool {
         didSet {
@@ -4218,6 +4230,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let windowPosition = "docky.windowPosition"
         static let windowDisplayTarget = "docky.windowDisplayTarget"
         static let windowSpaceBehavior = "docky.windowSpaceBehavior"
+        static let separateHandoffDock = "docky.separateHandoffDock"
         static let autohidesWindow = "docky.autohidesWindow"
         static let showsAppBadges = "docky.showsAppBadges"
         static let folderBadgeMode = "docky.folderBadgeMode"
@@ -4329,6 +4342,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let windowPosition: DockWindowPosition = .system
         static let windowDisplayTarget: DockWindowDisplayTarget = .primaryDisplay
         static let windowSpaceBehavior: DockWindowSpaceBehavior = .allSpaces
+        static let separateHandoffDock = false
         static let autohidesWindow = false
         static let showsAppBadges = true
         static let folderBadgeMode: FolderBadgeMode = .combined
@@ -4461,6 +4475,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         let storedWindowPosition = defaults.string(forKey: Keys.windowPosition)
         let storedWindowDisplayTarget = defaults.string(forKey: Keys.windowDisplayTarget)
         let storedWindowSpaceBehavior = defaults.string(forKey: Keys.windowSpaceBehavior)
+        let storedSeparateHandoffDock = defaults.object(
+            forKey: Keys.separateHandoffDock
+        ) as? Bool
         let storedAutohidesWindow = defaults.object(forKey: Keys.autohidesWindow) as? Bool
         let storedShowsAppBadges = defaults.object(forKey: Keys.showsAppBadges) as? Bool
         let storedFolderBadgeMode = defaults.string(forKey: Keys.folderBadgeMode)
@@ -4621,6 +4638,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         self.windowPosition = (storedWindowPosition.flatMap(DockWindowPosition.init(rawValue:)) ?? DefaultValues.windowPosition)
         self.windowDisplayTarget = (storedWindowDisplayTarget.flatMap(DockWindowDisplayTarget.init(rawValue:)) ?? DefaultValues.windowDisplayTarget)
         self.windowSpaceBehavior = (storedWindowSpaceBehavior.flatMap(DockWindowSpaceBehavior.init(rawValue:)) ?? DefaultValues.windowSpaceBehavior)
+        self.separateHandoffDock =
+            storedSeparateHandoffDock
+            ?? DefaultValues.separateHandoffDock
         self.autohidesWindow = storedAutohidesWindow ?? DefaultValues.autohidesWindow
         self.showsAppBadges = storedShowsAppBadges ?? DefaultValues.showsAppBadges
         self.folderBadgeMode = storedFolderBadgeMode
@@ -4922,6 +4942,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         windowPosition = DefaultValues.windowPosition
         windowDisplayTarget = DefaultValues.windowDisplayTarget
         windowSpaceBehavior = DefaultValues.windowSpaceBehavior
+        separateHandoffDock = DefaultValues.separateHandoffDock
         windowAxisSizing = DefaultValues.windowAxisSizing
         maximizedWindowBehavior = DefaultValues.maximizedWindowBehavior
         overflowBehavior = DefaultValues.overflowBehavior

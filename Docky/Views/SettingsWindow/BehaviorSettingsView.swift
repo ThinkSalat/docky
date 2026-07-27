@@ -149,6 +149,19 @@ struct BehaviorSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 4)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle(
+                    "Separate Handoff Dock",
+                    isOn: $preferences.separateHandoffDock
+                )
+                .font(.headline)
+
+                Text("Show Handoff in its own compact dock beside the main dock.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 4)
         }
     }
 

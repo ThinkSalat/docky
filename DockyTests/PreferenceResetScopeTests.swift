@@ -171,6 +171,54 @@ final class PreferenceResetScopeTests: XCTestCase {
         XCTAssertFalse(fullBody.contains("DockSettingsService"))
     }
 
+    func testSeparateHandoffDockPersistsOffByDefault() throws {
+        let source = try dockyPreferencesSource()
+
+        XCTAssertTrue(
+            source.contains(
+                #"static let separateHandoffDock = "docky.separateHandoffDock""#
+            )
+        )
+        XCTAssertTrue(source.contains("static let separateHandoffDock = false"))
+        XCTAssertTrue(source.contains("var separateHandoffDock: Bool {"))
+        XCTAssertTrue(
+            source.contains(
+                "forKey: Keys.separateHandoffDock"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "storedSeparateHandoffDock"
+            )
+        )
+
+        let behaviorBody = try functionBody(
+            named: "resetBehaviorToDefaults",
+            in: source
+        )
+        XCTAssertTrue(
+            behaviorBody.contains(
+                "separateHandoffDock = DefaultValues.separateHandoffDock"
+            )
+        )
+    }
+
+    func testSeparateHandoffDockIsExposedInPlacementSettings() throws {
+        let source = try behaviorSettingsSource()
+
+        XCTAssertTrue(source.contains(#""Separate Handoff Dock""#))
+        XCTAssertTrue(
+            source.contains(
+                "isOn: $preferences.separateHandoffDock"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "Show Handoff in its own compact dock beside the main dock."
+            )
+        )
+    }
+
     private func dockyPreferencesSource() throws -> String {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -179,6 +227,18 @@ final class PreferenceResetScopeTests: XCTestCase {
             .appendingPathComponent("Docky")
             .appendingPathComponent("Services")
             .appendingPathComponent("DockyPreferences.swift")
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private func behaviorSettingsSource() throws -> String {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repositoryRoot
+            .appendingPathComponent("Docky")
+            .appendingPathComponent("Views")
+            .appendingPathComponent("SettingsWindow")
+            .appendingPathComponent("BehaviorSettingsView.swift")
         return try String(contentsOf: sourceURL, encoding: .utf8)
     }
 
@@ -332,6 +392,7 @@ private enum ResetInventory {
         "maximizedWindowBehavior",
         "opensAtLogin",
         "overflowBehavior",
+        "separateHandoffDock",
         "shelveHidesFinder",
         "shelveHidesTrash",
         "showsActivePinnedSeparator",

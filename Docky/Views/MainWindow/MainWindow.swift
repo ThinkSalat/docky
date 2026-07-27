@@ -141,10 +141,12 @@ final class MainWindowContainerView: NSView {
     /// on the along-axis (proximity to dock edge in that direction is the
     /// whole point of the cosine falloff), only the cross-axis fringe.
     private func cursorIsAtChromeFringe(_ point: CGPoint, hostingSize: CGSize) -> Bool {
-        let chromeSize = DockLayoutService.shared.chromeSize
-        guard chromeSize.width > 0, chromeSize.height > 0 else { return true }
         let position = DockyPreferences.shared.windowPosition
             .resolved(systemOrientation: DockSettingsService.shared.orientation)
+        let chromeSize =
+            DockLayoutService.shared.chromeSurfaces
+                .combinedSize(isVertical: position.isVertical)
+        guard chromeSize.width > 0, chromeSize.height > 0 else { return true }
         switch position {
         case .bottom:
             return point.y >= hostingSize.height - chromeSize.height
@@ -182,7 +184,8 @@ final class MainWindow: NSPanel {
     private let dockSettings = DockSettingsService.shared
     private let preferences = DockyPreferences.shared
     private let layout = DockLayoutService.shared
-    private let tileStore = TileStore.shared
+    private let presentation =
+        DockPresentationService.shared
     private let editMode = DockEditModeService.shared
     private let minimumWidth: CGFloat = 120
     private var cancellables: Set<AnyCancellable> = []
@@ -247,29 +250,63 @@ final class MainWindow: NSPanel {
     }
 
     /// Screen-coordinate rect of the visible chrome (the dock pill itself,
-    /// not the magnification headroom around it). Built from `chromeSize`
-    /// rather than crossing the SwiftUI/AppKit coord boundary, since the
-    /// chrome is always centered along-axis within the window (in
-    /// full-axis mode it just happens to span edge-to-edge), and pinned
-    /// to the inward cross-axis edge with magnification headroom on the
-    /// other side. Overlays that need to align to chrome edges read this.
+    /// not the magnification headroom around it). Built from the primary
+    /// chrome surface rather than crossing the SwiftUI/AppKit coordinate
+    /// boundary. The detached Handoff capsule must not move overlays that
+    /// are semantically anchored to the main dock.
     func chromeScreenFrame() -> CGRect? {
-        let chromeSize = DockLayoutService.shared.chromeSize
+        let chromeSurfaces =
+            DockLayoutService.shared.chromeSurfaces
+        let chromeSize = chromeSurfaces.primarySize
         guard chromeSize.width > 0, chromeSize.height > 0 else { return nil }
         let position = DockyPreferences.shared.windowPosition
             .resolved(systemOrientation: DockSettingsService.shared.orientation)
         let f = frame
         let width = min(chromeSize.width, f.width)
         let height = min(chromeSize.height, f.height)
+        let primaryCenterOffset =
+            chromeSurfaces.primaryCenterOffset
         switch position {
         case .bottom:
-            return CGRect(x: f.midX - width / 2, y: f.minY, width: width, height: height)
+            return CGRect(
+                x:
+                    f.midX
+                    + primaryCenterOffset
+                    - width / 2,
+                y: f.minY,
+                width: width,
+                height: height
+            )
         case .top:
-            return CGRect(x: f.midX - width / 2, y: f.maxY - height, width: width, height: height)
+            return CGRect(
+                x:
+                    f.midX
+                    + primaryCenterOffset
+                    - width / 2,
+                y: f.maxY - height,
+                width: width,
+                height: height
+            )
         case .left:
-            return CGRect(x: f.minX, y: f.midY - height / 2, width: width, height: height)
+            return CGRect(
+                x: f.minX,
+                y:
+                    f.midY
+                    - primaryCenterOffset
+                    - height / 2,
+                width: width,
+                height: height
+            )
         case .right:
-            return CGRect(x: f.maxX - width, y: f.midY - height / 2, width: width, height: height)
+            return CGRect(
+                x: f.maxX - width,
+                y:
+                    f.midY
+                    - primaryCenterOffset
+                    - height / 2,
+                width: width,
+                height: height
+            )
         }
     }
 
@@ -379,20 +416,12 @@ final class MainWindow: NSPanel {
     }
 
     private func observeFrameInputs() {
-        // DockyPreferences is now `@Observable` so we read its
-        // properties through `observeChanges` (Observation framework
-        // auto-tracks). DockSettingsService / DockDragService /
-        // DockEditModeService are still ObservableObject; their
-        // `@Published` projections are merged via Combine below.
-        let layoutSignals: [AnyPublisher<Void, Never>] = [
-            editMode.$paletteDrag.map { _ in () }.eraseToAnyPublisher(),
-            editMode.$paletteDropDestination.map { _ in () }.eraseToAnyPublisher(),
-            DockDragService.shared.$kind.map { _ in () }.eraseToAnyPublisher(),
-            DockDragService.shared.$documentTargetTileID.map { _ in () }.eraseToAnyPublisher(),
-            DockDragService.shared.$destinationIndex.map { _ in () }.eraseToAnyPublisher(),
-            DockDragService.shared.$destinationSection.map { _ in () }.eraseToAnyPublisher(),
-        ]
-        Publishers.MergeMany(layoutSignals)
+        // Tile membership and order have exactly one publisher. Rendering
+        // and frame measurement consume the same immutable snapshot, so a
+        // transient tile cannot appear without contributing to natural size.
+        presentation.$snapshot
+            .removeDuplicates()
+            .dropFirst()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.applyCurrentFrame(animated: true, duration: self?.tileMutationAnimationDuration) }
             .store(in: &cancellables)
@@ -415,13 +444,6 @@ final class MainWindow: NSPanel {
             self.applyCurrentFrame(animated: true, duration: self.tileMutationAnimationDuration)
         }
         .store(in: &cancellables)
-
-        tileStore.$tiles
-            .removeDuplicates()
-            .dropFirst()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.applyCurrentFrame(animated: true, duration: self?.tileMutationAnimationDuration) }
-            .store(in: &cancellables)
 
         editMode.$isActive
             .removeDuplicates()
@@ -956,36 +978,19 @@ final class MainWindow: NSPanel {
         let position = preferences.windowPosition.resolved(systemOrientation: dockSettings.orientation)
         let baseTileSize = dockSettings.displayTileSize
         let baseTileHeight = baseTileSize + preferences.effectiveTileVerticalPadding * 2
-        let externalAppDropPreview: AppTile? = {
-            if case let .app(_, tile) = DockDragService.shared.kind { return tile }
-            return nil
-        }()
-        let externalFolderDropPreview: FolderTile? = {
-            // Only grow the chrome when there's an actual placement: cursor in the
-            // trailing drop region with a resolved insertion index. Open-with mode
-            // (over an app tile) and idle hovering both leave chrome unchanged.
-            guard DockDragService.shared.documentTargetTileID == nil,
-                  DockDragService.shared.destinationSection == .trailing,
-                  DockDragService.shared.destinationIndex != nil,
-                  case let .folder(_, tile) = DockDragService.shared.kind else {
-                return nil
-            }
-            return tile
-        }()
-        let sizingTiles = TileContainerView.previewedTiles(
-            from: tileStore.tiles,
-            paletteDrag: editMode.paletteDrag,
-            paletteDropDestination: editMode.paletteDropDestination,
-            externalAppDropPreview: externalAppDropPreview,
-            externalFolderDropPreview: externalFolderDropPreview
-        )
-        let naturalContentSize = TileContainerView.contentSize(
-            tiles: sizingTiles,
+        let sizingTiles = presentation.snapshot.items
+        let dockPartition =
+            presentation.snapshot.dockPartition
+        let naturalContentLayout =
+            TileContainerView.dockContentLayout(
+            partition: dockPartition,
             tileSize: baseTileSize,
             tileHeight: baseTileHeight,
             tileSpacing: preferences.effectiveTileSpacing,
             position: position
         )
+        let naturalContentSize =
+            naturalContentLayout.combinedSize
         let alongAxisContentPadding = position.isVertical ? verticalContentPadding : horizontalContentPadding
         let layoutBounds = position.isVertical ? visibleBounds : screenBounds
         let unreservedAvailableAxisLength = max(
@@ -1009,14 +1014,16 @@ final class MainWindow: NSPanel {
             availableAxisLength: availableAxisLength,
             position: position
         )
-        let baseContentSize = TileContainerView.contentSize(
-            tiles: sizingTiles,
+        let baseContentLayout =
+            TileContainerView.dockContentLayout(
+            partition: dockPartition,
             tileSize: baseTileSize,
             tileHeight: baseTileHeight,
             tileSpacing: preferences.effectiveTileSpacing,
             position: position,
             compactWidgets: compactsWidgetsForOverflow
         )
+        let baseContentSize = baseContentLayout.combinedSize
         let contentScale = overflowContentScale(
             for: baseContentSize,
             availableAxisLength: availableAxisLength,
@@ -1028,23 +1035,34 @@ final class MainWindow: NSPanel {
         let scaledTileSize = baseTileSize * contentScale
         let scaledTileHeight = scaledTileSize + (preferences.effectiveTileVerticalPadding * contentScale * 2)
         let scaledTileSpacing = preferences.effectiveTileSpacing * contentScale
-        let displayedContentSize = TileContainerView.contentSize(
-            tiles: sizingTiles,
+        let displayedContentLayout =
+            TileContainerView.dockContentLayout(
+            partition: dockPartition,
             tileSize: scaledTileSize,
             tileHeight: scaledTileHeight,
             tileSpacing: scaledTileSpacing,
             position: position,
             compactWidgets: compactsWidgetsForOverflow,
-            edgePadding: TileContainerView.edgePadding * contentScale
+            mainEdgePadding:
+                TileContainerView.edgePadding * contentScale,
+            handoffEdgePadding:
+                TileContainerView.handoffDockEdgePadding
+                    * contentScale,
+            interDockGap:
+                TileContainerView.handoffDockGap
+                    * contentScale
         )
-        let displayedChromeAxisLength = preferences.effectiveWindowAxisSizing == .fullAxis
-            ? availableAxisLength
-            : min(axisLength(of: displayedContentSize, position: position), availableAxisLength)
-        layout.setChromeSize(displayedChromeSize(
-            for: displayedContentSize,
-            displayedAxisLength: displayedChromeAxisLength,
-            position: position
-        ))
+        let displayedContentSize =
+            displayedContentLayout.combinedSize
+        let chromeSurfaces = resolvedChromeSurfaces(
+            contentLayout: displayedContentLayout,
+            availableAxisLength: availableAxisLength,
+            position: position,
+            fullAxis: fullAxis
+        )
+        layout.setChromeSurfaces(
+            chromeSurfaces
+        )
         // Keep the chrome stretched across the current dock axis even when the
         // tile layout itself remains content-sized.
         let displayedAxisLength = availableAxisLength
@@ -1095,6 +1113,12 @@ final class MainWindow: NSPanel {
             String(describing: position),
             String(describing: preferences.effectiveWindowAxisSizing),
             String(sizingTiles.count),
+            NSStringFromSize(
+                chromeSurfaces.primarySize
+            ),
+            NSStringFromSize(
+                chromeSurfaces.handoffSize
+            ),
             String(describing: contentScale),
             String(compactsWidgetsForOverflow),
             String(describing: visibilityState),
@@ -1110,8 +1134,22 @@ final class MainWindow: NSPanel {
                 "axisSizing": String(describing: preferences.effectiveWindowAxisSizing),
                 "visibilityState": String(describing: visibilityState),
                 "tileCount": sizingTiles.count,
+                "primaryTileCount":
+                    dockPartition.mainItems.count,
+                "handoffTileCount":
+                    dockPartition.handoffItems.count,
                 "naturalContentSize": NSStringFromSize(naturalContentSize),
                 "displayedContentSize": NSStringFromSize(displayedContentSize),
+                "primaryChromeSize": NSStringFromSize(
+                    chromeSurfaces.primarySize
+                ),
+                "handoffChromeSize": NSStringFromSize(
+                    chromeSurfaces.handoffSize
+                ),
+                "interDockGap":
+                    chromeSurfaces.interDockGap,
+                "primaryCenterOffset":
+                    chromeSurfaces.primaryCenterOffset,
                 "windowContentSize": NSStringFromSize(windowContentSize),
                 "contentScale": contentScale,
                 "compactsWidgets": compactsWidgetsForOverflow,
@@ -1221,16 +1259,72 @@ final class MainWindow: NSPanel {
         return contentSize.height + verticalContentPadding
     }
 
-    private func displayedChromeSize(
-        for contentSize: CGSize,
-        displayedAxisLength: CGFloat,
+    private func resolvedChromeSurfaces(
+        contentLayout: DockTileSurfaceContentLayout,
+        availableAxisLength: CGFloat,
+        position: ResolvedDockWindowPosition,
+        fullAxis: Bool
+    ) -> DockChromeSurfaceLayout {
+        let handoffAxisLength = axisLength(
+            of: contentLayout.handoffSize,
+            position: position
+        )
+        let combinedAxisLength = axisLength(
+            of: contentLayout.combinedSize,
+            position: position
+        )
+        let constrainsPrimaryAxis =
+            fullAxis
+            || (
+                preferences.overflowBehavior == .scroll
+                && combinedAxisLength > availableAxisLength
+            )
+        let primaryNaturalAxisLength = axisLength(
+            of: contentLayout.primarySize,
+            position: position
+        )
+        let placement =
+            PresentedTileDockSurfacePlacementMetrics
+                .resolve(
+                    primaryNaturalExtent:
+                        primaryNaturalAxisLength,
+                    handoffExtent: handoffAxisLength,
+                    interDockGap:
+                        contentLayout.interDockGap,
+                    availableExtent: availableAxisLength,
+                    constrainsPrimary:
+                        constrainsPrimaryAxis
+                )
+
+        return DockChromeSurfaceLayout(
+            primarySize: replacingAxisLength(
+                of: contentLayout.primarySize,
+                with: placement.primaryDockExtent,
+                position: position
+            ),
+            handoffSize: contentLayout.handoffSize,
+            interDockGap: placement.interDockGap,
+            primaryCenterOffset:
+                placement.primaryCenterOffset,
+            constrainsPrimaryAxis: constrainsPrimaryAxis
+        )
+    }
+
+    private func replacingAxisLength(
+        of size: CGSize,
+        with axisLength: CGFloat,
         position: ResolvedDockWindowPosition
     ) -> CGSize {
         if position.isVertical {
-            return CGSize(width: contentSize.width, height: displayedAxisLength)
+            return CGSize(
+                width: size.width,
+                height: axisLength
+            )
         }
-
-        return CGSize(width: displayedAxisLength, height: contentSize.height)
+        return CGSize(
+            width: axisLength,
+            height: size.height
+        )
     }
 
     private func frameOrigin(
