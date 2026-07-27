@@ -7,8 +7,17 @@ import SwiftUI
 import UniformTypeIdentifiers
 import OSLog
 
+struct DockTileSurfaceContentLayout: Equatable {
+    let primarySize: CGSize
+    let handoffSize: CGSize
+    let interDockGap: CGFloat
+    let combinedSize: CGSize
+}
+
 struct TileContainerView: View {
     static let edgePadding: CGFloat = 8
+    static let handoffDockEdgePadding: CGFloat = 4
+    static let handoffDockGap: CGFloat = 10
     private let tileMutationAnimation: Animation = .easeInOut(duration: 0.18)
     private static let logger = Logger(subsystem: "gt.quintero.Docky", category: "TileDrag")
 
@@ -19,19 +28,54 @@ struct TileContainerView: View {
     @Bindable private var profileService = ProfileService.shared
     @ObservedObject private var editMode = DockEditModeService.shared
     @ObservedObject private var dockDrag = DockDragService.shared
+    @ObservedObject private var presentation =
+        DockPresentationService.shared
     private let magnification = DockMagnificationService.shared
 
-    @State private var draggedTileID: String?
     @State private var draggedProfileID: String?
     @State private var draggedTileOffset: CGFloat = 0
     @State private var draggedTileInitialFrame: CGRect?
-    @State private var draggedPinnedTileDestinationIndex: Int?
-    @State private var draggedTrailingTileDestinationIndex: Int?
     @State private var draggedAppFolderTargetTileID: String?
     @State private var draggedTrashTargetTileID: String?
-    @State private var draggedAdditionalTileIDs: [String] = []
     @State private var draggedPickupCandidateTileID: String?
     @State private var tileFrames: [String: CGRect] = [:]
+
+    /// Structural drag state lives beside the canonical presentation
+    /// snapshot. These accessors keep gesture code concise without letting
+    /// the renderer own a second, private tile-composition state machine.
+    private var draggedTileID: String? {
+        get { presentation.draggedTileID }
+        nonmutating set {
+            presentation.draggedTileID = newValue
+        }
+    }
+
+    private var draggedPinnedTileDestinationIndex: Int? {
+        get {
+            presentation.draggedPinnedTileDestinationIndex
+        }
+        nonmutating set {
+            presentation.draggedPinnedTileDestinationIndex =
+                newValue
+        }
+    }
+
+    private var draggedTrailingTileDestinationIndex: Int? {
+        get {
+            presentation.draggedTrailingTileDestinationIndex
+        }
+        nonmutating set {
+            presentation.draggedTrailingTileDestinationIndex =
+                newValue
+        }
+    }
+
+    private var draggedAdditionalTileIDs: [String] {
+        get { presentation.draggedAdditionalTileIDs }
+        nonmutating set {
+            presentation.draggedAdditionalTileIDs = newValue
+        }
+    }
 
     var body: some View {
         #if DEBUG
@@ -79,12 +123,12 @@ struct TileContainerView: View {
     private func tileCanvas(in proxy: GeometryProxy) -> some View {
         let scrollableSectionLayout = scrollableSectionLayout(in: proxy)
 
-        let anchorOffset = magnificationAnchorOffset
+        let axisOffset = contentAxisOffset
         return ZStack(alignment: .topLeading) {
             contentStack(scrollableSectionLayout: scrollableSectionLayout)
                 .offset(
-                    x: position.isVertical ? 0 : anchorOffset,
-                    y: position.isVertical ? anchorOffset : 0
+                    x: position.isVertical ? 0 : axisOffset,
+                    y: position.isVertical ? axisOffset : 0
                 )
                 .frame(
                     maxWidth: .infinity,
@@ -100,41 +144,118 @@ struct TileContainerView: View {
     @ViewBuilder
     private func contentStack(scrollableSectionLayout: ScrollableSectionLayout?) -> some View {
         if position.isVertical {
-            VStack(alignment: stackHorizontalAlignment, spacing: effectiveTileSpacing) {
-                contentComponents(scrollableSectionLayout: scrollableSectionLayout)
+            VStack(
+                alignment: stackHorizontalAlignment,
+                spacing: effectiveHandoffDockGap
+            ) {
+                primaryDockSurface(
+                    scrollableSectionLayout:
+                        scrollableSectionLayout
+                )
+                handoffDockSurface
+            }
+        } else {
+            HStack(
+                alignment: stackVerticalAlignment,
+                spacing: effectiveHandoffDockGap
+            ) {
+                primaryDockSurface(
+                    scrollableSectionLayout:
+                        scrollableSectionLayout
+                )
+                handoffDockSurface
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func primaryDockSurface(
+        scrollableSectionLayout:
+            ScrollableSectionLayout?
+    ) -> some View {
+        if position.isVertical {
+            VStack(
+                alignment: stackHorizontalAlignment,
+                spacing: effectiveTileSpacing
+            ) {
+                contentComponents(
+                    scrollableSectionLayout:
+                        scrollableSectionLayout
+                )
             }
             .padding(.vertical, effectiveEdgePadding)
+            .frame(
+                height:
+                    layout.chromeSurfaces
+                        .constrainsPrimaryAxis
+                    ? layout.chromeSurfaces.primarySize.height
+                    : nil
+            )
         } else {
-            HStack(alignment: stackVerticalAlignment, spacing: effectiveTileSpacing) {
-                contentComponents(scrollableSectionLayout: scrollableSectionLayout)
+            HStack(
+                alignment: stackVerticalAlignment,
+                spacing: effectiveTileSpacing
+            ) {
+                contentComponents(
+                    scrollableSectionLayout:
+                        scrollableSectionLayout
+                )
             }
             .padding(.horizontal, effectiveEdgePadding)
+            .frame(
+                width:
+                    layout.chromeSurfaces
+                        .constrainsPrimaryAxis
+                    ? layout.chromeSurfaces.primarySize.width
+                    : nil
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var handoffDockSurface: some View {
+        if !handoffDisplayTiles.isEmpty {
+            if position.isVertical {
+                VStack(
+                    alignment: stackHorizontalAlignment,
+                    spacing: effectiveTileSpacing
+                ) {
+                    ForEach(handoffDisplayTiles) { tile in
+                        tileView(for: tile)
+                    }
+                }
+                .padding(
+                    .vertical,
+                    effectiveHandoffDockEdgePadding
+                )
+            } else {
+                HStack(
+                    alignment: stackVerticalAlignment,
+                    spacing: effectiveTileSpacing
+                ) {
+                    ForEach(handoffDisplayTiles) { tile in
+                        tileView(for: tile)
+                    }
+                }
+                .padding(
+                    .horizontal,
+                    effectiveHandoffDockEdgePadding
+                )
+            }
         }
     }
 
     private func contentAlignment(in proxy: GeometryProxy, scrollableSectionLayout: ScrollableSectionLayout?) -> Alignment {
-        let centersContent = shouldCenterContent(in: proxy, scrollableSectionLayout: scrollableSectionLayout)
-
         switch position {
         case .bottom:
-            return centersContent ? .bottom : .bottomLeading
+            return .bottom
         case .top:
-            return centersContent ? .top : .topLeading
+            return .top
         case .left:
-            return centersContent ? .leading : .topLeading
+            return .leading
         case .right:
-            return centersContent ? .trailing : .topTrailing
+            return .trailing
         }
-    }
-
-    private func shouldCenterContent(in proxy: GeometryProxy, scrollableSectionLayout: ScrollableSectionLayout?) -> Bool {
-        guard scrollableSectionLayout == nil,
-              layout.contentScale >= 0.999,
-              !layout.compactsWidgetsForOverflow else {
-            return false
-        }
-
-        return totalAxisLength(for: layoutComponents) <= projected(size: proxy.size) + 0.5
     }
 
     @ViewBuilder
@@ -303,54 +424,24 @@ struct TileContainerView: View {
     }
 
     private var displayTiles: [Tile] {
-        guard let firstTile = store.tiles.first else {
-            return store.tiles
-        }
+        presentation.snapshot.items
+    }
 
-        // Shelve mode drops the leading Finder tile, so the first store
-        // tile may be a regular pinned app — which is also surfaced via
-        // `previewPinnedTiles`. Only pin the first tile to the front when
-        // it actually is Finder; otherwise let the normal pinned-section
-        // path render it once.
-        let leadsWithFinder = firstTile.id == "pinned:com.apple.finder"
-        var result: [Tile] = []
-        if leadsWithFinder {
-            result.append(firstTile)
-        }
-        result.append(contentsOf: previewPinnedTiles)
-        var appendedTrailingSection = false
+    private var dockPartition:
+        PresentedTileDockPartition<Tile> {
+        presentation.snapshot.dockPartition
+    }
 
-        let remainingTiles: ArraySlice<Tile> = leadsWithFinder
-            ? store.tiles.dropFirst()
-            : store.tiles[...]
-        for tile in remainingTiles {
-            if appendedTrailingSection {
-                continue
-            }
+    private var mainDisplayTiles: [Tile] {
+        dockPartition.mainItems
+    }
 
-            if groupedOpenedAppFolderID(for: tile.id) != nil {
-                continue
-            }
+    private var handoffDisplayTiles: [Tile] {
+        dockPartition.handoffItems
+    }
 
-            if tile.id == "divider:trailing" {
-                result.append(tile)
-                result.append(contentsOf: previewTrailingSectionTiles)
-                appendedTrailingSection = true
-                continue
-            }
-
-            if isPinnedReorderable(tileID: tile.id)
-                || isTrailingReorderable(tileID: tile.id) {
-                continue
-            }
-            result.append(tile)
-        }
-
-        // Theme-level layout insertions apply after the editor-preview
-        // merge: applying them in `TileStore.rebuildTiles` would lose
-        // anything anchored past `divider:trailing` because this
-        // method re-builds that section from `previewTrailingSectionTiles`.
-        return TileStore.applyingThemeLayoutInsertions(to: result)
+    private var surfaceOrderedDisplayTiles: [Tile] {
+        mainDisplayTiles + handoffDisplayTiles
     }
 
     private var pinnedTiles: [Tile] {
@@ -361,20 +452,6 @@ struct TileContainerView: View {
         pinnedTiles.map(\.id)
     }
 
-    private var groupedOpenedAppTilesByFolderID: [String: [Tile]] {
-        let groupedEntries: [(folderID: String, tile: Tile)] = store.tiles.compactMap { tile in
-            guard case .app = tile.content,
-                  let folderID = groupedOpenedAppFolderID(for: tile.id) else {
-                return nil
-            }
-            return (folderID: folderID, tile: tile)
-        }
-
-        return Dictionary(grouping: groupedEntries, by: { $0.folderID }).mapValues { entries in
-            entries.map { $0.tile }
-        }
-    }
-
     private var trailingTiles: [Tile] {
         store.tiles.filter { isTrailingReorderable(tileID: $0.id) }
     }
@@ -383,180 +460,12 @@ struct TileContainerView: View {
         trailingTiles.map(\.id)
     }
 
-    private var previewPinnedTiles: [Tile] {
-        expandedPinnedTiles(from: previewPinnedBaseTiles)
-    }
-
-    private var draggedAppFolderIdentifier: String? {
-        guard let draggedTile,
-              case .appFolder(let folder) = draggedTile.content else {
-            return nil
-        }
-
-        return folder.identifier
-    }
-
     private var previewPinnedBaseTiles: [Tile] {
-        var remainingPinnedTiles = pinnedTiles
-        if !draggedAdditionalTileIDs.isEmpty {
-            let hiddenTileIDs = Set(draggedAdditionalTileIDs)
-            remainingPinnedTiles.removeAll { hiddenTileIDs.contains($0.id) }
-        }
-
-        guard let destinationIndex = activePinnedDropDestinationIndex else {
-            return remainingPinnedTiles
-        }
-
-        if let draggedTileID {
-            remainingPinnedTiles.removeAll { $0.id == draggedTileID }
-        }
-        let clampedDestinationIndex = min(max(destinationIndex, 0), remainingPinnedTiles.count)
-        if let draggedTile, (isDraggingPinnedTile || store.makePinnedItem(from: draggedTile) != nil) {
-            remainingPinnedTiles.insert(draggedTile, at: clampedDestinationIndex)
-        } else if let palettePreviewTile {
-            remainingPinnedTiles.insert(palettePreviewTile, at: clampedDestinationIndex)
-        } else if case let .app(_, appTile) = dockDrag.kind {
-            remainingPinnedTiles.insert(
-                Tile(id: "drop-preview", content: .app(appTile)),
-                at: clampedDestinationIndex
-            )
-        }
-        return remainingPinnedTiles
-    }
-
-    private func expandedPinnedTiles(from baseTiles: [Tile]) -> [Tile] {
-        var result: [Tile] = []
-
-        for tile in baseTiles {
-            result.append(tile)
-
-            guard case .appFolder(let folder) = tile.content else {
-                continue
-            }
-
-            guard folder.identifier != draggedAppFolderIdentifier else {
-                continue
-            }
-
-            result.append(contentsOf: (groupedOpenedAppTilesByFolderID[folder.identifier] ?? []).filter {
-                !isHiddenForActiveDrag(tileID: $0.id)
-            })
-        }
-
-        return result
-    }
-
-    private var palettePreviewTile: Tile? {
-        guard let paletteDrag = editMode.paletteDrag else {
-            return nil
-        }
-
-        switch paletteDrag.item {
-        case .launchpad:
-            return Tile(
-                id: "editor-preview:launchpad",
-                content: .launchpad(LaunchpadTile(identifier: "editor-preview:launchpad"))
-            )
-        case .startMenu:
-            return Tile(
-                id: "editor-preview:start-menu",
-                content: .startMenu(StartMenuTile(identifier: "editor-preview:start-menu"))
-            )
-        case .spacer:
-            return Tile(id: "editor-preview:spacer", content: .spacer)
-        case .flexibleSpacer:
-            // Render the in-dock drop preview as a fixed-size spacer so the
-            // user has a tile-sized target to land on; the dropped tile is
-            // still persisted as `.flexibleSpacer` via the palette item
-            // factory and stretches once committed.
-            return Tile(id: "editor-preview:flexible-spacer", content: .spacer)
-        case .divider:
-            return Tile(id: "editor-preview:divider", content: .divider)
-        case .widget(let ownerBundleIdentifier, let kind):
-            let span = resolvedPaletteWidgetSpan(
-                ownerBundleIdentifier: ownerBundleIdentifier,
-                kind: kind,
-                requestedSpan: paletteDrag.widgetSpan
-            )
-            return Tile(
-                id: "editor-preview:widget",
-                content: .widget(WidgetTile(
-                    identifier: "editor-preview:widget",
-                    title: kind.title,
-                    kind: kind,
-                    ownerBundleIdentifier: ownerBundleIdentifier,
-                    span: span
-                ))
-            )
-        case .smartStack:
-            return Tile(
-                id: "editor-preview:smart-stack",
-                content: .smartStack(SmartStackTile(
-                    identifier: "editor-preview:smart-stack",
-                    title: "Smart Stack",
-                    widgets: WidgetCatalog.smartStackRegistrations.map { $0.makeTile() },
-                    span: .three
-                ))
-            )
-        }
+        presentation.snapshot.pinnedBaseTiles
     }
 
     private var previewTrailingTiles: [Tile] {
-        var remainingTrailingTiles = trailingTiles
-        if !draggedAdditionalTileIDs.isEmpty {
-            let hiddenTileIDs = Set(draggedAdditionalTileIDs)
-            remainingTrailingTiles.removeAll { hiddenTileIDs.contains($0.id) }
-        }
-
-        guard let destinationIndex = activeTrailingDropDestinationIndex else {
-            return remainingTrailingTiles
-        }
-
-        if let draggedTileID {
-            remainingTrailingTiles.removeAll { $0.id == draggedTileID }
-        }
-        let clampedDestinationIndex = min(max(destinationIndex, 0), remainingTrailingTiles.count)
-        if let draggedTile, store.makeTrailingItem(from: draggedTile) != nil {
-            remainingTrailingTiles.insert(draggedTile, at: clampedDestinationIndex)
-        } else if let palettePreviewTile, makeTrailingItem(from: editMode.paletteDrag) != nil {
-            remainingTrailingTiles.insert(palettePreviewTile, at: clampedDestinationIndex)
-        } else if case let .folder(_, folderTile) = dockDrag.kind {
-            remainingTrailingTiles.insert(
-                Tile(id: "drop-preview", content: .folder(folderTile)),
-                at: clampedDestinationIndex
-            )
-        }
-        return remainingTrailingTiles
-    }
-
-    private var previewTrailingSectionTiles: [Tile] {
-        let minimizedWindowTiles = store.tiles.compactMap { tile in
-            if case .minimizedWindow = tile.content {
-                return tile
-            }
-            return nil
-        }
-
-        guard !minimizedWindowTiles.isEmpty else {
-            return previewTrailingTiles
-        }
-
-        var result: [Tile] = []
-        var insertedMinimizedWindows = false
-
-        for tile in previewTrailingTiles {
-            if !insertedMinimizedWindows, case .trash = tile.content {
-                result.append(contentsOf: minimizedWindowTiles)
-                insertedMinimizedWindows = true
-            }
-            result.append(tile)
-        }
-
-        if !insertedMinimizedWindows {
-            result.append(contentsOf: minimizedWindowTiles)
-        }
-
-        return result
+        presentation.snapshot.trailingTiles
     }
 
     private var draggedTile: Tile? {
@@ -619,32 +528,6 @@ struct TileContainerView: View {
         return CGPoint(x: frame.midX, y: frame.midY)
     }
 
-    private var activePinnedDropDestinationIndex: Int? {
-        if draggedTileID == nil {
-            if dockDrag.destinationSection == .pinned, let externalIndex = dockDrag.destinationIndex {
-                return externalIndex
-            }
-            guard editMode.paletteDropDestination?.section == .pinned else {
-                return nil
-            }
-            return editMode.paletteDropDestination?.index
-        }
-        return draggedPinnedTileDestinationIndex
-    }
-
-    private var activeTrailingDropDestinationIndex: Int? {
-        if draggedTileID == nil {
-            if dockDrag.destinationSection == .trailing, let externalIndex = dockDrag.destinationIndex {
-                return externalIndex
-            }
-            guard editMode.paletteDropDestination?.section == .trailing else {
-                return nil
-            }
-            return editMode.paletteDropDestination?.index
-        }
-        return draggedTrailingTileDestinationIndex
-    }
-
     private var tileTransition: AnyTransition {
         .asymmetric(
             insertion: .scale(scale: 0.9, anchor: tileScaleAnchor).combined(with: .opacity),
@@ -681,7 +564,7 @@ struct TileContainerView: View {
             currentTiles = []
         }
 
-        for tile in displayTiles {
+        for tile in mainDisplayTiles {
             if tile.id == "divider:running" || tile.id == "divider:trailing" {
                 appendCurrentSection()
                 components.append(.divider(tile))
@@ -711,7 +594,13 @@ struct TileContainerView: View {
         }
 
         let components = layoutComponents
-        let availableAxisLength = projected(size: proxy.size)
+        let resolvedPrimaryAxisLength = projected(
+            size: layout.chromeSurfaces.primarySize
+        )
+        let availableAxisLength =
+            resolvedPrimaryAxisLength > 0
+            ? resolvedPrimaryAxisLength
+            : projected(size: proxy.size)
         guard totalAxisLength(for: components) > availableAxisLength else {
             return nil
         }
@@ -744,6 +633,43 @@ struct TileContainerView: View {
         }
         let spacings = CGFloat(max(0, components.count - 1)) * effectiveTileSpacing
         return componentLengths + spacings + effectiveEdgePadding * 2
+    }
+
+    private var presentedRestAxisLayout:
+        PresentedTileDockAxisLayout {
+        PresentedTileDockAxisMetrics.measure(
+            mainItemExtents: mainDisplayTiles.map {
+                projected(
+                    size: Self.size(
+                        for: $0,
+                        tileSize: effectiveTileSize,
+                        tileHeight: tileHeight,
+                        tileSpacing: effectiveTileSpacing,
+                        position: position,
+                        compactWidgets:
+                            layout.compactsWidgetsForOverflow
+                    )
+                )
+            },
+            handoffItemExtents: handoffDisplayTiles.map {
+                projected(
+                    size: Self.size(
+                        for: $0,
+                        tileSize: effectiveTileSize,
+                        tileHeight: tileHeight,
+                        tileSpacing: effectiveTileSpacing,
+                        position: position,
+                        compactWidgets:
+                            layout.compactsWidgetsForOverflow
+                    )
+                )
+            },
+            itemSpacing: effectiveTileSpacing,
+            mainEdgePadding: effectiveEdgePadding,
+            handoffEdgePadding:
+                effectiveHandoffDockEdgePadding,
+            interDockGap: effectiveHandoffDockGap
+        )
     }
 
     private func scrollableSectionAxisLength(
@@ -834,6 +760,16 @@ struct TileContainerView: View {
         layout.scaled(Self.edgePadding)
     }
 
+    private var effectiveHandoffDockEdgePadding: CGFloat {
+        layout.scaled(Self.handoffDockEdgePadding)
+    }
+
+    private var effectiveHandoffDockGap: CGFloat {
+        handoffDisplayTiles.isEmpty
+            ? 0
+            : layout.scaled(Self.handoffDockGap)
+    }
+
     private var effectiveTileSize: CGFloat {
         layout.scaled(baseTileSize)
     }
@@ -899,10 +835,19 @@ struct TileContainerView: View {
         guard !editMode.isActive else { return false }
         guard draggedTileID == nil else { return false }
         guard dockSettings.largeSize > dockSettings.tileSize else { return false }
+        // Full-axis primary content has a fixed viewport. When a detached
+        // Handoff capsule occupies the trailing edge, along-axis overflow
+        // from magnification could otherwise draw through the transparent
+        // gap and over the accessory surface.
+        if preferences.effectiveWindowAxisSizing == .fullAxis,
+           !handoffDisplayTiles.isEmpty {
+            return false
+        }
         if preferences.overflowBehavior == .scroll {
             let canvasAxisLength = projected(size: layout.tileCanvasFrame.size)
             if canvasAxisLength > 0,
-               totalAxisLength(for: layoutComponents) > canvasAxisLength {
+               presentedRestAxisLayout.totalExtent
+                    > canvasAxisLength {
                 return false
             }
         }
@@ -926,11 +871,14 @@ struct TileContainerView: View {
         let cursorInCanvas = position.isVertical ? local.y : local.x
 
         let canvasAxisLength = projected(size: layout.tileCanvasFrame.size)
-        let contentAxisLength = totalAxisLength(for: layoutComponents)
+        let contentAxisLength =
+            presentedRestAxisLayout.totalExtent
         guard contentAxisLength <= canvasAxisLength + 0.5 else {
             return cursorInCanvas
         }
-        let leadingOffset = max(0, (canvasAxisLength - contentAxisLength) / 2)
+        let leadingOffset =
+            max(0, (canvasAxisLength - contentAxisLength) / 2)
+            + surfaceGroupCenterOffset(handoffGrowth: 0)
         return cursorInCanvas - leadingOffset
     }
 
@@ -954,6 +902,11 @@ struct TileContainerView: View {
     /// only magnify when they're 1×1 — wider spans would have to scale
     /// non-uniformly to grow, which warps their content.
     private func shouldMagnify(_ tile: Tile) -> Bool {
+        if tile.id == DockBadgeService.handoffTileID,
+           preferences.effectiveWindowAxisSizing
+                == .fullAxis {
+            return false
+        }
         switch tile.content {
         case .app(let app):
             if let widget = app.displayedWidget {
@@ -984,10 +937,18 @@ struct TileContainerView: View {
     /// list with base sizes. Spacings are uniform across sections and
     /// dividers, so a single cumulative pass matches the rendered layout.
     private func restAxisCenter(forTileID id: String) -> CGFloat? {
-        let tiles = displayTiles
+        let tiles = surfaceOrderedDisplayTiles
         let spacing = effectiveTileSpacing
-        var runningOffset: CGFloat = effectiveEdgePadding
+        var runningOffset: CGFloat =
+            mainDisplayTiles.isEmpty
+            ? effectiveHandoffDockEdgePadding
+            : effectiveEdgePadding
         for (index, tile) in tiles.enumerated() {
+            if index > 0 {
+                runningOffset += interItemAxisGap(
+                    before: index
+                )
+            }
             let restSize = Self.size(
                 for: tile,
                 tileSize: effectiveTileSize,
@@ -1001,11 +962,22 @@ struct TileContainerView: View {
                 return runningOffset + extent / 2
             }
             runningOffset += extent
-            if index < tiles.count - 1 {
-                runningOffset += spacing
-            }
         }
         return nil
+    }
+
+    private func interItemAxisGap(
+        before index: Int
+    ) -> CGFloat {
+        guard index > 0 else { return 0 }
+        if !mainDisplayTiles.isEmpty,
+           !handoffDisplayTiles.isEmpty,
+           index == mainDisplayTiles.count {
+            return effectiveEdgePadding
+                + effectiveHandoffDockGap
+                + effectiveHandoffDockEdgePadding
+        }
+        return effectiveTileSpacing
     }
 
     /// Icon-side extent for a tile after applying the magnification
@@ -1027,6 +999,8 @@ struct TileContainerView: View {
         /// Sum of (magnified − rest) extent over every tile along the
         /// dock axis. Strength is already baked in via the per-tile sizes.
         let totalGrowth: CGFloat
+        let primaryGrowth: CGFloat
+        let handoffGrowth: CGFloat
         /// Magnified axis position corresponding to the cursor's resting
         /// position, used by the anchor offset to keep the under-cursor
         /// icon pinned to the cursor.
@@ -1037,26 +1011,34 @@ struct TileContainerView: View {
     /// `totalGrowth` (needed for chrome sizing) and the magnified cursor
     /// position (needed for the anchor offset).
     private func computeMagnificationWalk(cursor: CGFloat) -> MagnificationWalk {
-        let tiles = displayTiles
+        let tiles = surfaceOrderedDisplayTiles
         let spacing = effectiveTileSpacing
-        var restCursor: CGFloat = effectiveEdgePadding
-        var magCursor: CGFloat = effectiveEdgePadding
+        let leadingPadding =
+            mainDisplayTiles.isEmpty
+            ? effectiveHandoffDockEdgePadding
+            : effectiveEdgePadding
+        var restCursor: CGFloat = leadingPadding
+        var magCursor: CGFloat = leadingPadding
         var totalGrowth: CGFloat = 0
+        var primaryGrowth: CGFloat = 0
+        var handoffGrowth: CGFloat = 0
         var anchoredMag: CGFloat? = nil
 
-        if cursor < effectiveEdgePadding {
+        if cursor < leadingPadding {
             anchoredMag = cursor
         }
 
         for (index, tile) in tiles.enumerated() {
             if index > 0 {
+                let gap = interItemAxisGap(before: index)
                 let restGapStart = restCursor
-                restCursor += spacing
-                magCursor += spacing
+                restCursor += gap
+                magCursor += gap
                 if anchoredMag == nil, cursor < restCursor {
-                    let denom = spacing > 0 ? spacing : 1
+                    let denom = gap > 0 ? gap : 1
                     let fraction = (cursor - restGapStart) / denom
-                    anchoredMag = magCursor - spacing + fraction * spacing
+                    anchoredMag =
+                        magCursor - gap + fraction * gap
                 }
             }
 
@@ -1096,11 +1078,19 @@ struct TileContainerView: View {
                 anchoredMag = magTileStart + fraction * magSize
             }
 
-            totalGrowth += magSize - restSize
+            let growth = magSize - restSize
+            totalGrowth += growth
+            if tile.id == DockBadgeService.handoffTileID {
+                handoffGrowth += growth
+            } else {
+                primaryGrowth += growth
+            }
         }
 
         return MagnificationWalk(
             totalGrowth: totalGrowth,
+            primaryGrowth: primaryGrowth,
+            handoffGrowth: handoffGrowth,
             anchoredMag: anchoredMag ?? (cursor + totalGrowth)
         )
     }
@@ -1116,30 +1106,69 @@ struct TileContainerView: View {
     /// own centering already splits growth across both sides, so adding
     /// our own offset would double-correct. Total growth is still
     /// published either way.
-    private var magnificationAnchorOffset: CGFloat {
+    private var contentAxisOffset: CGFloat {
         guard magnificationActive,
               let cursor = cursorAxisLocation else {
-            publishChromeGrowth(0)
-            return 0
+            publishChromeGrowth(
+                primary: 0,
+                handoff: 0
+            )
+            return surfaceGroupCenterOffset(
+                handoffGrowth: 0
+            )
         }
 
         let walk = computeMagnificationWalk(cursor: cursor)
-        publishChromeGrowth(walk.totalGrowth)
+        publishChromeGrowth(
+            primary: walk.primaryGrowth,
+            handoff: walk.handoffGrowth
+        )
+        let placementOffset = surfaceGroupCenterOffset(
+            handoffGrowth: walk.handoffGrowth
+        )
 
         let canvasAxisLength = projected(size: layout.tileCanvasFrame.size)
-        let contentAxisLength = totalAxisLength(for: layoutComponents)
+        let contentAxisLength =
+            presentedRestAxisLayout.totalExtent
         if contentAxisLength <= canvasAxisLength + 0.5 {
+            return placementOffset
+        }
+        return placementOffset
+            + cursor
+            - walk.anchoredMag
+    }
+
+    private func surfaceGroupCenterOffset(
+        handoffGrowth: CGFloat
+    ) -> CGFloat {
+        let primaryCenterOffset =
+            layout.chromeSurfaces.primaryCenterOffset
+        guard !mainDisplayTiles.isEmpty else {
             return 0
         }
-        return cursor - walk.anchoredMag
+        guard !handoffDisplayTiles.isEmpty else {
+            return primaryCenterOffset
+        }
+        return primaryCenterOffset
+            + (
+                presentedRestAxisLayout.interDockGap
+                + presentedRestAxisLayout.handoffDockExtent
+                + handoffGrowth
+            ) / 2
     }
 
     /// Defers the publish to the next runloop tick so we don't mutate
     /// shared state mid-render. The service isn't observed by this view,
     /// so this never re-triggers `TileContainerView`.
-    private func publishChromeGrowth(_ value: CGFloat) {
+    private func publishChromeGrowth(
+        primary: CGFloat,
+        handoff: CGFloat
+    ) {
         DispatchQueue.main.async {
-            DockChromeMetricsService.shared.setAlongAxisGrowth(value)
+            DockChromeMetricsService.shared.setAxisGrowth(
+                primary: primary,
+                handoff: handoff
+            )
         }
     }
 
@@ -1177,6 +1206,9 @@ struct TileContainerView: View {
     }
 
     private func isTileDraggable(_ tile: Tile) -> Bool {
+        if tile.id == DockBadgeService.handoffTileID {
+            return false
+        }
         // Inline children of an app folder (rendered next to the folder
         // tile in inline / grouped-opened modes) are derived from the
         // folder's contents — reordering them as standalone tiles would
@@ -1293,32 +1325,9 @@ struct TileContainerView: View {
         return supportedSpans.last ?? .one
     }
 
-    private var isDraggingPinnedTile: Bool {
-        guard let draggedTileID else {
-            return false
-        }
-        return isPinnedReorderable(tileID: draggedTileID)
-    }
-
-    private var isDraggingTrailingTile: Bool {
-        guard let draggedTileID else {
-            return false
-        }
-        return isTrailingReorderable(tileID: draggedTileID)
-    }
-
     private func isHiddenForActiveDrag(tileID: String) -> Bool {
-        if draggedAdditionalTileIDs.contains(tileID) {
-            return true
-        }
-
-        guard tileID == draggedTileID else {
-            return false
-        }
-
-        return (!isDraggingPinnedTile && draggedPinnedTileDestinationIndex != nil)
-            || (!isDraggingTrailingTile && draggedTrailingTileDestinationIndex != nil)
-            || draggedTileID == tileID
+        tileID == draggedTileID
+            || draggedAdditionalTileIDs.contains(tileID)
     }
 
     private func shouldHideDraggedOriginalTile(tileID: String) -> Bool {
@@ -1352,12 +1361,21 @@ struct TileContainerView: View {
         }
 
         if draggedTileID == nil {
-            draggedTileID = tile.id
+            let pinnedDestinationIndex =
+                isPinnedReorderable(tileID: tile.id)
+                    ? pinnedTileIDs.firstIndex(of: tile.id)
+                    : nil
+            let trailingDestinationIndex =
+                isTrailingReorderable(tileID: tile.id)
+                    ? trailingTileIDs.firstIndex(of: tile.id)
+                    : nil
+            presentation.beginInternalDrag(
+                tileID: tile.id,
+                pinnedDestinationIndex: pinnedDestinationIndex,
+                trailingDestinationIndex: trailingDestinationIndex
+            )
             draggedProfileID = profileService.activeProfileID
-            draggedAdditionalTileIDs = []
             draggedTileInitialFrame = tileFrames[tile.id]
-            draggedPinnedTileDestinationIndex = isPinnedReorderable(tileID: tile.id) ? pinnedTileIDs.firstIndex(of: tile.id) : nil
-            draggedTrailingTileDestinationIndex = isTrailingReorderable(tileID: tile.id) ? trailingTileIDs.firstIndex(of: tile.id) : nil
             // Drag wins over hover/widget previews — they'd block the cursor
             // and confuse the reorder animation otherwise.
             WindowPreviewWindowController.shared.dismissCurrent()
@@ -1399,8 +1417,10 @@ struct TileContainerView: View {
             }
             draggedAppFolderTargetTileID = groupTargetTileID
             draggedTrashTargetTileID = nil
-            draggedPinnedTileDestinationIndex = nil
-            draggedTrailingTileDestinationIndex = nil
+            presentation.setInternalDragDestinations(
+                pinned: nil,
+                trailing: nil
+            )
             editMode.paletteDropDestination = nil
             return
         }
@@ -1413,8 +1433,10 @@ struct TileContainerView: View {
             }
             draggedTrashTargetTileID = trashTargetTileID
             draggedAppFolderTargetTileID = nil
-            draggedPinnedTileDestinationIndex = nil
-            draggedTrailingTileDestinationIndex = nil
+            presentation.setInternalDragDestinations(
+                pinned: nil,
+                trailing: nil
+            )
             editMode.paletteDropDestination = nil
             return
         }
@@ -1585,8 +1607,10 @@ struct TileContainerView: View {
     private func clearDragPreviewDestinations() {
         draggedAppFolderTargetTileID = nil
         draggedTrashTargetTileID = nil
-        draggedPinnedTileDestinationIndex = nil
-        draggedTrailingTileDestinationIndex = nil
+        presentation.setInternalDragDestinations(
+            pinned: nil,
+            trailing: nil
+        )
         editMode.paletteDropDestination = nil
     }
 
@@ -1619,14 +1643,6 @@ struct TileContainerView: View {
                 )
             }
             updateDropDestination(for: .pinned, at: positionValue, sourceTileID: sourceTileID, isTileDrag: isTileDrag)
-            if isTileDrag {
-                if draggedTrailingTileDestinationIndex != nil {
-                    Self.logger.debug(
-                        "Drag clearing trailing preview sourceTileID=\(sourceTileID, privacy: .public) because pointer entered pinned region"
-                    )
-                }
-                draggedTrailingTileDestinationIndex = nil
-            }
             return
         }
 
@@ -1637,14 +1653,6 @@ struct TileContainerView: View {
                 )
             }
             updateDropDestination(for: .trailing, at: positionValue, sourceTileID: sourceTileID, isTileDrag: isTileDrag)
-            if isTileDrag {
-                if draggedPinnedTileDestinationIndex != nil {
-                    Self.logger.debug(
-                        "Drag clearing pinned preview sourceTileID=\(sourceTileID, privacy: .public) because pointer entered trailing region"
-                    )
-                }
-                draggedPinnedTileDestinationIndex = nil
-            }
             return
         }
 
@@ -1654,10 +1662,10 @@ struct TileContainerView: View {
             )
         }
         if isTileDrag {
-            draggedPinnedTileDestinationIndex = nil
-        }
-        if isTileDrag {
-            draggedTrailingTileDestinationIndex = nil
+            presentation.setInternalDragDestinations(
+                pinned: nil,
+                trailing: nil
+            )
         }
         if !isTileDrag {
             editMode.paletteDropDestination = nil
@@ -1757,10 +1765,10 @@ struct TileContainerView: View {
         guard let location, let paletteDrag = editMode.paletteDrag else {
             return
         }
-        guard let palettePreviewTile else {
-            editMode.paletteDropDestination = nil
-            return
-        }
+        let palettePreviewTile =
+            DockPresentationService.palettePreviewTile(
+                for: paletteDrag
+            )
         updatePreviewDestination(
             at: projected(point: location),
             sourceTileID: palettePreviewTile.id,
@@ -1776,7 +1784,8 @@ struct TileContainerView: View {
         guard !editMode.isActive else { return nil }
         for tile in displayTiles.reversed() {
             guard let frame = tileFrames[tile.id], frame.contains(location) else { continue }
-            guard case .app(let app) = tile.content,
+            guard tile.id != DockBadgeService.handoffTileID,
+                  case .app(let app) = tile.content,
                   app.displayedWidget == nil,
                   !app.bundleIdentifier.isEmpty else {
                 return nil
@@ -1883,9 +1892,15 @@ struct TileContainerView: View {
         if isTileDrag {
             switch section {
             case .pinned:
-                draggedPinnedTileDestinationIndex = index
+                presentation.setInternalDragDestinations(
+                    pinned: index,
+                    trailing: nil
+                )
             case .trailing:
-                draggedTrailingTileDestinationIndex = index
+                presentation.setInternalDragDestinations(
+                    pinned: nil,
+                    trailing: index
+                )
             }
             return
         }
@@ -1903,20 +1918,18 @@ struct TileContainerView: View {
                 "Clearing drag state tileID=\(draggedTileID ?? "nil", privacy: .public) pinnedDestination=\(optionalIndexDescription(draggedPinnedTileDestinationIndex), privacy: .public) trailingDestination=\(optionalIndexDescription(draggedTrailingTileDestinationIndex), privacy: .public) folderTarget=\(draggedAppFolderTargetTileID ?? "nil", privacy: .public)"
             )
         }
-        draggedTileID = nil
+        presentation.clearInternalDrag()
         draggedProfileID = nil
         draggedTileOffset = 0
         draggedTileInitialFrame = nil
-        draggedPinnedTileDestinationIndex = nil
-        draggedTrailingTileDestinationIndex = nil
         draggedAppFolderTargetTileID = nil
         draggedTrashTargetTileID = nil
-        draggedAdditionalTileIDs = []
         draggedPickupCandidateTileID = nil
     }
 
     private func bundleIdentifier(for tile: Tile) -> String? {
-        guard case .app(let app) = tile.content else {
+        guard tile.id != DockBadgeService.handoffTileID,
+              case .app(let app) = tile.content else {
             return nil
         }
         return app.bundleIdentifier.isEmpty ? nil : app.bundleIdentifier
@@ -2051,19 +2064,6 @@ struct TileContainerView: View {
         return nil
     }
 
-    private func groupedOpenedAppFolderID(for tileID: String) -> String? {
-        guard tileID.hasPrefix("folder-running:") else {
-            return nil
-        }
-
-        let suffix = tileID.dropFirst("folder-running:".count)
-        guard let separatorIndex = suffix.lastIndex(of: ":") else {
-            return nil
-        }
-
-        return String(suffix[..<separatorIndex])
-    }
-
     private func projected(size: CGSize) -> CGFloat {
         position.isVertical ? size.height : size.width
     }
@@ -2139,6 +2139,103 @@ struct TileContainerView: View {
 
     /// Total content size for the given tile list, including inter-tile spacing
     /// and outer stack padding. Used by MainWindow to size itself to fit.
+    static func dockContentLayout(
+        partition: PresentedTileDockPartition<Tile>,
+        tileSize: CGFloat,
+        tileHeight: CGFloat,
+        tileSpacing: CGFloat,
+        position: ResolvedDockWindowPosition,
+        compactWidgets: Bool = false,
+        mainEdgePadding: CGFloat = Self.edgePadding,
+        handoffEdgePadding: CGFloat =
+            Self.handoffDockEdgePadding,
+        interDockGap: CGFloat = Self.handoffDockGap
+    ) -> DockTileSurfaceContentLayout {
+        let mainSizes = partition.mainItems.map {
+            size(
+                for: $0,
+                tileSize: tileSize,
+                tileHeight: tileHeight,
+                tileSpacing: tileSpacing,
+                position: position,
+                compactWidgets: compactWidgets
+            )
+        }
+        let handoffSizes = partition.handoffItems.map {
+            size(
+                for: $0,
+                tileSize: tileSize,
+                tileHeight: tileHeight,
+                tileSpacing: tileSpacing,
+                position: position,
+                compactWidgets: compactWidgets
+            )
+        }
+        let axisLayout =
+            PresentedTileDockAxisMetrics.measure(
+                mainItemExtents: mainSizes.map {
+                    position.isVertical
+                        ? $0.height
+                        : $0.width
+                },
+                handoffItemExtents: handoffSizes.map {
+                    position.isVertical
+                        ? $0.height
+                        : $0.width
+                },
+                itemSpacing: tileSpacing,
+                mainEdgePadding: mainEdgePadding,
+                handoffEdgePadding: handoffEdgePadding,
+                interDockGap: interDockGap
+            )
+
+        let mainCrossExtent: CGFloat =
+            position.isVertical
+            ? (mainSizes.map(\.width).max() ?? 0)
+            : (mainSizes.map(\.height).max() ?? 0)
+        let handoffCrossExtent: CGFloat =
+            position.isVertical
+            ? (handoffSizes.map(\.width).max() ?? 0)
+            : (handoffSizes.map(\.height).max() ?? 0)
+        let combinedCrossExtent = max(
+            mainCrossExtent,
+            handoffCrossExtent
+        )
+
+        if position.isVertical {
+            return DockTileSurfaceContentLayout(
+                primarySize: CGSize(
+                    width: mainCrossExtent,
+                    height: axisLayout.mainDockExtent
+                ),
+                handoffSize: CGSize(
+                    width: handoffCrossExtent,
+                    height: axisLayout.handoffDockExtent
+                ),
+                interDockGap: axisLayout.interDockGap,
+                combinedSize: CGSize(
+                    width: combinedCrossExtent,
+                    height: axisLayout.totalExtent
+                )
+            )
+        }
+        return DockTileSurfaceContentLayout(
+            primarySize: CGSize(
+                width: axisLayout.mainDockExtent,
+                height: mainCrossExtent
+            ),
+            handoffSize: CGSize(
+                width: axisLayout.handoffDockExtent,
+                height: handoffCrossExtent
+            ),
+            interDockGap: axisLayout.interDockGap,
+            combinedSize: CGSize(
+                width: axisLayout.totalExtent,
+                height: combinedCrossExtent
+            )
+        )
+    }
+
     static func contentSize(
         tiles: [Tile],
         tileSize: CGFloat,
@@ -2151,113 +2248,23 @@ struct TileContainerView: View {
         let sizes = tiles.map {
             size(for: $0, tileSize: tileSize, tileHeight: tileHeight, tileSpacing: tileSpacing, position: position, compactWidgets: compactWidgets)
         }
-        let spacings = max(0, CGFloat(tiles.count) - 1) * tileSpacing
-
         if position.isVertical {
-            let height = sizes.reduce(CGFloat(0)) { $0 + $1.height } + spacings + edgePadding * 2
+            let height = PresentedTileAxisMetrics.extent(
+                itemExtents: sizes.map(\.height),
+                spacing: tileSpacing,
+                edgePadding: edgePadding
+            )
             let width = sizes.map(\.width).max() ?? tileSize
             return CGSize(width: width, height: height)
         }
 
-        let width = sizes.reduce(CGFloat(0)) { $0 + $1.width } + spacings + edgePadding * 2
+        let width = PresentedTileAxisMetrics.extent(
+            itemExtents: sizes.map(\.width),
+            spacing: tileSpacing,
+            edgePadding: edgePadding
+        )
         let height = sizes.map(\.height).max() ?? tileHeight
         return CGSize(width: width, height: height)
-    }
-
-    static func previewedTiles(
-        from tiles: [Tile],
-        paletteDrag: DockEditPaletteDrag?,
-        paletteDropDestination: DockEditDropDestination?,
-        externalAppDropPreview: AppTile? = nil,
-        externalFolderDropPreview: FolderTile? = nil
-    ) -> [Tile] {
-        var previewTiles = tiles
-
-        if let externalAppDropPreview {
-            let insertionIndex = previewTiles.firstIndex(where: { $0.id == "divider:trailing" }) ?? previewTiles.count
-            previewTiles.insert(
-                Tile(id: "drop-preview", content: .app(externalAppDropPreview)),
-                at: insertionIndex
-            )
-        }
-
-        if let externalFolderDropPreview {
-            let dividerIndex = previewTiles.firstIndex(where: { $0.id == "divider:trailing" }) ?? previewTiles.count
-            previewTiles.insert(
-                Tile(id: "drop-preview", content: .folder(externalFolderDropPreview)),
-                at: min(dividerIndex + 1, previewTiles.count)
-            )
-        }
-
-        guard let paletteDrag,
-              let paletteDropDestination,
-              let previewTile = palettePreviewTile(for: paletteDrag) else {
-            return previewTiles
-        }
-
-        switch paletteDropDestination.section {
-        case .pinned:
-            let insertionIndex = previewTiles.firstIndex(where: { $0.id == "divider:trailing" }) ?? previewTiles.count
-            previewTiles.insert(previewTile, at: insertionIndex)
-        case .trailing:
-            let insertionIndex = min(
-                max(0, (previewTiles.firstIndex(where: { $0.id == "divider:trailing" }) ?? (previewTiles.count - 1)) + 1),
-                previewTiles.count
-            )
-            previewTiles.insert(previewTile, at: insertionIndex)
-        }
-
-        return previewTiles
-    }
-
-    private static func palettePreviewTile(for paletteDrag: DockEditPaletteDrag) -> Tile? {
-        switch paletteDrag.item {
-        case .launchpad:
-            return Tile(
-                id: "editor-preview:launchpad",
-                content: .launchpad(LaunchpadTile(identifier: "editor-preview:launchpad"))
-            )
-        case .startMenu:
-            return Tile(
-                id: "editor-preview:start-menu",
-                content: .startMenu(StartMenuTile(identifier: "editor-preview:start-menu"))
-            )
-        case .spacer:
-            return Tile(id: "editor-preview:spacer", content: .spacer)
-        case .flexibleSpacer:
-            // Render the in-dock drop preview as a fixed-size spacer so the
-            // user has a tile-sized target to land on; the dropped tile is
-            // still persisted as `.flexibleSpacer` via the palette item
-            // factory and stretches once committed.
-            return Tile(id: "editor-preview:flexible-spacer", content: .spacer)
-        case .divider:
-            return Tile(id: "editor-preview:divider", content: .divider)
-        case .widget(let ownerBundleIdentifier, let kind):
-            return Tile(
-                id: "editor-preview:widget",
-                content: .widget(WidgetTile(
-                    identifier: "editor-preview:widget",
-                    title: kind.title,
-                    kind: kind,
-                    ownerBundleIdentifier: ownerBundleIdentifier,
-                    span: resolvedPaletteWidgetSpan(
-                        ownerBundleIdentifier: ownerBundleIdentifier,
-                        kind: kind,
-                        requestedSpan: paletteDrag.widgetSpan
-                    )
-                ))
-            )
-        case .smartStack:
-            return Tile(
-                id: "editor-preview:smart-stack",
-                content: .smartStack(SmartStackTile(
-                    identifier: "editor-preview:smart-stack",
-                    title: "Smart Stack",
-                    widgets: WidgetCatalog.smartStackRegistrations.map { $0.makeTile() },
-                    span: .three
-                ))
-            )
-        }
     }
 
     private static func resolvedPaletteWidgetSpan(

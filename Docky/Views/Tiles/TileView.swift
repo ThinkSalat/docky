@@ -54,6 +54,9 @@ struct TileView: View {
 
     private static let finderBundleIdentifier = "com.apple.finder"
     private static let folderPopoverRetapGuardInterval: TimeInterval = 0.25
+    private var isHandoffTile: Bool {
+        tile.id == DockBadgeService.handoffTileID
+    }
 
     private enum FolderOpenBehavior: Equatable {
         case togglePresentation
@@ -85,6 +88,13 @@ struct TileView: View {
     }
 
     private func contextActions(modifierFlags: NSEvent.ModifierFlags) -> [ContextAction] {
+        if isHandoffTile {
+            return [
+                .action(String(localized: "Continue with Handoff")) {
+                    DockBadgeService.shared.continueHandoff()
+                }
+            ]
+        }
 
         if let catalogActions = MenuCatalogService.shared.contextActions(for: tile, modifierFlags: modifierFlags) {
             switch tile.content {
@@ -488,6 +498,9 @@ struct TileView: View {
     /// True when this tile represents the currently foreground app
     /// (or any app inside a grouped folder is foreground).
     private var isFrontmostTile: Bool {
+        guard !isHandoffTile else {
+            return false
+        }
         switch tile.content {
         case .app(let app):
             return workspace.isFrontmost(bundleIdentifier: app.bundleIdentifier)
@@ -505,7 +518,10 @@ struct TileView: View {
     /// numeric badge of the apps they contain (mirroring how the count rolls
     /// up when running apps collapse into a folder).
     private var badgeText: String? {
-        guard preferences.showsAppBadges else { return nil }
+        guard preferences.showsAppBadges,
+              !isHandoffTile else {
+            return nil
+        }
         switch tile.content {
         case .app(let app):
             return dockBadges.badge(forBundleIdentifier: app.bundleIdentifier)
@@ -812,17 +828,22 @@ struct TileView: View {
     }
 
     private var showsRunningIndicator: Bool {
+        guard !isHandoffTile else {
+            return false
+        }
         switch tile.content {
         case .app(let app):
-            workspace.isRunning(bundleIdentifier: app.bundleIdentifier)
+            return workspace.isRunning(
+                bundleIdentifier: app.bundleIdentifier
+            )
         case .minimizedWindow:
-            false
+            return false
         case .appFolder(let folder):
-            folder.apps.contains { app in
+            return folder.apps.contains { app in
                 workspace.isRunning(bundleIdentifier: app.bundleIdentifier)
             }
         case .launchpad, .startMenu, .widget, .smartStack, .folder, .spacer, .flexibleSpacer, .divider, .trash:
-            false
+            return false
         }
     }
 
@@ -1182,27 +1203,34 @@ struct TileView: View {
     }
 
     private var tooltipTitle: String? {
+        if isHandoffTile,
+           case .app(let app) = tile.content {
+            return String(
+                localized:
+                    "Continue \(app.displayName) with Handoff"
+            )
+        }
         switch tile.content {
         case .app(let app):
-            app.displayName
+            return app.displayName
         case .minimizedWindow(let window):
-            window.windowTitle
+            return window.windowTitle
         case .appFolder(let folder):
-            folder.displayName
+            return folder.displayName
         case .launchpad(let launchpad):
-            launchpad.title
+            return launchpad.title
         case .startMenu(let menu):
-            menu.title
+            return menu.title
         case .widget(let widget):
-            widget.title
+            return widget.title
         case .smartStack(let stack):
-            stack.title
+            return stack.title
         case .folder(let folder):
-            folder.displayName
+            return folder.displayName
         case .trash:
-            "Trash"
+            return "Trash"
         case .spacer, .flexibleSpacer, .divider:
-            nil
+            return nil
         }
     }
 
@@ -1284,6 +1312,9 @@ struct TileView: View {
     /// preview for this tile. `.app` returns its single bundle; `.appFolder`
     /// returns every contained app's bundle.
     private var windowPreviewBundleIdentifiers: [String] {
+        guard !isHandoffTile else {
+            return []
+        }
         switch tile.content {
         case .app(let app) where app.displayedWidget == nil:
             return app.bundleIdentifier.isEmpty ? [] : [app.bundleIdentifier]
@@ -1392,6 +1423,9 @@ struct TileView: View {
     }
 
     private var tileContentKindDescription: String {
+        if isHandoffTile {
+            return "handoff"
+        }
         switch tile.content {
         case .app: return "app"
         case .minimizedWindow: return "minimizedWindow"
@@ -1421,6 +1455,12 @@ struct TileView: View {
         windowPreviewDelayTask?.cancel()
         windowPreviewDelayTask = nil
         WindowPreviewWindowController.shared.dismiss(sourceTileID: tile.id)
+
+        if isHandoffTile {
+            isTooltipPresented = false
+            DockBadgeService.shared.continueHandoff()
+            return
+        }
 
         // If the Start menu is open, taps on other tiles should dismiss
         // it (the dock-window event monitor stays out of the way so the

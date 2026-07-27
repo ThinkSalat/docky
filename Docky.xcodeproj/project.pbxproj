@@ -52,6 +52,10 @@
 		D0C2A1142FB0000000000114 /* DiagnosticPrivacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1192FB0000000000119 /* DiagnosticPrivacy.swift */; };
 		D0C2A1202FB0000000000120 /* WindowReservationPermissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1222FB0000000000122 /* WindowReservationPermissionTests.swift */; };
 		D0C2A1212FB0000000000121 /* WindowReservationActivationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1232FB0000000000123 /* WindowReservationActivationPolicy.swift */; };
+		D0C2A1302FB0000000000130 /* HandoffSuggestionStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1322FB0000000000132 /* HandoffSuggestionStateTests.swift */; };
+		D0C2A1312FB0000000000131 /* HandoffSuggestionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1332FB0000000000133 /* HandoffSuggestionState.swift */; };
+		D0C2A1402FB0000000000140 /* PresentedTileSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1422FB0000000000142 /* PresentedTileSnapshotTests.swift */; };
+		D0C2A1412FB0000000000141 /* PresentedTileSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1432FB0000000000143 /* PresentedTileSnapshot.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -136,6 +140,10 @@
 		D0C2A1192FB0000000000119 /* DiagnosticPrivacy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DiagnosticPrivacy.swift; path = Docky/Models/DiagnosticPrivacy.swift; sourceTree = SOURCE_ROOT; };
 		D0C2A1222FB0000000000122 /* WindowReservationPermissionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowReservationPermissionTests.swift; sourceTree = "<group>"; };
 		D0C2A1232FB0000000000123 /* WindowReservationActivationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = WindowReservationActivationPolicy.swift; path = Docky/Models/WindowReservationActivationPolicy.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1322FB0000000000132 /* HandoffSuggestionStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandoffSuggestionStateTests.swift; sourceTree = "<group>"; };
+		D0C2A1332FB0000000000133 /* HandoffSuggestionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = HandoffSuggestionState.swift; path = Docky/Models/HandoffSuggestionState.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1422FB0000000000142 /* PresentedTileSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresentedTileSnapshotTests.swift; sourceTree = "<group>"; };
+		D0C2A1432FB0000000000143 /* PresentedTileSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PresentedTileSnapshot.swift; path = Docky/Models/PresentedTileSnapshot.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -252,6 +260,10 @@
 				D0C2A1192FB0000000000119 /* DiagnosticPrivacy.swift */,
 				D0C2A1222FB0000000000122 /* WindowReservationPermissionTests.swift */,
 				D0C2A1232FB0000000000123 /* WindowReservationActivationPolicy.swift */,
+				D0C2A1322FB0000000000132 /* HandoffSuggestionStateTests.swift */,
+				D0C2A1332FB0000000000133 /* HandoffSuggestionState.swift */,
+				D0C2A1422FB0000000000142 /* PresentedTileSnapshotTests.swift */,
+				D0C2A1432FB0000000000143 /* PresentedTileSnapshot.swift */,
 			);
 			path = DockyTests;
 			sourceTree = "<group>";
@@ -475,6 +487,10 @@
 				D0C2A1142FB0000000000114 /* DiagnosticPrivacy.swift in Sources */,
 				D0C2A1202FB0000000000120 /* WindowReservationPermissionTests.swift in Sources */,
 				D0C2A1212FB0000000000121 /* WindowReservationActivationPolicy.swift in Sources */,
+				D0C2A1302FB0000000000130 /* HandoffSuggestionStateTests.swift in Sources */,
+				D0C2A1312FB0000000000131 /* HandoffSuggestionState.swift in Sources */,
+				D0C2A1402FB0000000000140 /* PresentedTileSnapshotTests.swift in Sources */,
+				D0C2A1412FB0000000000141 /* PresentedTileSnapshot.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -13,18 +13,35 @@ import Combine
 import CoreGraphics
 import Foundation
 
+struct DockChromeAxisGrowth: Equatable {
+    var primary: CGFloat = 0
+    var handoff: CGFloat = 0
+}
+
 final class DockChromeMetricsService: ObservableObject {
     static let shared = DockChromeMetricsService()
 
-    /// Total along-axis growth from magnification, summed across every
-    /// tile. Already incorporates ramp strength via the per-tile sizes.
-    /// Zero when magnification is inactive.
-    @Published private(set) var alongAxisGrowth: CGFloat = 0
+    /// Along-axis growth is tracked per visual surface. A single aggregate
+    /// would make one capsule expand when the pointer magnifies a tile in
+    /// the other capsule, visually bridging the detached Handoff dock.
+    @Published private(set) var axisGrowth =
+        DockChromeAxisGrowth()
 
     private init() {}
 
-    func setAlongAxisGrowth(_ value: CGFloat) {
-        guard abs(alongAxisGrowth - value) > 0.0001 else { return }
-        alongAxisGrowth = value
+    func setAxisGrowth(
+        primary: CGFloat,
+        handoff: CGFloat
+    ) {
+        let next = DockChromeAxisGrowth(
+            primary: primary,
+            handoff: handoff
+        )
+        guard abs(axisGrowth.primary - next.primary) > 0.0001
+            || abs(axisGrowth.handoff - next.handoff)
+                > 0.0001 else {
+            return
+        }
+        axisGrowth = next
     }
 }

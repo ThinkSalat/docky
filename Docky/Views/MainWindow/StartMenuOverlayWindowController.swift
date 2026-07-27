@@ -88,8 +88,12 @@ final class StartMenuOverlayWindowController: NSWindowController {
     /// addChildWindow already translates the child for parent moves,
     /// but it can't see chrome shifts that happen inside the parent.
     private func observeChromeAndParent() {
-        DockLayoutService.shared.$chromeSize
-            .removeDuplicates(by: { abs($0.width - $1.width) < 0.5 && abs($0.height - $1.height) < 0.5 })
+        let chromeSurfacePublisher =
+            DockLayoutService.shared.$chromeSurfaces
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+
+        chromeSurfacePublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateFrameIfPresented() }
             .store(in: &cancellables)

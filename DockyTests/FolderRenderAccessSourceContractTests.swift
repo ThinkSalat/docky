@@ -1424,6 +1424,323 @@ final class FolderRenderAccessSourceContractTests: XCTestCase {
         )
     }
 
+    func testDockPresentationHasOneCanonicalSnapshotForRenderingAndSizing()
+        throws {
+        let presentation = try sourceFile(
+            "Docky/Services/DockPresentationService.swift"
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "@Published private(set) var snapshot"
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "let pinnedBaseTiles: [Tile]"
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "let trailingTiles: [Tile]"
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "var dockPartition:"
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "let separatesHandoffDock: Bool"
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "PresentedTileDockPartition.presenting("
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "separatesHandoff: separatesHandoffDock"
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "_ = preferences.separateHandoffDock"
+            )
+        )
+        let snapshotRebuild = try sourceSection(
+            in: presentation,
+            startingWith:
+                "    private func rebuildSnapshot()",
+            endingWith:
+                "\n}\n\n@MainActor\nprivate enum DockPresentationComposer"
+        )
+        XCTAssertTrue(
+            snapshotRebuild.contains(
+                "separatesHandoffDock:"
+            )
+        )
+        XCTAssertTrue(
+            snapshotRebuild.contains(
+                "preferences.separateHandoffDock"
+            )
+        )
+        XCTAssertFalse(
+            presentation.contains(
+                "private(set) var palettePreviewTile"
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "PresentedTileReducer.applyingTransient("
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "insertionBeforeID: \"divider:trailing\""
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "TileStore.applyingThemeLayoutInsertions("
+            )
+        )
+        XCTAssertTrue(
+            presentation.contains(
+                "internalDrag = InternalDragState()"
+            )
+        )
+
+        let container = try sourceFile(
+            "Docky/Views/Tiles/TileContainerView.swift"
+        )
+        let displayTiles = try sourceSection(
+            in: container,
+            startingWith:
+                "    private var displayTiles: [Tile] {",
+            endingWith: "    private var dockPartition:"
+        )
+        XCTAssertEqual(
+            displayTiles
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "private var displayTiles: [Tile] {\n" +
+                "        presentation.snapshot.items\n" +
+                "    }"
+        )
+        XCTAssertFalse(container.contains(
+            "@State private var draggedTileID"
+        ))
+        XCTAssertFalse(container.contains(
+            "applyingHandoffPresentation("
+        ))
+        XCTAssertFalse(container.contains(
+            "static func previewedTiles("
+        ))
+        XCTAssertFalse(container.contains(
+            "TileStore.applyingThemeLayoutInsertions("
+        ))
+        XCTAssertTrue(
+            container.contains(
+                "presentation.snapshot.pinnedBaseTiles"
+            )
+        )
+        XCTAssertTrue(
+            container.contains(
+                "presentation.snapshot.trailingTiles"
+            )
+        )
+        XCTAssertTrue(
+            container.contains(
+                "DockPresentationService.palettePreviewTile("
+            )
+        )
+        XCTAssertTrue(
+            container.contains(
+                "presentation.snapshot.dockPartition"
+            )
+        )
+        XCTAssertTrue(
+            container.contains(
+                "private var handoffDockSurface:"
+            )
+        )
+        XCTAssertTrue(
+            container.contains(
+                "ForEach(handoffDisplayTiles)"
+            )
+        )
+        XCTAssertTrue(
+            container.contains(
+                "for tile in mainDisplayTiles"
+            )
+        )
+
+        let tileView = try sourceFile(
+            "Docky/Views/Tiles/TileView.swift"
+        )
+        let content = try sourceSection(
+            in: tileView,
+            startingWith: "    private var content: some View",
+            endingWith: "    private var tooltipTitle:"
+        )
+        XCTAssertTrue(
+            content.contains("AppTileView(")
+        )
+        XCTAssertFalse(content.contains("DockHandoffBadgeView"))
+        XCTAssertFalse(content.contains("handoffBadge"))
+
+        let badgeSource = try sourceFile(
+            "Docky/Views/Tiles/DockBadgeView.swift"
+        )
+        XCTAssertFalse(
+            badgeSource.contains("DockHandoffBadgeView")
+        )
+
+        let iconCache = try sourceFile(
+            "Docky/Services/IconCacheService.swift"
+        )
+        XCTAssertFalse(iconCache.contains("visibleContentRectCache"))
+        XCTAssertFalse(
+            iconCache.contains("loadVisibleContentRectAsync")
+        )
+
+        let mainWindow = try sourceFile(
+            "Docky/Views/MainWindow/MainWindow.swift"
+        )
+        let frameObservation = try sourceSection(
+            in: mainWindow,
+            startingWith: "    private func observeFrameInputs()",
+            endingWith:
+                "    private func observeScreenAndSpaceInputs()"
+        )
+        XCTAssertTrue(
+            frameObservation.contains(
+                "presentation.$snapshot"
+            )
+        )
+        XCTAssertFalse(
+            frameObservation.contains(
+                ".map(\\.items)"
+            )
+        )
+        XCTAssertFalse(frameObservation.contains("tileStore.$tiles"))
+        XCTAssertFalse(
+            frameObservation.contains(
+                "dockBadges.$handoffSuggestion"
+            )
+        )
+        XCTAssertFalse(
+            frameObservation.contains(
+                "editMode.$paletteDropDestination"
+            )
+        )
+        XCTAssertFalse(
+            frameObservation.contains(
+                "DockDragService.shared.$destinationIndex"
+            )
+        )
+
+        let frameCalculation = try sourceSection(
+            in: mainWindow,
+            startingWith:
+                "    private func applyCurrentFrame(animated: Bool, duration:",
+            endingWith: "    private func applyFrame("
+        )
+        XCTAssertTrue(
+            frameCalculation.contains(
+                "let sizingTiles = presentation.snapshot.items"
+            )
+        )
+        XCTAssertTrue(
+            frameCalculation.contains(
+                "presentation.snapshot.dockPartition"
+            )
+        )
+        XCTAssertTrue(
+            frameCalculation.contains(
+                "TileContainerView.dockContentLayout("
+            )
+        )
+        XCTAssertTrue(
+            frameCalculation.contains(
+                "layout.setChromeSurfaces("
+            )
+        )
+        XCTAssertFalse(
+            frameCalculation.contains("tileStore.tiles")
+        )
+        XCTAssertFalse(
+            frameCalculation.contains("previewedTiles(")
+        )
+        XCTAssertFalse(
+            frameCalculation.contains(
+                "applyingHandoffPresentation("
+            )
+        )
+
+        let mainWindowView = try sourceFile(
+            "Docky/Views/MainWindow/MainWindowView.swift"
+        )
+        XCTAssertTrue(
+            mainWindowView.contains(
+                "chromeSurfaceBackgrounds(chromeSurfaces)"
+            )
+        )
+        XCTAssertTrue(
+            mainWindowView.contains(
+                "surfaces.interDockGap"
+            )
+        )
+        XCTAssertTrue(
+            mainWindowView.contains(
+                "surfaces.handoffSize"
+            )
+        )
+
+        let layoutService = try sourceFile(
+            "Docky/Services/DockLayoutService.swift"
+        )
+        XCTAssertTrue(
+            layoutService.contains(
+                "@Published private(set) var chromeSurfaces"
+            )
+        )
+        XCTAssertFalse(
+            layoutService.contains(
+                "@Published private(set) var chromeSize"
+            )
+        )
+
+        let chromeMetrics = try sourceFile(
+            "Docky/Services/DockChromeMetricsService.swift"
+        )
+        XCTAssertTrue(
+            chromeMetrics.contains(
+                "var primary: CGFloat"
+            )
+        )
+        XCTAssertTrue(
+            chromeMetrics.contains(
+                "var handoff: CGFloat"
+            )
+        )
+
+        let startMenu = try sourceFile(
+            "Docky/Views/MainWindow/StartMenuOverlayWindowController.swift"
+        )
+        XCTAssertTrue(
+            startMenu.contains(
+                "DockLayoutService.shared.$chromeSurfaces"
+            )
+        )
+        XCTAssertFalse(
+            startMenu.contains(
+                ".map(\\.primarySize)"
+            )
+        )
+    }
+
     private func sourceFile(_ relativePath: String) throws -> String {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

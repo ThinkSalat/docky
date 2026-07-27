@@ -2480,11 +2480,10 @@ final class TileStore: ObservableObject {
     /// resolve are skipped silently, themes stay portable across
     /// docks that don't happen to contain the referenced app.
     ///
-    /// Called by `TileContainerView.displayTiles` rather than from
-    /// `rebuildTiles` so the inserted tiles survive the editor-preview
-    /// merge that re-builds the trailing section from
-    /// `previewTrailingSectionTiles` (anything in `tiles` past
-    /// `divider:trailing` would otherwise be dropped).
+    /// Called by `DockPresentationService` rather than from `rebuildTiles`
+    /// so the inserted tiles survive its transient editor/drag merge.
+    /// Keeping this in the canonical presentation pipeline also guarantees
+    /// the renderer and window measurement see identical insertions.
     static func applyingThemeLayoutInsertions(to tiles: [Tile]) -> [Tile] {
         guard let insertions = ThemeManager.shared.activeManifest?.layout?.insertions,
               !insertions.isEmpty else {
