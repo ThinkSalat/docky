@@ -56,6 +56,7 @@
 		D0C2A1312FB0000000000131 /* HandoffSuggestionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1332FB0000000000133 /* HandoffSuggestionState.swift */; };
 		D0C2A1402FB0000000000140 /* PresentedTileSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1422FB0000000000142 /* PresentedTileSnapshotTests.swift */; };
 		D0C2A1412FB0000000000141 /* PresentedTileSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1432FB0000000000143 /* PresentedTileSnapshot.swift */; };
+		D0C2A1512FB0000000000151 /* DockWindowTintLayerPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1532FB0000000000153 /* DockWindowTintLayerPolicy.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -144,6 +145,7 @@
 		D0C2A1332FB0000000000133 /* HandoffSuggestionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = HandoffSuggestionState.swift; path = Docky/Models/HandoffSuggestionState.swift; sourceTree = SOURCE_ROOT; };
 		D0C2A1422FB0000000000142 /* PresentedTileSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresentedTileSnapshotTests.swift; sourceTree = "<group>"; };
 		D0C2A1432FB0000000000143 /* PresentedTileSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PresentedTileSnapshot.swift; path = Docky/Models/PresentedTileSnapshot.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1532FB0000000000153 /* DockWindowTintLayerPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DockWindowTintLayerPolicy.swift; path = Docky/Models/DockWindowTintLayerPolicy.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -264,6 +266,7 @@
 				D0C2A1332FB0000000000133 /* HandoffSuggestionState.swift */,
 				D0C2A1422FB0000000000142 /* PresentedTileSnapshotTests.swift */,
 				D0C2A1432FB0000000000143 /* PresentedTileSnapshot.swift */,
+				D0C2A1532FB0000000000153 /* DockWindowTintLayerPolicy.swift */,
 			);
 			path = DockyTests;
 			sourceTree = "<group>";
@@ -491,6 +494,7 @@
 				D0C2A1312FB0000000000131 /* HandoffSuggestionState.swift in Sources */,
 				D0C2A1402FB0000000000140 /* PresentedTileSnapshotTests.swift in Sources */,
 				D0C2A1412FB0000000000141 /* PresentedTileSnapshot.swift in Sources */,
+				D0C2A1512FB0000000000151 /* DockWindowTintLayerPolicy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
