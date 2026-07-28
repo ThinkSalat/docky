@@ -9,6 +9,80 @@
 //
 
 import Foundation
+import Observation
+
+/// Observable theme-override membership with per-key invalidation.
+///
+/// A plain observable `Set<String>` invalidates every reader whenever any
+/// member changes. That made an indicator-color override redraw unrelated
+/// window chrome because both settings consulted the same set. Each key gets a
+/// stable flag object here, while `keys` remains the intentionally broad
+/// observation used by the Themes settings summary.
+@Observable
+final class DockyThemeOverrideObservationStore {
+    @Observable
+    final class Flag {
+        var isOverridden: Bool
+
+        init(isOverridden: Bool) {
+            self.isOverridden = isOverridden
+        }
+    }
+
+    private(set) var keys: Set<String>
+    @ObservationIgnored private var membership: Set<String>
+    @ObservationIgnored private var flags: [String: Flag]
+
+    init(keys: Set<String> = []) {
+        self.keys = keys
+        self.membership = keys
+        self.flags = Dictionary(
+            uniqueKeysWithValues: keys.map {
+                ($0, Flag(isOverridden: true))
+            }
+        )
+    }
+
+    func contains(_ key: String) -> Bool {
+        flag(for: key).isOverridden
+    }
+
+    @discardableResult
+    func setOverridden(_ isOverridden: Bool, for key: String) -> Bool {
+        let flag = flag(for: key)
+        guard flag.isOverridden != isOverridden else { return false }
+
+        flag.isOverridden = isOverridden
+        if isOverridden {
+            membership.insert(key)
+            keys.insert(key)
+        } else {
+            membership.remove(key)
+            keys.remove(key)
+        }
+        return true
+    }
+
+    func replaceAll(with newKeys: Set<String>) {
+        guard newKeys != membership else { return }
+
+        for key in membership.symmetricDifference(newKeys) {
+            flag(for: key).isOverridden = newKeys.contains(key)
+        }
+        membership = newKeys
+        keys = newKeys
+    }
+
+    private func flag(for key: String) -> Flag {
+        if let existing = flags[key] {
+            return existing
+        }
+
+        let created = Flag(isOverridden: membership.contains(key))
+        flags[key] = created
+        return created
+    }
+}
 
 nonisolated enum DockyPreferenceResetScope: Equatable {
     case appearance

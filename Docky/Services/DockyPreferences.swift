@@ -1027,6 +1027,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         ProfileStateBootstrap.shared.preferences
     }
 
+    private let appearanceOverrideStore =
+        DockyThemeOverrideObservationStore()
+
     /// Set of `Keys.*` strings the user has explicitly customized. Each
     /// theme-aware setter inserts its key; setters that clear a value
     /// (e.g. setting `windowTintColor` back to `nil`) remove it.
@@ -1040,14 +1043,17 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// Populated on first launch via the migration in `init` (eligible keys
     /// already present in `UserDefaults` at upgrade time are treated as
     /// user-overridden; automatically imported DockSettings values are not).
-    var userOverriddenAppearanceKeys: Set<String> = []
+    private(set) var userOverriddenAppearanceKeys: Set<String> {
+        get { appearanceOverrideStore.keys }
+        set { appearanceOverrideStore.replaceAll(with: newValue) }
+    }
 
     /// Whether the user has an explicit override for this preference
     /// key. Used by Settings UI to show an "override / theme value"
     /// affordance, and by `effective<X>` accessors to decide which
     /// value to return.
     func isAppearanceOverridden(_ key: String) -> Bool {
-        userOverriddenAppearanceKeys.contains(key)
+        appearanceOverrideStore.contains(key)
     }
 
     /// Marks a theme-aware key as user-overridden. Idempotent.
@@ -1057,8 +1063,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// magnification) can participate in the same override layer when a
     /// theme tries to provide a `behavior.*` value.
     func markAppearanceOverride(_ key: String) {
-        guard !userOverriddenAppearanceKeys.contains(key) else { return }
-        userOverriddenAppearanceKeys.insert(key)
+        guard appearanceOverrideStore.setOverridden(true, for: key) else {
+            return
+        }
         persistUserOverriddenAppearanceKeys()
     }
 
@@ -1067,8 +1074,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// preferring the theme value (or built-in default). Used by the
     /// Settings UI "revert to theme" affordance.
     func clearAppearanceOverride(_ key: String) {
-        guard userOverriddenAppearanceKeys.contains(key) else { return }
-        userOverriddenAppearanceKeys.remove(key)
+        guard appearanceOverrideStore.setOverridden(false, for: key) else {
+            return
+        }
         persistUserOverriddenAppearanceKeys()
     }
 
@@ -1076,7 +1084,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// "use theme as-is" flow; partial resets use scoped clearing.
     func clearAllAppearanceOverrides() {
         guard !userOverriddenAppearanceKeys.isEmpty else { return }
-        userOverriddenAppearanceKeys.removeAll()
+        appearanceOverrideStore.replaceAll(with: [])
         persistUserOverriddenAppearanceKeys()
     }
 
@@ -1090,7 +1098,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
             afterReset: scope
         )
         guard retained != userOverriddenAppearanceKeys else { return }
-        userOverriddenAppearanceKeys = retained
+        appearanceOverrideStore.replaceAll(with: retained)
         persistUserOverriddenAppearanceKeys()
     }
 
@@ -3096,7 +3104,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         return appearanceOverride(Keys.windowClipShape, raw: windowClipShape, themed: themed)
     }
 
-    var effectiveWindowTintColor: NSColor {
+    /// User/theme tint color without the built-in material fallback.
+    /// `nil` means native Liquid Glass should supply its own color.
+    var effectiveExplicitWindowTintColor: NSColor? {
         if isAppearanceOverridden(Keys.windowTintColor), let user = windowTintColor {
             return user.nsColor
         }
@@ -3104,7 +3114,26 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
            let resolved = themed.nsColor {
             return resolved
         }
-        return Self.defaultWindowTintColor
+        return nil
+    }
+
+    var effectiveWindowTintColor: NSColor {
+        effectiveExplicitWindowTintColor ?? Self.defaultWindowTintColor
+    }
+
+    /// An opacity-only override is still an explicit request to layer the
+    /// fallback material color. This preserves existing themes that tune
+    /// `tintOpacity` without supplying their own tint color.
+    var hasExplicitWindowTintPresentation: Bool {
+        if isAppearanceOverridden(Keys.windowTintColor)
+            || isAppearanceOverridden(Keys.windowTintOpacity) {
+            return true
+        }
+
+        let themedWindow =
+            ThemeManager.shared.activeManifest?.appearance.window
+        return themedWindow?.tintColor != nil
+            || themedWindow?.tintOpacity != nil
     }
 
     var effectiveWindowTintOpacity: CGFloat {
@@ -4186,7 +4215,22 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     static var defaultWindowTintColor: NSColor {
-        NSColor.windowBackgroundColor.blended(withFraction: 0.18, of: .black) ?? .windowBackgroundColor
+        // Resolve semantic AppKit colors under the application's effective
+        // appearance. Relying on `NSAppearance.current` made this value depend
+        // on whichever window happened to trigger a SwiftUI redraw.
+        let appearance =
+            NSApp?.effectiveAppearance
+            ?? NSAppearance(named: .aqua)!
+        var resolved = NSColor.windowBackgroundColor
+        appearance.performAsCurrentDrawingAppearance {
+            resolved =
+                NSColor.windowBackgroundColor.blended(
+                    withFraction: 0.18,
+                    of: .black
+                )
+                ?? .windowBackgroundColor
+        }
+        return resolved
     }
 
     private enum Keys {

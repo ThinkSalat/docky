@@ -157,8 +157,7 @@ struct MainWindowView: View {
         let radii = chromeCornerRadii
         backgroundFill(radii: radii)
             .background {
-                if !preferences.effectiveDisablesGlassLook,
-                   FeatureGate.shared.isAvailable(.liquidGlass),
+                if usesNativeLiquidGlassChrome,
                    #available(macOS 26.0, *) {
                     // NSGlassEffectView only supports a uniform corner
                     // radius via `layer.cornerRadius`. Pass the largest
@@ -207,8 +206,7 @@ struct MainWindowView: View {
                 CachedAsyncImageFile(
                     url: preferences.effectiveWindowBackgroundImageURL,
                     placeholder: {
-                        Color(nsColor: preferences.effectiveWindowTintColor)
-                            .opacity(preferences.effectiveWindowTintOpacity)
+                        windowTintLayer
                     }
                 ) { backgroundImage in
                     GeometryReader { proxy in
@@ -223,6 +221,35 @@ struct MainWindowView: View {
                 }
             }
             .clipped()
+    }
+
+    @ViewBuilder
+    private var windowTintLayer: some View {
+        switch DockWindowTintLayerPolicy.resolve(
+            hasExplicitTintPresentation:
+                preferences.hasExplicitWindowTintPresentation,
+            usesNativeLiquidGlass: usesNativeLiquidGlassChrome
+        ) {
+        case .transparent:
+            // Native Liquid Glass supplies the material color. Adding the
+            // legacy fallback here made unrelated redraws look like the user
+            // had suddenly enabled a gray window tint.
+            Color.clear
+        case .resolvedTint:
+            Color(nsColor: preferences.effectiveWindowTintColor)
+                .opacity(preferences.effectiveWindowTintOpacity)
+        }
+    }
+
+    private var usesNativeLiquidGlassChrome: Bool {
+        guard !preferences.effectiveDisablesGlassLook,
+              FeatureGate.shared.isAvailable(.liquidGlass) else {
+            return false
+        }
+        if #available(macOS 26.0, *) {
+            return true
+        }
+        return false
     }
 
     @ViewBuilder

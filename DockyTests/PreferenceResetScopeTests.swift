@@ -1,7 +1,91 @@
 import Foundation
+import Observation
 import XCTest
 
 final class PreferenceResetScopeTests: XCTestCase {
+    func testOverrideObservationOnlyInvalidatesTheKeyBeingObserved() {
+        let windowTintKey =
+            DockyThemeOverrideKey.windowTintColor.rawValue
+        let indicatorKey =
+            DockyThemeOverrideKey.activeIndicatorColor.rawValue
+        let store = DockyThemeOverrideObservationStore()
+        let observedChanges = ObservationChangeCounter()
+
+        withObservationTracking {
+            _ = store.contains(windowTintKey)
+        } onChange: {
+            observedChanges.increment()
+        }
+
+        XCTAssertTrue(store.setOverridden(true, for: indicatorKey))
+        XCTAssertEqual(observedChanges.value, 0)
+
+        XCTAssertTrue(store.setOverridden(true, for: windowTintKey))
+        XCTAssertEqual(observedChanges.value, 1)
+    }
+
+    func testOverrideKeySummaryRetainsBroadObservation() {
+        let store = DockyThemeOverrideObservationStore()
+        let indicatorKey =
+            DockyThemeOverrideKey.activeIndicatorColor.rawValue
+        let observedChanges = ObservationChangeCounter()
+
+        withObservationTracking {
+            _ = store.keys
+        } onChange: {
+            observedChanges.increment()
+        }
+
+        XCTAssertTrue(store.setOverridden(true, for: indicatorKey))
+        XCTAssertEqual(observedChanges.value, 1)
+        XCTAssertEqual(store.keys, [indicatorKey])
+    }
+
+    func testOverrideStoreReplacementUpdatesPerKeyMembership() {
+        let tintKey = DockyThemeOverrideKey.windowTintColor.rawValue
+        let indicatorKey =
+            DockyThemeOverrideKey.activeIndicatorColor.rawValue
+        let store = DockyThemeOverrideObservationStore(
+            keys: [tintKey]
+        )
+
+        store.replaceAll(with: [indicatorKey])
+
+        XCTAssertFalse(store.contains(tintKey))
+        XCTAssertTrue(store.contains(indicatorKey))
+        XCTAssertEqual(store.keys, [indicatorKey])
+    }
+
+    func testNativeLiquidGlassWithoutExplicitTintUsesNoTintLayer() {
+        XCTAssertEqual(
+            DockWindowTintLayerPolicy.resolve(
+                hasExplicitTintPresentation: false,
+                usesNativeLiquidGlass: true
+            ),
+            .transparent
+        )
+    }
+
+    func testExplicitTintStillLayersOverNativeLiquidGlass() {
+        XCTAssertEqual(
+            DockWindowTintLayerPolicy.resolve(
+                hasExplicitTintPresentation: true,
+                usesNativeLiquidGlass: true
+            ),
+            .resolvedTint
+        )
+    }
+
+    func testFallbackChromeKeepsResolvedTintLayer() {
+        XCTAssertEqual(
+            DockWindowTintLayerPolicy.resolve(
+                hasExplicitTintPresentation: false,
+                usesNativeLiquidGlass: false
+            ),
+            .resolvedTint
+        )
+    }
+
     func testAppearanceResetPreservesBehaviorDockSettingsAndUnknownOverrides() {
         let appearance = DockyThemeOverrideKey.tileSpacing.rawValue
         let windowAxis = DockyThemeOverrideKey.windowAxisSizing.rawValue
@@ -313,6 +397,21 @@ final class PreferenceResetScopeTests: XCTestCase {
             }
             return String(source[captureRange])
         })
+    }
+}
+
+private final class ObservationChangeCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int {
+        lock.withLock { storage }
+    }
+
+    func increment() {
+        lock.withLock {
+            storage += 1
+        }
     }
 }
 
