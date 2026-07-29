@@ -30,9 +30,13 @@ struct TileContainerView: View {
     @ObservedObject private var dockDrag = DockDragService.shared
     @ObservedObject private var presentation =
         DockPresentationService.shared
+    @ObservedObject private var spaceInteractionEpoch =
+        DockSpaceInteractionEpoch.shared
     private let magnification = DockMagnificationService.shared
 
     @State private var draggedProfileID: String?
+    @State private var draggedProfileRevision: UInt64?
+    @State private var draggedSpaceGeneration: UInt64?
     @State private var draggedTileOffset: CGFloat = 0
     @State private var draggedTileInitialFrame: CGRect?
     @State private var draggedAppFolderTargetTileID: String?
@@ -109,6 +113,17 @@ struct TileContainerView: View {
             }
             .onChange(of: profileService.activeProfileID) { _ in
                 invalidateDragForProfileChange()
+            }
+            .onChange(of: profileService.stateRevision) { _ in
+                invalidateDragForProfileChange()
+            }
+            .onChange(of: spaceInteractionEpoch.generation) { _ in
+                invalidateDragForSpaceChange()
+            }
+            .onChange(of: preferences.tileHoverEffectsEnabled) { isEnabled in
+                if !isEnabled {
+                    magnification.clearPointer()
+                }
             }
             .animation(tileMutationAnimation, value: displayTiles)
         }
@@ -797,7 +812,7 @@ struct TileContainerView: View {
     }
 
     private var baseTileSize: CGFloat {
-        dockSettings.displayTileSize
+        dockSettings.effectiveTileSize
     }
 
     private var position: ResolvedDockWindowPosition {
@@ -831,10 +846,18 @@ struct TileContainerView: View {
     /// overflow IS disabled though: the section's scroll offset and
     /// clipped viewport make cursor-to-tile mapping unreliable.
     private var magnificationActive: Bool {
-        guard dockSettings.magnification else { return false }
+        guard TileHoverEffectsRuntimePolicy.allowsMagnification(
+            isEnabled: preferences.tileHoverEffectsEnabled,
+            configuredEnabled: dockSettings.effectiveMagnification
+        ) else {
+            return false
+        }
         guard !editMode.isActive else { return false }
         guard draggedTileID == nil else { return false }
-        guard dockSettings.largeSize > dockSettings.tileSize else { return false }
+        guard dockSettings.effectiveLargeSize
+            > dockSettings.effectiveTileSize else {
+            return false
+        }
         // Full-axis primary content has a fixed viewport. When a detached
         // Handoff capsule occupies the trailing edge, along-axis overflow
         // from magnification could otherwise draw through the transparent
@@ -890,7 +913,7 @@ struct TileContainerView: View {
         // magnified size on hover — matching Apple's behavior.
         DockMagnificationModel(
             baseSize: effectiveTileSize,
-            maxSize: dockSettings.largeSize,
+            maxSize: dockSettings.effectiveLargeSize,
             influenceRadius: effectiveTileSize * 2.5,
             strength: magnification.strength,
             cursorAxisLocation: cursorAxisLocation
@@ -1375,6 +1398,10 @@ struct TileContainerView: View {
                 trailingDestinationIndex: trailingDestinationIndex
             )
             draggedProfileID = profileService.activeProfileID
+            draggedProfileRevision =
+                profileService.stateRevision
+            draggedSpaceGeneration =
+                spaceInteractionEpoch.generation
             draggedTileInitialFrame = tileFrames[tile.id]
             // Drag wins over hover/widget previews — they'd block the cursor
             // and confuse the reorder animation otherwise.
@@ -1397,7 +1424,13 @@ struct TileContainerView: View {
         guard draggedTileID == tile.id else {
             return
         }
-        guard draggedProfileID == profileService.activeProfileID else {
+        guard draggedProfileID
+                == profileService.activeProfileID,
+              draggedProfileRevision
+                == profileService.stateRevision,
+              draggedSpaceGeneration
+                == spaceInteractionEpoch.generation
+        else {
             return
         }
 
@@ -1448,8 +1481,49 @@ struct TileContainerView: View {
 
         draggedAppFolderTargetTileID = nil
         draggedTrashTargetTileID = nil
+        let projectedLocation =
+            projected(point: value.location)
+        if !isPinnedReorderable(tileID: tile.id),
+           draggedBundleIdentifier != nil,
+           isPointInRunningAppDropRegion(
+               projectedLocation
+           ) {
+            if let sourceFrame = tileFrames[tile.id],
+               sourceFrame.contains(value.location) {
+                presentation.setInternalDragDestinations(
+                    pinned: nil,
+                    trailing: nil
+                )
+                return
+            }
+
+            // Running order is owned by WorkspaceService and is transient.
+            // Dragging within that strip means "keep this app": preview and
+            // commit it at the final persistent slot, matching the native
+            // Dock's favorite/recent separator semantics.
+            guard case .pinned(let destinationIndex) =
+                    DockDropAxisRegionPolicy
+                    .destination(
+                        for: .unpinnedApp,
+                        over: .running,
+                        canDropIntoPinned: true,
+                        canDropIntoTrailing: false,
+                        authoritativePinnedCount:
+                            pinnedTiles.count,
+                        authoritativeTrailingCount:
+                            trailingTiles.count
+                    )
+            else {
+                return
+            }
+            presentation.setInternalDragDestinations(
+                pinned: destinationIndex,
+                trailing: nil
+            )
+            return
+        }
         updatePreviewDestination(
-            at: projected(point: value.location),
+            at: projectedLocation,
             sourceTileID: tile.id,
             isTileDrag: true,
             isPinnedSource: isPinnedReorderable(tileID: tile.id),
@@ -1475,15 +1549,45 @@ struct TileContainerView: View {
             "translationMagnitude": translationMagnitude,
         ])
 
-        guard draggedProfileID == profileService.activeProfileID else {
+        guard let sourceProfileID = draggedProfileID,
+              let sourceProfileRevision =
+                draggedProfileRevision,
+              let sourceSpaceGeneration =
+                draggedSpaceGeneration,
+              sourceProfileID
+                == profileService.activeProfileID,
+              sourceProfileRevision
+                == profileService.stateRevision,
+              sourceSpaceGeneration
+                == spaceInteractionEpoch.generation
+        else {
+            let cancellationReason =
+                draggedProfileID
+                    != profileService.activeProfileID
+                ? "profileChanged"
+                : draggedSpaceGeneration
+                    != spaceInteractionEpoch.generation
+                ? "spaceChanged"
+                : "profileRevisionChanged"
             Self.logger.info(
-                "Drag cancelled after profile change tile=\(tileLogDescription(tile), privacy: .public) sourceProfile=\(self.draggedProfileID ?? "nil", privacy: .public) activeProfile=\(self.profileService.activeProfileID, privacy: .public)"
+                "Drag cancelled after profile/layout change tile=\(tileLogDescription(tile), privacy: .public) reason=\(cancellationReason, privacy: .public) sourceProfile=\(self.draggedProfileID ?? "nil", privacy: .public) activeProfile=\(self.profileService.activeProfileID, privacy: .public)"
             )
             diagnostics.record(.profiles, "tileReorderDragCancelled", fields: [
-                "reason": "profileChanged",
+                "reason": cancellationReason,
                 "tileToken": diagnostics.token(tile.id),
                 "sourceProfileToken": diagnostics.token(draggedProfileID),
                 "activeProfileToken": diagnostics.token(profileService.activeProfileID),
+                "sourceRevision": draggedProfileRevision ?? 0,
+                "activeRevision": profileService.stateRevision,
+                "sourceSpaceGeneration":
+                    draggedSpaceGeneration ?? 0,
+                "activeSpaceGeneration":
+                    spaceInteractionEpoch.generation,
+            ])
+            diagnostics.record(.input, "tileReorderDragResolved", fields: [
+                "result": "cancelled",
+                "reason": cancellationReason,
+                "tileToken": diagnostics.token(tile.id),
             ])
             clearDragState()
             return
@@ -1495,45 +1599,122 @@ struct TileContainerView: View {
             Self.logger.info(
                 "Drag ended without active source tile=\(tileLogDescription(tile), privacy: .public)"
             )
+            diagnostics.record(.input, "tileReorderDragResolved", fields: [
+                "result": "rejected",
+                "reason": "sourceUnavailable",
+                "tileToken": diagnostics.token(tile.id),
+            ])
             clearDragState()
             return
         }
 
+        var resolutionResult = "noIntent"
+        var resolutionReason = "noMutation"
         if draggedTrashTargetTileID != nil {
             Self.logger.info(
                 "Drag dropping on trash tile=\(tileLogDescription(tile), privacy: .public) pinnedSource=\(isPinnedReorderable(tileID: tile.id), privacy: .public) trailingSource=\(isTrailingReorderable(tileID: tile.id), privacy: .public)"
             )
             if isPinnedReorderable(tileID: tile.id) {
-                store.removePinnedItem(tileID: tile.id)
+                let applied = store.removePinnedItem(
+                    tileID: tile.id,
+                    expectedProfileID:
+                        sourceProfileID,
+                    expectedRevision:
+                        sourceProfileRevision
+                )
+                resolutionResult =
+                    applied ? "committed" : "rejected"
+                resolutionReason =
+                    applied
+                    ? "removedPinnedItem"
+                    : "removeTransactionRejected"
             } else if isTrailingReorderable(tileID: tile.id) {
-                store.removeTrailingItem(tileID: tile.id)
+                let applied = store.removeTrailingItem(
+                    tileID: tile.id,
+                    expectedProfileID:
+                        sourceProfileID,
+                    expectedRevision:
+                        sourceProfileRevision
+                )
+                resolutionResult =
+                    applied ? "committed" : "rejected"
+                resolutionReason =
+                    applied
+                    ? "removedTrailingItem"
+                    : "removeTransactionRejected"
             }
         } else if let groupTargetTileID = draggedAppFolderTargetTileID,
            draggedBundleIdentifier != nil {
             Self.logger.info(
                 "Drag committing group tile=\(tileLogDescription(tile), privacy: .public) targetTileID=\(groupTargetTileID, privacy: .public) selectionCount=\(draggedSelectionBundleIdentifiers.count, privacy: .public)"
             )
-            _ = store.groupApps(bundleIdentifiers: draggedSelectionBundleIdentifiers, intoTileID: groupTargetTileID)
+            let applied = store.groupApps(
+                bundleIdentifiers:
+                    draggedSelectionBundleIdentifiers,
+                intoTileID: groupTargetTileID,
+                expectedProfileID: sourceProfileID,
+                expectedRevision:
+                    sourceProfileRevision
+            )
+            resolutionResult =
+                applied ? "committed" : "rejected"
+            resolutionReason =
+                applied
+                ? "groupedApps"
+                : "groupTransactionRejected"
         } else if hasCollectedAdditionalAppsDuringDrag {
             // Multi-app pickup is only used for grouping into an app or folder target.
             Self.logger.info(
                 "Drag ended with collected apps tile=\(tileLogDescription(tile), privacy: .public) additionalTileIDs=\(self.draggedAdditionalTileIDs.joined(separator: ","), privacy: .public)"
             )
+            resolutionReason = "collectedAppsWithoutTarget"
         } else if isPinnedReorderable(tileID: tile.id) {
             if let destinationIndex = draggedTrailingTileDestinationIndex,
                let trailingItem = draggedTile.flatMap(store.makeTrailingItem(from:)) {
                 Self.logger.info(
                     "Drag moving pinned->trailing tile=\(tileLogDescription(tile), privacy: .public) destinationIndex=\(destinationIndex, privacy: .public)"
                 )
-                store.removePinnedItem(tileID: tile.id)
-                store.insertTrailingItem(trailingItem, at: destinationIndex)
+                let applied =
+                    store.movePinnedItemToTrailing(
+                        tileID: tile.id,
+                        convertedItem: trailingItem,
+                        at: destinationIndex,
+                        expectedProfileID:
+                            sourceProfileID,
+                        expectedRevision:
+                            sourceProfileRevision
+                    )
+                resolutionResult =
+                    applied ? "committed" : "rejected"
+                resolutionReason =
+                    applied
+                    ? "movedPinnedToTrailing"
+                    : "crossSectionTransactionRejected"
             } else {
                 let finalPinnedTileIDs = previewPinnedBaseTiles.map(\.id)
                 Self.logger.info(
                     "Drag reordering pinned tile=\(tileLogDescription(tile), privacy: .public) finalPinnedIDs=\(finalPinnedTileIDs.joined(separator: ","), privacy: .public)"
                 )
                 if finalPinnedTileIDs != pinnedTileIDs {
-                    store.setPinnedTileOrder(ids: finalPinnedTileIDs)
+                    let applied =
+                        store.setPinnedTileOrder(
+                            ids: finalPinnedTileIDs,
+                            expectedProfileID:
+                                sourceProfileID,
+                            expectedRevision:
+                                sourceProfileRevision
+                        )
+                    resolutionResult =
+                        applied
+                        ? "committed"
+                        : "rejected"
+                    resolutionReason =
+                        applied
+                        ? "reorderedPinnedItems"
+                        : "reorderTransactionRejected"
+                } else {
+                    resolutionReason =
+                        "unchangedPinnedOrder"
                 }
             }
         } else if isTrailingReorderable(tileID: tile.id) {
@@ -1542,15 +1723,47 @@ struct TileContainerView: View {
                 Self.logger.info(
                     "Drag moving trailing->pinned tile=\(tileLogDescription(tile), privacy: .public) destinationIndex=\(destinationIndex, privacy: .public)"
                 )
-                store.removeTrailingItem(tileID: tile.id)
-                store.insertPinnedItem(pinnedItem, at: destinationIndex)
+                let applied =
+                    store.moveTrailingItemToPinned(
+                        tileID: tile.id,
+                        convertedItem: pinnedItem,
+                        at: destinationIndex,
+                        expectedProfileID:
+                            sourceProfileID,
+                        expectedRevision:
+                            sourceProfileRevision
+                    )
+                resolutionResult =
+                    applied ? "committed" : "rejected"
+                resolutionReason =
+                    applied
+                    ? "movedTrailingToPinned"
+                    : "crossSectionTransactionRejected"
             } else {
                 let finalTrailingTileIDs = previewTrailingTiles.map(\.id)
                 Self.logger.info(
                     "Drag reordering trailing tile=\(tileLogDescription(tile), privacy: .public) finalTrailingIDs=\(finalTrailingTileIDs.joined(separator: ","), privacy: .public)"
                 )
                 if finalTrailingTileIDs != trailingTileIDs {
-                    store.setTrailingTileOrder(ids: finalTrailingTileIDs)
+                    let applied =
+                        store.setTrailingTileOrder(
+                            ids: finalTrailingTileIDs,
+                            expectedProfileID:
+                                sourceProfileID,
+                            expectedRevision:
+                                sourceProfileRevision
+                        )
+                    resolutionResult =
+                        applied
+                        ? "committed"
+                        : "rejected"
+                    resolutionReason =
+                        applied
+                        ? "reorderedTrailingItems"
+                        : "reorderTransactionRejected"
+                } else {
+                    resolutionReason =
+                        "unchangedTrailingOrder"
                 }
             }
         } else if let destinationIndex = draggedPinnedTileDestinationIndex,
@@ -1558,13 +1771,33 @@ struct TileContainerView: View {
             Self.logger.info(
                 "Drag pinning app tile=\(tileLogDescription(tile), privacy: .public) bundleIdentifier=\(bundleIdentifier, privacy: .public) destinationIndex=\(destinationIndex, privacy: .public)"
             )
-            _ = store.pinApp(bundleIdentifier: bundleIdentifier, at: destinationIndex)
+            let applied = store.pinApp(
+                bundleIdentifier: bundleIdentifier,
+                at: destinationIndex,
+                expectedProfileID: sourceProfileID,
+                expectedRevision:
+                    sourceProfileRevision
+            )
+            resolutionResult =
+                applied ? "committed" : "rejected"
+            resolutionReason =
+                applied
+                ? "pinnedRunningApp"
+                : "pinTransactionRejected"
         } else {
             Self.logger.info(
                 "Drag ended with no mutation tile=\(tileLogDescription(tile), privacy: .public) pinnedDestination=\(optionalIndexDescription(draggedPinnedTileDestinationIndex), privacy: .public) trailingDestination=\(optionalIndexDescription(draggedTrailingTileDestinationIndex), privacy: .public) folderTarget=\(draggedAppFolderTargetTileID ?? "nil", privacy: .public)"
             )
         }
 
+        diagnostics.record(.input, "tileReorderDragResolved", fields: [
+            "result": resolutionResult,
+            "reason": resolutionReason,
+            "tileToken": diagnostics.token(tile.id),
+            "profileToken": diagnostics.token(sourceProfileID),
+            "sourceRevision": sourceProfileRevision,
+            "activeRevision": profileService.stateRevision,
+        ])
         withAnimation(tileMutationAnimation) {
             clearDragState()
         }
@@ -1615,13 +1848,46 @@ struct TileContainerView: View {
     }
 
     private func invalidateDragForProfileChange() {
+        // External and palette interactions are session-scoped too. Clearing
+        // them here prevents a profile excursion from becoming valid again if
+        // automation returns to the original profile before mouse-up.
+        dockDrag.invalidateCurrentInteraction()
+        editMode.endPaletteDrag()
+
         guard draggedTileID != nil,
-              draggedProfileID != profileService.activeProfileID else {
+              draggedProfileID
+                != profileService.activeProfileID
+                || draggedProfileRevision
+                    != profileService.stateRevision
+        else {
             return
         }
         Self.logger.info(
             "Invalidating drag after profile change tileID=\(self.draggedTileID ?? "nil", privacy: .public) sourceProfile=\(self.draggedProfileID ?? "nil", privacy: .public) activeProfile=\(self.profileService.activeProfileID, privacy: .public)"
         )
+        // Keep the source tile latched until the gesture ends so a stale
+        // DragGesture callback cannot start a second drag in the new profile.
+        // Clearing the revision makes every remaining update/end fail closed.
+        draggedProfileRevision = nil
+        draggedTileOffset = 0
+        draggedPickupCandidateTileID = nil
+        clearDragPreviewDestinations()
+    }
+
+    private func invalidateDragForSpaceChange() {
+        // Keep the internal source latched until DragGesture.onEnded so a
+        // stale callback cannot start a new drag in the destination Space.
+        // Every commit path also compares the captured generation directly.
+        dockDrag.invalidateCurrentInteraction()
+        editMode.endPaletteDrag()
+
+        guard draggedTileID != nil else {
+            return
+        }
+        Self.logger.info(
+            "Invalidating drag after Space change tileID=\(self.draggedTileID ?? "nil", privacy: .public) sourceGeneration=\(self.draggedSpaceGeneration ?? 0, privacy: .public) activeGeneration=\(self.spaceInteractionEpoch.generation, privacy: .public)"
+        )
+        draggedProfileRevision = nil
         draggedTileOffset = 0
         draggedPickupCandidateTileID = nil
         clearDragPreviewDestinations()
@@ -1718,16 +1984,38 @@ struct TileContainerView: View {
             dockDrag.updateSpringLoadCandidate(springLoadCandidateTileID(at: location))
             return
         case .app:
-            guard isPointInPinnedDropRegion(positionValue) else {
+            let isRunningStripDestination =
+                isPointInRunningAppDropRegion(
+                    positionValue
+                )
+            guard isPointInPinnedDropRegion(
+                positionValue
+            ) || isRunningStripDestination else {
                 dockDrag.destinationIndex = nil
                 dockDrag.destinationSection = nil
                 return
             }
-            let index = pinnedTiles.enumerated().first { _, tile in
-                guard let frame = tileFrames[tile.id] else { return false }
-                let midpoint = projected(point: frame.origin) + projected(size: frame.size) / 2
-                return positionValue < midpoint
-            }?.offset ?? pinnedTiles.count
+            let index =
+                isRunningStripDestination
+                ? pinnedTiles.count
+                : pinnedTiles.enumerated()
+                    .first { _, tile in
+                        guard let frame =
+                                tileFrames[tile.id]
+                        else {
+                            return false
+                        }
+                        let midpoint =
+                            projected(
+                                point: frame.origin
+                            )
+                            + projected(
+                                size: frame.size
+                            ) / 2
+                        return positionValue
+                            < midpoint
+                    }?.offset
+                    ?? pinnedTiles.count
             if dockDrag.destinationIndex != index { dockDrag.destinationIndex = index }
             if dockDrag.destinationSection != .pinned { dockDrag.destinationSection = .pinned }
         case .folder:
@@ -1823,7 +2111,22 @@ struct TileContainerView: View {
         }
 
         let upperBound = projected(point: trailingBoundaryFrame.origin)
-        return positionValue >= lowerBound && positionValue <= upperBound
+        if lowerBound < upperBound {
+            return positionValue >= lowerBound
+                && positionValue <= upperBound
+        }
+
+        // Finder can be shelved while both the saved and running app
+        // sections are empty. In that state the leading fallback and divider
+        // origin coincide, so the mathematical section has zero width. The
+        // divider remains visible; accepting its own frame gives an external
+        // app (or palette app) a concrete target for establishing the first
+        // pinned item.
+        let dividerUpperBound =
+            upperBound
+            + projected(size: trailingBoundaryFrame.size)
+        return positionValue >= upperBound
+            && positionValue <= dividerUpperBound
     }
 
     /// Leading edge of the pinned drop region. Normally this is the trailing
@@ -1840,6 +2143,26 @@ struct TileContainerView: View {
 
     private var pinnedTrailingBoundaryTileID: String {
         tileFrames.keys.contains("divider:running") ? "divider:running" : "divider:trailing"
+    }
+
+    private func isPointInRunningAppDropRegion(
+        _ positionValue: CGFloat
+    ) -> Bool {
+        guard let runningDividerFrame =
+                tileFrames["divider:running"],
+              let trailingDividerFrame =
+                tileFrames["divider:trailing"]
+        else {
+            return false
+        }
+
+        let lowerBound =
+            projected(point: runningDividerFrame.origin)
+            + projected(size: runningDividerFrame.size)
+        let upperBound =
+            projected(point: trailingDividerFrame.origin)
+        return positionValue >= lowerBound
+            && positionValue <= upperBound
     }
 
     private func isPointInTrailingDropRegion(_ positionValue: CGFloat) -> Bool {
@@ -1920,6 +2243,8 @@ struct TileContainerView: View {
         }
         presentation.clearInternalDrag()
         draggedProfileID = nil
+        draggedProfileRevision = nil
+        draggedSpaceGeneration = nil
         draggedTileOffset = 0
         draggedTileInitialFrame = nil
         draggedAppFolderTargetTileID = nil
@@ -1999,16 +2324,39 @@ struct TileContainerView: View {
     ) -> String? {
         let selectedBundleIdentifierSet = Set(selectedBundleIdentifiers)
 
-        for tile in previewPinnedBaseTiles where !selectedTileIDs.contains(tile.id) {
+        // Folder intent is resolved from what the user can actually see, not
+        // only from the persistent pinned preview. A new/empty profile often
+        // contains exclusively `running:*` app tiles; those are valid targets
+        // and the commit atomically promotes both apps into a pinned folder.
+        for tile in surfaceOrderedDisplayTiles.reversed()
+        where !selectedTileIDs.contains(tile.id) {
             switch tile.content {
             case .app(let app):
-                guard !selectedBundleIdentifierSet.contains(app.bundleIdentifier) else {
+                guard tile.id
+                        != DockBadgeService.handoffTileID,
+                      !tile.id.hasPrefix(
+                          "folder-running:"
+                      ),
+                      !app.bundleIdentifier.isEmpty,
+                      app.bundleIdentifier
+                        != "com.apple.finder",
+                      !selectedBundleIdentifierSet
+                        .contains(
+                            app.bundleIdentifier
+                        )
+                else {
                     continue
                 }
             case .minimizedWindow:
                 continue
             case .appFolder(let folder):
-                guard folder.bundleIdentifiers.allSatisfy({ !selectedBundleIdentifierSet.contains($0) }) else {
+                guard isPinnedReorderable(
+                    tileID: tile.id
+                ),
+                folder.bundleIdentifiers.allSatisfy({
+                    !selectedBundleIdentifierSet
+                        .contains($0)
+                }) else {
                     continue
                 }
             case .launchpad, .startMenu, .widget, .smartStack, .folder, .spacer, .flexibleSpacer, .divider, .trash:

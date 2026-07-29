@@ -147,6 +147,19 @@ private struct DockEditorGalleryItem: Equatable, Identifiable {
         + [makeSmartStackItem()]
         + [makeUtilityItem(.launchpad), makeUtilityItem(.startMenu), makeUtilityItem(.spacer), makeUtilityItem(.flexibleSpacer), makeUtilityItem(.divider)]
 
+    static func availableItems(
+        startMenuEnabled: Bool
+    ) -> [DockEditorGalleryItem] {
+        allItems.filter { item in
+            guard item.paletteItem == .startMenu else {
+                return true
+            }
+            return StartMenuEnablementPolicy.allowsPaletteInsertion(
+                isEnabled: startMenuEnabled
+            )
+        }
+    }
+
     nonisolated private static func makeWidgetItem(registration: WidgetRegistration) -> Self {
         let paletteItem = DockEditPaletteItem.widget(
             ownerBundleIdentifier: registration.ownerBundleIdentifier,
@@ -384,7 +397,12 @@ final class DockEditorOverlayWindowController: NSWindowController {
 
     private func presentOverlay() {
         updateFrame()
-        overlayState.ensureSelection(in: DockEditorGalleryItem.allItems)
+        overlayState.ensureSelection(
+            in: DockEditorGalleryItem.availableItems(
+                startMenuEnabled:
+                    preferences.enablesStartMenuOverlay
+            )
+        )
         guard let window, let mainWindow else {
             return
         }
@@ -666,11 +684,15 @@ private struct DockEditorBrowserView: View {
     let position: ResolvedDockWindowPosition
 
     @ObservedObject private var editMode = DockEditModeService.shared
+    @Bindable private var preferences = DockyPreferences.shared
 
     private let gridColumns = Array(repeating: GridItem(.flexible(), spacing: 16, alignment: .top), count: 3)
 
     private var visibleSections: [DockEditorGallerySection] {
-        DockEditorGalleryItem.allItems
+        DockEditorGalleryItem.availableItems(
+            startMenuEnabled:
+                preferences.enablesStartMenuOverlay
+        )
             .filter { $0.matches(searchText: state.searchText) }
             .map(DockEditorGallerySection.init(item:))
     }
@@ -811,8 +833,17 @@ private struct DockEditorBrowserView: View {
     }
 
     private func startDrag(for variant: DockEditorGalleryVariant) -> NSItemProvider {
-        editMode.beginPaletteDrag(item: variant.item.paletteItem, widgetSpan: variant.span)
-        return NSItemProvider(object: variant.id as NSString)
+        guard let pasteboardToken =
+                editMode.beginPaletteDrag(
+                    item: variant.item.paletteItem,
+                    widgetSpan: variant.span
+                )
+        else {
+            return NSItemProvider()
+        }
+        return NSItemProvider(
+            object: pasteboardToken as NSString
+        )
     }
 }
 

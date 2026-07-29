@@ -22,6 +22,8 @@ struct AppearanceSettingsView: View {
     private let dockSettings = DockSettingsService.shared
     @Bindable private var preferences = DockyPreferences.shared
     @State private var isShowingResetConfirmation = false
+    @State private var isShowingSystemDockImportConfirmation = false
+    @State private var systemDockImportResult: Bool?
 
     var body: some View {
         Form {
@@ -58,7 +60,16 @@ struct AppearanceSettingsView: View {
     private var generalSection: some View {
         Section("Glass") {
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Disable Glass Look", isOn: $preferences.disablesGlassLook)
+                Toggle(
+                    "Disable Glass Look",
+                    isOn: themeAwareBinding(
+                        for: .disablesGlassLook,
+                        at: \.disablesGlassLook,
+                        effective: {
+                            preferences.effectiveDisablesGlassLook
+                        }
+                    )
+                )
                     .font(.headline)
 
                 Text("Removes the main window's glossy gradient border and Liquid Glass material while keeping the existing blur and background tinting.")
@@ -92,7 +103,16 @@ struct AppearanceSettingsView: View {
 
                     Spacer()
 
-                    Picker("Active Indicator Shape", selection: $preferences.activeIndicatorShape) {
+                    Picker(
+                        "Active Indicator Shape",
+                        selection: themeAwareBinding(
+                            for: .activeIndicatorShape,
+                            at: \.activeIndicatorShape,
+                            effective: {
+                                preferences.effectiveActiveIndicatorShape
+                            }
+                        )
+                    ) {
                         ForEach(DockTileIndicatorShape.allCases) { shape in
                             Text(shape.title).tag(shape)
                         }
@@ -101,36 +121,40 @@ struct AppearanceSettingsView: View {
                     .labelsHidden()
                 }
 
-                if preferences.activeIndicatorShape == .image {
-                    HStack {
-                        Button("Choose Image...") {
-                            chooseActiveIndicatorImage()
-                        }
-
-                        if preferences.activeIndicatorImagePath != nil {
-                            Button("Clear") {
-                                preferences.clearUserAsset(
-                                    slot: "appearance:active-indicator"
-                                ) {
-                                    preferences.activeIndicatorImagePath = nil
-                                }
+                if preferences.effectiveActiveIndicatorShape == .image {
+                    optionalImageSourceRow(
+                        title: "Indicator Image",
+                        key: .activeIndicatorImagePath,
+                        path: preferences.activeIndicatorImagePath,
+                        onChoose: chooseActiveIndicatorImage,
+                        onRemoveCustom: {
+                            preferences.clearUserAsset(
+                                slot: "appearance:active-indicator"
+                            ) {
+                                preferences.activeIndicatorImagePath = nil
+                                preferences.setOptionalAppearanceMode(
+                                    .disabled,
+                                    for: .activeIndicatorImagePath
+                                )
                             }
                         }
-                    }
-
-                    if let selectedActiveIndicatorImageName {
-                        Text(selectedActiveIndicatorImageName)
-                            .foregroundStyle(.secondary)
-                    }
+                    )
                 }
 
                 if showsIndicatorColorControls {
                     Divider()
 
-                    Toggle("Use Custom Indicator Color", isOn: usesCustomActiveIndicatorColorBinding)
+                    optionalSourceModeRow(
+                        title: "Indicator Color",
+                        key: .activeIndicatorColor,
+                        disabledLabel: "System Default",
+                        ensureCustomValue: ensureCustomActiveIndicatorColor
+                    )
                         .font(.headline)
 
-                    if preferences.activeIndicatorColor != nil {
+                    if preferences.optionalAppearanceMode(
+                        for: .activeIndicatorColor
+                    ) == .custom {
                         ColorPicker("Indicator Color", selection: activeIndicatorColorBinding, supportsOpacity: false)
                     }
                 }
@@ -143,7 +167,13 @@ struct AppearanceSettingsView: View {
 
             sliderRow(
                 title: "Inward Offset",
-                value: $preferences.activeIndicatorOffset,
+                value: themeAwareBinding(
+                    for: .activeIndicatorOffset,
+                    at: \.activeIndicatorOffset,
+                    effective: {
+                        preferences.effectiveActiveIndicatorOffset
+                    }
+                ),
                 range: -20...20,
                 step: 1,
                 format: { "\(Int($0)) pt" },
@@ -152,7 +182,13 @@ struct AppearanceSettingsView: View {
 
             sliderRow(
                 title: "Size",
-                value: $preferences.activeIndicatorScale,
+                value: themeAwareBinding(
+                    for: .activeIndicatorScale,
+                    at: \.activeIndicatorScale,
+                    effective: {
+                        preferences.effectiveActiveIndicatorScale
+                    }
+                ),
                 range: 0.5...2.0,
                 step: 0.05,
                 format: { String(format: "%.2fx", $0) },
@@ -171,30 +207,41 @@ struct AppearanceSettingsView: View {
             Text("Custom Divider Image")
                 .font(.headline)
 
-            dividerImageRow(
+            optionalImageSourceRow(
                 title: "Center",
+                key: .dividerImagePath,
                 path: preferences.dividerImagePath,
+                disabledLabel: "Default Line",
                 onChoose: { chooseDividerImage(slot: .global) },
-                onClear: {
+                onRemoveCustom: {
                     preferences.clearUserAsset(
                         slot: "appearance:divider-global"
                     ) {
                         preferences.dividerImagePath = nil
+                        preferences.setOptionalAppearanceMode(
+                            .disabled,
+                            for: .dividerImagePath
+                        )
                     }
                 }
             )
 
             Divider()
 
-            dividerImageRow(
+            optionalImageSourceRow(
                 title: "Left Side",
+                key: .leftDividerImagePath,
                 path: preferences.leftDividerImagePath,
                 onChoose: { chooseDividerImage(slot: .left) },
-                onClear: {
+                onRemoveCustom: {
                     preferences.clearUserAsset(
                         slot: "appearance:divider-left"
                     ) {
                         preferences.leftDividerImagePath = nil
+                        preferences.setOptionalAppearanceMode(
+                            .disabled,
+                            for: .leftDividerImagePath
+                        )
                     }
                 }
             )
@@ -205,20 +252,35 @@ struct AppearanceSettingsView: View {
                 HStack {
                     Text("Right Side")
                     Spacer()
-                    Toggle("Mirror Left Side", isOn: $preferences.mirrorsLeftDividerOnRight)
+                    Toggle(
+                        "Mirror Left Side",
+                        isOn: themeAwareBinding(
+                            for: .mirrorsLeftDividerOnRight,
+                            at: \.mirrorsLeftDividerOnRight,
+                            effective: {
+                                preferences
+                                    .effectiveMirrorsLeftDividerOnRight
+                            }
+                        )
+                    )
                         .toggleStyle(.switch)
                 }
 
-                if !preferences.mirrorsLeftDividerOnRight {
-                    dividerImageRow(
-                        title: nil,
+                if !preferences.effectiveMirrorsLeftDividerOnRight {
+                    optionalImageSourceRow(
+                        title: "Image Source",
+                        key: .rightDividerImagePath,
                         path: preferences.rightDividerImagePath,
                         onChoose: { chooseDividerImage(slot: .right) },
-                        onClear: {
+                        onRemoveCustom: {
                             preferences.clearUserAsset(
                                 slot: "appearance:divider-right"
                             ) {
                                 preferences.rightDividerImagePath = nil
+                                preferences.setOptionalAppearanceMode(
+                                    .disabled,
+                                    for: .rightDividerImagePath
+                                )
                             }
                         }
                     )
@@ -233,7 +295,13 @@ struct AppearanceSettingsView: View {
 
         sliderRow(
             title: "Padding",
-            value: $preferences.dividerPaddingFraction,
+            value: themeAwareBinding(
+                for: .dividerPaddingFraction,
+                at: \.dividerPaddingFraction,
+                effective: {
+                    preferences.effectiveDividerPaddingFraction
+                }
+            ),
             range: 0...0.5,
             step: 0.01,
             format: { "\(Int(($0 * 100).rounded()))%" },
@@ -242,7 +310,13 @@ struct AppearanceSettingsView: View {
 
         sliderRow(
             title: "Vertical Offset",
-            value: $preferences.dividerOffset,
+            value: themeAwareBinding(
+                for: .dividerOffset,
+                at: \.dividerOffset,
+                effective: {
+                    preferences.effectiveDividerOffset
+                }
+            ),
             range: -20...20,
             step: 1,
             format: { "\(Int($0)) pt" },
@@ -251,7 +325,13 @@ struct AppearanceSettingsView: View {
 
         sliderRow(
             title: "Image Size",
-            value: $preferences.dividerImageScale,
+            value: themeAwareBinding(
+                for: .dividerImageScale,
+                at: \.dividerImageScale,
+                effective: {
+                    preferences.effectiveDividerImageScale
+                }
+            ),
             range: 0.5...2.0,
             step: 0.05,
             format: { String(format: "%.2fx", $0) },
@@ -260,7 +340,13 @@ struct AppearanceSettingsView: View {
 
         sliderRow(
             title: "Opacity",
-            value: $preferences.dividerOpacity,
+            value: themeAwareBinding(
+                for: .dividerOpacity,
+                at: \.dividerOpacity,
+                effective: {
+                    preferences.effectiveDividerOpacity
+                }
+            ),
             range: 0...1,
             step: 0.05,
             format: { "\(Int(($0 * 100).rounded()))%" },
@@ -268,14 +354,21 @@ struct AppearanceSettingsView: View {
         )
 
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Use Custom Divider Color", isOn: usesCustomDividerColorBinding)
+            optionalSourceModeRow(
+                title: "Divider Color",
+                key: .dividerColor,
+                disabledLabel: "System Default",
+                ensureCustomValue: ensureCustomDividerColor
+            )
                 .font(.headline)
 
-            if preferences.effectiveDividerColor != nil {
+            if preferences.optionalAppearanceMode(for: .dividerColor)
+                == .custom
+            {
                 ColorPicker("Divider Color", selection: dividerColorBinding, supportsOpacity: false)
             }
 
-            Text("Replaces the default text-tracking color of the plain divider line. Has no effect on dividers that use a custom image.")
+            Text("Choose the active theme's color, the system label color, or a custom plain-divider color. This has no effect on dividers using an image.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -308,7 +401,14 @@ struct AppearanceSettingsView: View {
                 .font(.headline)
 
             HStack {
-                Slider(value: value, in: range, step: step) {
+                Slider(
+                    value: value,
+                    in: rangeIncludingCurrent(
+                        range,
+                        current: value.wrappedValue
+                    ),
+                    step: step
+                ) {
                     Text(title)
                 }
                 .labelsHidden()
@@ -325,25 +425,98 @@ struct AppearanceSettingsView: View {
         .padding(.vertical, 4)
     }
 
-    @ViewBuilder
-    private func dividerImageRow(title: String?, path: String?, onChoose: @escaping () -> Void, onClear: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let title {
-                Text(title)
-            }
-
-            HStack {
-                Button("Choose Image...", action: onChoose)
-
-                if path != nil {
-                    Button("Clear", action: onClear)
+    private func optionalAppearanceModeBinding(
+        key: DockyThemeOverrideKey,
+        ensureCustomValue: @escaping () -> Void = {}
+    ) -> Binding<ThemeOptionalAppearanceMode> {
+        Binding(
+            get: { preferences.optionalAppearanceMode(for: key) },
+            set: { mode in
+                if mode == .custom {
+                    ensureCustomValue()
                 }
+                // This explicit call is required even when the dormant custom
+                // value already equals the selected value: a same-value
+                // property assignment does not fire didSet or mark an
+                // override.
+                preferences.setOptionalAppearanceMode(mode, for: key)
+            }
+        )
+    }
 
-                if let name = path.flatMap({ $0.isEmpty ? nil : URL(fileURLWithPath: $0).lastPathComponent }) {
-                    Text(name)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+    @ViewBuilder
+    private func optionalSourceModeRow(
+        title: String,
+        key: DockyThemeOverrideKey,
+        disabledLabel: String,
+        ensureCustomValue: @escaping () -> Void = {}
+    ) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Picker(
+                title,
+                selection: optionalAppearanceModeBinding(
+                    key: key,
+                    ensureCustomValue: ensureCustomValue
+                )
+            ) {
+                Text("Theme / Default")
+                    .tag(ThemeOptionalAppearanceMode.inherit)
+                Text(disabledLabel)
+                    .tag(ThemeOptionalAppearanceMode.disabled)
+                Text("Custom")
+                    .tag(ThemeOptionalAppearanceMode.custom)
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(minWidth: 150)
+        }
+    }
+
+    @ViewBuilder
+    private func optionalImageSourceRow(
+        title: String,
+        key: DockyThemeOverrideKey,
+        path: String?,
+        disabledLabel: String = "None",
+        onChoose: @escaping () -> Void,
+        onRemoveCustom: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            optionalSourceModeRow(
+                title: title,
+                key: key,
+                disabledLabel: disabledLabel
+            )
+
+            if preferences.optionalAppearanceMode(for: key) == .custom {
+                HStack {
+                    Button(
+                        path == nil ? "Choose Image..." : "Replace Image...",
+                        action: onChoose
+                    )
+
+                    if path != nil {
+                        Button(
+                            "Remove Custom",
+                            action: onRemoveCustom
+                        )
+                    }
+
+                    if let name = path.flatMap({
+                        $0.isEmpty
+                            ? nil
+                            : URL(fileURLWithPath: $0).lastPathComponent
+                    }) {
+                        Text(name)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } else {
+                        Text("No custom image selected")
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -359,7 +532,16 @@ struct AppearanceSettingsView: View {
 
                     Spacer()
 
-                    Picker("Tile Clip Shape", selection: $preferences.tileClipShape) {
+                    Picker(
+                        "Tile Clip Shape",
+                        selection: themeAwareBinding(
+                            for: .tileClipShape,
+                            at: \.tileClipShape,
+                            effective: {
+                                preferences.effectiveTileClipShape
+                            }
+                        )
+                    ) {
                         ForEach(DockClipShape.allCases) { shape in
                             Text(shape.title).tag(shape)
                         }
@@ -382,12 +564,30 @@ struct AppearanceSettingsView: View {
                     Spacer()
 
                     HStack {
-                        Slider(value: $preferences.tileVerticalPadding, in: 8...32, step: 1) {
+                        Slider(
+                            value: themeAwareBinding(
+                                for: .tileVerticalPadding,
+                                at: \.tileVerticalPadding,
+                                effective: {
+                                    preferences
+                                        .effectiveTileVerticalPadding
+                                }
+                            ),
+                            in: rangeIncludingCurrent(
+                                8...32,
+                                current:
+                                    preferences
+                                        .effectiveTileVerticalPadding
+                            ),
+                            step: 1
+                        ) {
                             Text("Tile Vertical Padding")
                         }
                         .labelsHidden()
 
-                        Text("\(Int(preferences.tileVerticalPadding)) pt")
+                        Text(
+                            "\(Int(preferences.effectiveTileVerticalPadding)) pt"
+                        )
                             .foregroundStyle(.secondary)
                             .frame(width: 48, alignment: .trailing)
                     }
@@ -407,11 +607,24 @@ struct AppearanceSettingsView: View {
                     Spacer()
 
                     HStack {
-                        Slider(value: $preferences.tileSpacing, in: 0...16, step: 1) {
+                        Slider(
+                            value: themeAwareBinding(
+                                for: .tileSpacing,
+                                at: \.tileSpacing,
+                                effective: {
+                                    preferences.effectiveTileSpacing
+                                }
+                            ),
+                            in: rangeIncludingCurrent(
+                                0...16,
+                                current: preferences.effectiveTileSpacing
+                            ),
+                            step: 1
+                        ) {
                             Text("Tile Spacing")
                         }
                         .labelsHidden()
-                        Text("\(Int(preferences.tileSpacing)) pt")
+                        Text("\(Int(preferences.effectiveTileSpacing)) pt")
                             .foregroundStyle(.secondary)
                             .frame(width: 48, alignment: .trailing)
                     }
@@ -428,12 +641,23 @@ struct AppearanceSettingsView: View {
                     .font(.headline)
 
                 HStack {
-                    Slider(value: systemDockTileSizeBinding, in: 16...128, step: 1) {
+                    Slider(
+                        value: systemDockTileSizeBinding,
+                        in: rangeIncludingCurrent(
+                            16...128,
+                            current: Double(
+                                dockSettings.effectiveTileSize
+                            )
+                        ),
+                        step: 1
+                    ) {
                         Text("Tile Size")
                     }
                     .labelsHidden()
 
-                    Text("\(Int(dockSettings.tileSize.rounded())) pt")
+                    Text(
+                        "\(Int(dockSettings.effectiveTileSize.rounded())) pt"
+                    )
                         .foregroundStyle(.secondary)
                         .frame(width: 48, alignment: .trailing)
                 }
@@ -452,7 +676,21 @@ struct AppearanceSettingsView: View {
                     Spacer()
 
                     HStack {
-                        Slider(value: $preferences.tileIconPadding, in: 0...24, step: 1) {
+                        Slider(
+                            value: themeAwareBinding(
+                                for: .tileIconPadding,
+                                at: \.tileIconPadding,
+                                effective: {
+                                    preferences.effectiveTileIconPadding
+                                }
+                            ),
+                            in: rangeIncludingCurrent(
+                                0...24,
+                                current:
+                                    preferences.effectiveTileIconPadding
+                            ),
+                            step: 1
+                        ) {
                             Text("Tile Icon Padding")
                         }
                         .labelsHidden()
@@ -469,83 +707,115 @@ struct AppearanceSettingsView: View {
             .padding(.vertical, 4)
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Tile Hover Effect")
+                Text("Tile Hover Effects")
                     .font(.headline)
 
-                Toggle("Use Hover Background", isOn: usesHoverBackgroundColorBinding)
+                Toggle(
+                    "Enable Tile Hover Effects",
+                    isOn: $preferences.tileHoverEffectsEnabled
+                )
 
-                if preferences.tileHoverBackgroundColor != nil {
-                    ColorPicker("Hover Background Color", selection: hoverBackgroundColorBinding, supportsOpacity: false)
-                }
+                VStack(alignment: .leading, spacing: 8) {
+                    optionalSourceModeRow(
+                        title: "Background Color",
+                        key: .tileHoverBackgroundColor,
+                        disabledLabel: "None",
+                        ensureCustomValue: ensureCustomHoverBackgroundColor
+                    )
 
-                HStack {
-                    Text("Hover Background Image")
-                    Spacer()
-                    Button("Choose Image...") { chooseTileHoverBackgroundImage() }
-                    if preferences.tileHoverBackgroundImagePath != nil {
-                        Button("Clear") {
+                    if preferences.optionalAppearanceMode(
+                        for: .tileHoverBackgroundColor
+                    ) == .custom {
+                        ColorPicker(
+                            "Hover Background Color",
+                            selection: hoverBackgroundColorBinding,
+                            supportsOpacity: false
+                        )
+                    }
+
+                    optionalImageSourceRow(
+                        title: "Background Image",
+                        key: .tileHoverBackgroundImagePath,
+                        path: preferences.tileHoverBackgroundImagePath,
+                        onChoose: chooseTileHoverBackgroundImage,
+                        onRemoveCustom: {
                             preferences.clearUserAsset(
                                 slot: "appearance:tile-hover-background"
                             ) {
                                 preferences.tileHoverBackgroundImagePath = nil
+                                preferences.setOptionalAppearanceMode(
+                                    .disabled,
+                                    for: .tileHoverBackgroundImagePath
+                                )
                             }
                         }
+                    )
+
+                    HStack {
+                        Text("Background Opacity")
+                        Slider(
+                            value: hoverBackgroundOpacityBinding,
+                            in: 0...1,
+                            step: 0.05
+                        ) {
+                            Text("Hover Background Opacity")
+                        }
+                        .labelsHidden()
+                        Text("\(Int((preferences.configuredTileHoverBackgroundOpacity * 100).rounded()))%")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 56, alignment: .trailing)
                     }
-                }
+                    .disabled(!hasHoverBackgroundSource)
 
-                if let name = selectedHoverBackgroundImageName {
-                    Text(name)
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                }
-
-                HStack {
-                    Text("Background Opacity")
-                    Slider(value: hoverBackgroundOpacityBinding, in: 0...1, step: 0.05) {
-                        Text("Hover Background Opacity")
+                    HStack {
+                        Text("Background Corner Radius")
+                        Slider(
+                            value: hoverBackgroundCornerRadiusBinding,
+                            in: 0...32,
+                            step: 1
+                        ) {
+                            Text("Hover Background Corner Radius")
+                        }
+                        .labelsHidden()
+                        Text("\(Int(preferences.configuredTileHoverBackgroundCornerRadius)) pt")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 56, alignment: .trailing)
                     }
-                    .labelsHidden()
-                    Text("\(Int((preferences.effectiveTileHoverBackgroundOpacity * 100).rounded()))%")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 56, alignment: .trailing)
-                }
-                .disabled(!hasHoverBackgroundSource)
+                    .disabled(!hasHoverBackgroundSource)
 
-                HStack {
-                    Text("Background Corner Radius")
-                    Slider(value: hoverBackgroundCornerRadiusBinding, in: 0...32, step: 1) {
-                        Text("Hover Background Corner Radius")
-                    }
-                    .labelsHidden()
-                    Text("\(Int(preferences.effectiveTileHoverBackgroundCornerRadius)) pt")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 56, alignment: .trailing)
-                }
-                .disabled(!hasHoverBackgroundSource)
-
-                HStack {
-                    Text("Hover Scale")
-                    Slider(value: hoverScaleBinding, in: 0.8...1.4, step: 0.01) {
+                    HStack {
                         Text("Hover Scale")
+                        Slider(
+                            value: hoverScaleBinding,
+                            in: 0.8...1.4,
+                            step: 0.01
+                        ) {
+                            Text("Hover Scale")
+                        }
+                        .labelsHidden()
+                        Text(String(format: "%.2f×", preferences.configuredTileHoverScale))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 56, alignment: .trailing)
                     }
-                    .labelsHidden()
-                    Text(String(format: "%.2f×", preferences.effectiveTileHoverScale))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 56, alignment: .trailing)
-                }
 
-                HStack {
-                    Text("Hover Opacity")
-                    Slider(value: hoverOpacityBinding, in: 0...1, step: 0.05) {
+                    HStack {
                         Text("Hover Opacity")
+                        Slider(
+                            value: hoverOpacityBinding,
+                            in: 0...1,
+                            step: 0.05
+                        ) {
+                            Text("Hover Opacity")
+                        }
+                        .labelsHidden()
+                        Text("\(Int((preferences.configuredTileHoverOpacity * 100).rounded()))%")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 56, alignment: .trailing)
                     }
-                    .labelsHidden()
-                    Text("\(Int((preferences.effectiveTileHoverOpacity * 100).rounded()))%")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 56, alignment: .trailing)
                 }
+                .disabled(!preferences.tileHoverEffectsEnabled)
 
-                Text("Layered hover treatment: a background fill (color or image), plus optional scale and opacity multipliers applied to the icon while hovered.")
+                Text("Master switch for every visible tile-hover response: background, scale, fade, magnification, title labels, app-window previews, and widget previews. Turning it off preserves the individual choices for re-enable.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -555,32 +825,36 @@ struct AppearanceSettingsView: View {
                 Text("Active App Background")
                     .font(.headline)
 
-                Toggle("Use Active Background", isOn: usesActiveBackgroundColorBinding)
+                optionalSourceModeRow(
+                    title: "Background Color",
+                    key: .tileActiveBackgroundColor,
+                    disabledLabel: "None",
+                    ensureCustomValue: ensureCustomActiveBackgroundColor
+                )
 
-                if preferences.tileActiveBackgroundColor != nil {
+                if preferences.optionalAppearanceMode(
+                    for: .tileActiveBackgroundColor
+                ) == .custom {
                     ColorPicker("Active Background Color", selection: activeBackgroundColorBinding, supportsOpacity: false)
                 }
 
-                HStack {
-                    Text("Active Background Image")
-                    Spacer()
-                    Button("Choose Image...") { chooseTileActiveBackgroundImage() }
-                    if preferences.tileActiveBackgroundImagePath != nil {
-                        Button("Clear") {
-                            preferences.clearUserAsset(
-                                slot: "appearance:tile-active-background"
-                            ) {
-                                preferences.tileActiveBackgroundImagePath = nil
-                            }
+                optionalImageSourceRow(
+                    title: "Background Image",
+                    key: .tileActiveBackgroundImagePath,
+                    path: preferences.tileActiveBackgroundImagePath,
+                    onChoose: chooseTileActiveBackgroundImage,
+                    onRemoveCustom: {
+                        preferences.clearUserAsset(
+                            slot: "appearance:tile-active-background"
+                        ) {
+                            preferences.tileActiveBackgroundImagePath = nil
+                            preferences.setOptionalAppearanceMode(
+                                .disabled,
+                                for: .tileActiveBackgroundImagePath
+                            )
                         }
                     }
-                }
-
-                if let name = selectedActiveBackgroundImageName {
-                    Text(name)
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                }
+                )
 
                 HStack {
                     Text("Background Opacity")
@@ -613,15 +887,36 @@ struct AppearanceSettingsView: View {
             .padding(.vertical, 4)
 
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Use Icon Shadow", isOn: usesIconShadowBinding)
+                optionalSourceModeRow(
+                    title: "Icon Shadow",
+                    key: .iconShadowColor,
+                    disabledLabel: "Off",
+                    ensureCustomValue: ensureCustomIconShadow
+                )
                     .font(.headline)
 
-                if preferences.effectiveIconShadowColor != nil {
+                if preferences.optionalAppearanceMode(
+                    for: .iconShadowColor
+                ) == .custom {
                     ColorPicker("Shadow Color", selection: iconShadowColorBinding, supportsOpacity: false)
 
                     HStack {
                         Text("Radius")
-                        Slider(value: $preferences.iconShadowRadius, in: 0...32, step: 0.5) {
+                        Slider(
+                            value: themeAwareBinding(
+                                for: .iconShadowRadius,
+                                at: \.iconShadowRadius,
+                                effective: {
+                                    preferences.effectiveIconShadowRadius
+                                }
+                            ),
+                            in: rangeIncludingCurrent(
+                                0...32,
+                                current:
+                                    preferences.effectiveIconShadowRadius
+                            ),
+                            step: 0.5
+                        ) {
                             Text("Shadow Radius")
                         }
                         .labelsHidden()
@@ -632,7 +927,17 @@ struct AppearanceSettingsView: View {
 
                     HStack {
                         Text("Opacity")
-                        Slider(value: $preferences.iconShadowOpacity, in: 0...1, step: 0.05) {
+                        Slider(
+                            value: themeAwareBinding(
+                                for: .iconShadowOpacity,
+                                at: \.iconShadowOpacity,
+                                effective: {
+                                    preferences.effectiveIconShadowOpacity
+                                }
+                            ),
+                            in: 0...1,
+                            step: 0.05
+                        ) {
                             Text("Shadow Opacity")
                         }
                         .labelsHidden()
@@ -657,14 +962,16 @@ struct AppearanceSettingsView: View {
                 }
                 .font(.headline)
 
-                if dockSettings.magnification {
+                if dockSettings.effectiveMagnification {
                     HStack {
                         Slider(value: systemDockLargeSizeBinding, in: largeSizeRange, step: 1) {
                             Text("Magnified Size")
                         }
                         .labelsHidden()
 
-                        Text("\(Int(dockSettings.largeSize.rounded())) pt")
+                        Text(
+                            "\(Int(dockSettings.effectiveLargeSize.rounded())) pt"
+                        )
                             .foregroundStyle(.secondary)
                             .frame(width: 48, alignment: .trailing)
                     }
@@ -673,6 +980,50 @@ struct AppearanceSettingsView: View {
                 Text("Tiles near the pointer grow toward the magnified size and smoothly fall off with distance. Alpha: known issues with certain tile types and during reorder.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                if !preferences.tileHoverEffectsEnabled {
+                    Text("Disabled by the Tile Hover Effects master switch. Your magnification choice is preserved.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.vertical, 4)
+            .disabled(!preferences.tileHoverEffectsEnabled)
+        }
+
+        Section("macOS Dock Import") {
+            VStack(alignment: .leading, spacing: 8) {
+                Button("Import Current macOS Dock Settings") {
+                    isShowingSystemDockImportConfirmation = true
+                }
+                .confirmationDialog(
+                    "Import macOS Dock settings?",
+                    isPresented:
+                        $isShowingSystemDockImportConfirmation
+                ) {
+                    Button("Import Settings") {
+                        systemDockImportResult =
+                            dockSettings
+                                .importCurrentSystemDockSettings()
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This replaces Docky's imported edge, tile size, magnified size, and related compatibility values with the current macOS Dock values. Pinned items are unaffected.")
+                }
+
+                Text("Docky otherwise keeps its own values. Refreshing diagnostics or system Dock data never imports these settings.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let systemDockImportResult {
+                    if systemDockImportResult {
+                        Text("Imported the current macOS Dock settings.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("The macOS Dock settings could not be read. Docky's settings were not changed.")
+                            .foregroundStyle(.red)
+                    }
+                }
             }
             .padding(.vertical, 4)
         }
@@ -688,7 +1039,16 @@ struct AppearanceSettingsView: View {
 
                     Spacer()
 
-                    Picker("Chrome Clip Shape", selection: $preferences.windowClipShape) {
+                    Picker(
+                        "Chrome Clip Shape",
+                        selection: themeAwareBinding(
+                            for: .windowClipShape,
+                            at: \.windowClipShape,
+                            effective: {
+                                preferences.effectiveWindowClipShape
+                            }
+                        )
+                    ) {
                         ForEach(DockClipShape.allCases) { shape in
                             Text(shape.title).tag(shape)
                         }
@@ -715,7 +1075,9 @@ struct AppearanceSettingsView: View {
                             Text("Window Corner Radius")
                         }
                         .labelsHidden()
-                        Text("\(Int(min(preferences.windowCornerRadius, maximumCornerRadius))) pt")
+                        Text(
+                            "\(Int(min(preferences.effectiveWindowCornerRadius, maximumCornerRadius))) pt"
+                        )
                             .foregroundStyle(.secondary)
                             .frame(width: 48, alignment: .trailing)
                     }
@@ -726,27 +1088,31 @@ struct AppearanceSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 4)
-            .disabled(preferences.windowClipShape == .circle)
+            .disabled(preferences.effectiveWindowClipShape == .circle)
 
             DisclosureGroup("Per-Corner Radii") {
                 cornerRadiusRow(
                     label: "Top Leading",
-                    binding: $preferences.windowCornerRadiusTopLeading,
+                    key: .windowCornerRadiusTopLeading,
+                    keyPath: \.windowCornerRadiusTopLeading,
                     effective: preferences.effectiveWindowCornerRadiusTopLeading
                 )
                 cornerRadiusRow(
                     label: "Top Trailing",
-                    binding: $preferences.windowCornerRadiusTopTrailing,
+                    key: .windowCornerRadiusTopTrailing,
+                    keyPath: \.windowCornerRadiusTopTrailing,
                     effective: preferences.effectiveWindowCornerRadiusTopTrailing
                 )
                 cornerRadiusRow(
                     label: "Bottom Leading",
-                    binding: $preferences.windowCornerRadiusBottomLeading,
+                    key: .windowCornerRadiusBottomLeading,
+                    keyPath: \.windowCornerRadiusBottomLeading,
                     effective: preferences.effectiveWindowCornerRadiusBottomLeading
                 )
                 cornerRadiusRow(
                     label: "Bottom Trailing",
-                    binding: $preferences.windowCornerRadiusBottomTrailing,
+                    key: .windowCornerRadiusBottomTrailing,
+                    keyPath: \.windowCornerRadiusBottomTrailing,
                     effective: preferences.effectiveWindowCornerRadiusBottomTrailing
                 )
 
@@ -755,14 +1121,52 @@ struct AppearanceSettingsView: View {
                     .font(.caption)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .disabled(preferences.windowClipShape == .circle)
+            .disabled(preferences.effectiveWindowClipShape == .circle)
             .padding(.vertical, 4)
 
             DisclosureGroup("Per-Edge Content Insets") {
-                contentInsetRow(label: "Top", value: $preferences.windowContentInsetTop)
-                contentInsetRow(label: "Leading", value: $preferences.windowContentInsetLeading)
-                contentInsetRow(label: "Bottom", value: $preferences.windowContentInsetBottom)
-                contentInsetRow(label: "Trailing", value: $preferences.windowContentInsetTrailing)
+                contentInsetRow(
+                    label: "Top",
+                    value: themeAwareBinding(
+                        for: .windowContentInsetTop,
+                        at: \.windowContentInsetTop,
+                        effective: {
+                            preferences.effectiveWindowContentInsetTop
+                        }
+                    )
+                )
+                contentInsetRow(
+                    label: "Leading",
+                    value: themeAwareBinding(
+                        for: .windowContentInsetLeading,
+                        at: \.windowContentInsetLeading,
+                        effective: {
+                            preferences
+                                .effectiveWindowContentInsetLeading
+                        }
+                    )
+                )
+                contentInsetRow(
+                    label: "Bottom",
+                    value: themeAwareBinding(
+                        for: .windowContentInsetBottom,
+                        at: \.windowContentInsetBottom,
+                        effective: {
+                            preferences.effectiveWindowContentInsetBottom
+                        }
+                    )
+                )
+                contentInsetRow(
+                    label: "Trailing",
+                    value: themeAwareBinding(
+                        for: .windowContentInsetTrailing,
+                        at: \.windowContentInsetTrailing,
+                        effective: {
+                            preferences
+                                .effectiveWindowContentInsetTrailing
+                        }
+                    )
+                )
 
                 Text("Padding between the dock panel and the chrome view, per edge. Full-axis mode forces these to 0 regardless.")
                     .foregroundStyle(.secondary)
@@ -772,15 +1176,36 @@ struct AppearanceSettingsView: View {
             .padding(.vertical, 4)
 
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Use Custom Border", isOn: usesCustomWindowBorderBinding)
+                optionalSourceModeRow(
+                    title: "Window Border",
+                    key: .windowBorderColor,
+                    disabledLabel: "Off",
+                    ensureCustomValue: ensureCustomWindowBorder
+                )
                     .font(.headline)
 
-                if preferences.effectiveWindowBorderColor != nil {
+                if preferences.optionalAppearanceMode(
+                    for: .windowBorderColor
+                ) == .custom {
                     ColorPicker("Border Color", selection: windowBorderColorBinding, supportsOpacity: false)
 
                     HStack {
                         Text("Border Width")
-                        Slider(value: $preferences.windowBorderWidth, in: 0...8, step: 0.5) {
+                        Slider(
+                            value: themeAwareBinding(
+                                for: .windowBorderWidth,
+                                at: \.windowBorderWidth,
+                                effective: {
+                                    preferences.effectiveWindowBorderWidth
+                                }
+                            ),
+                            in: rangeIncludingCurrent(
+                                0...8,
+                                current:
+                                    preferences.effectiveWindowBorderWidth
+                            ),
+                            step: 0.5
+                        ) {
                             Text("Border Width")
                         }
                         .labelsHidden()
@@ -790,7 +1215,7 @@ struct AppearanceSettingsView: View {
                     }
                 }
 
-                Text("Override the chrome outline with a solid color. When off, Docky uses its default glass stroke (or no stroke when Glass is disabled).")
+                Text("Choose the theme border, explicitly turn the flat border off, or use a custom solid color. The normal glass stroke remains independent.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -803,22 +1228,28 @@ struct AppearanceSettingsView: View {
         Section {
             widgetSpanBlock(
                 title: "1x Widgets",
-                paddingBinding: $preferences.widget1xContentPadding,
-                radiusBinding: $preferences.widget1xCornerRadius,
+                paddingKey: .widget1xContentPadding,
+                paddingKeyPath: \.widget1xContentPadding,
+                radiusKey: .widget1xCornerRadius,
+                radiusKeyPath: \.widget1xCornerRadius,
                 effectivePadding: preferences.effectiveWidgetContentPadding(for: .one),
                 effectiveRadius: preferences.effectiveWidgetCornerRadius(for: .one)
             )
             widgetSpanBlock(
                 title: "2x Widgets",
-                paddingBinding: $preferences.widget2xContentPadding,
-                radiusBinding: $preferences.widget2xCornerRadius,
+                paddingKey: .widget2xContentPadding,
+                paddingKeyPath: \.widget2xContentPadding,
+                radiusKey: .widget2xCornerRadius,
+                radiusKeyPath: \.widget2xCornerRadius,
                 effectivePadding: preferences.effectiveWidgetContentPadding(for: .two),
                 effectiveRadius: preferences.effectiveWidgetCornerRadius(for: .two)
             )
             widgetSpanBlock(
                 title: "3x Widgets",
-                paddingBinding: $preferences.widget3xContentPadding,
-                radiusBinding: $preferences.widget3xCornerRadius,
+                paddingKey: .widget3xContentPadding,
+                paddingKeyPath: \.widget3xContentPadding,
+                radiusKey: .widget3xCornerRadius,
+                radiusKeyPath: \.widget3xCornerRadius,
                 effectivePadding: preferences.effectiveWidgetContentPadding(for: .three),
                 effectiveRadius: preferences.effectiveWidgetCornerRadius(for: .three)
             )
@@ -833,8 +1264,12 @@ struct AppearanceSettingsView: View {
     @ViewBuilder
     private func widgetSpanBlock(
         title: String,
-        paddingBinding: Binding<CGFloat?>,
-        radiusBinding: Binding<CGFloat?>,
+        paddingKey: DockyThemeOverrideKey,
+        paddingKeyPath:
+            ReferenceWritableKeyPath<DockyPreferences, CGFloat?>,
+        radiusKey: DockyThemeOverrideKey,
+        radiusKeyPath:
+            ReferenceWritableKeyPath<DockyPreferences, CGFloat?>,
         effectivePadding: CGFloat?,
         effectiveRadius: CGFloat?
     ) -> some View {
@@ -843,13 +1278,15 @@ struct AppearanceSettingsView: View {
 
             widgetOverrideRow(
                 label: "Content Padding",
-                binding: paddingBinding,
+                key: paddingKey,
+                keyPath: paddingKeyPath,
                 effective: effectivePadding,
                 range: 0...32
             )
             widgetOverrideRow(
                 label: "Corner Radius",
-                binding: radiusBinding,
+                key: radiusKey,
+                keyPath: radiusKeyPath,
                 effective: effectiveRadius,
                 range: 0...32
             )
@@ -860,27 +1297,25 @@ struct AppearanceSettingsView: View {
     @ViewBuilder
     private func widgetOverrideRow(
         label: String,
-        binding: Binding<CGFloat?>,
+        key: DockyThemeOverrideKey,
+        keyPath:
+            ReferenceWritableKeyPath<DockyPreferences, CGFloat?>,
         effective: CGFloat?,
         range: ClosedRange<Double>
     ) -> some View {
-        // Three-state row: the toggle is the user's intent (override
-        // this span's value or inherit). The slider becomes editable
-        // only when the override is on. Unset state shows "inherited"
-        // rather than a meaningless number.
-        let isOverriding = Binding<Bool>(
-            get: { binding.wrappedValue != nil },
-            set: { uses in
-                if uses {
-                    binding.wrappedValue = effective ?? 0
-                } else {
-                    binding.wrappedValue = nil
-                }
-            }
-        )
-        let sliderValue = Binding<Double>(
-            get: { Double(binding.wrappedValue ?? effective ?? 0) },
-            set: { binding.wrappedValue = CGFloat($0) }
+        // The toggle is typed source intent (custom or inherit), independent
+        // from dormant raw storage. The slider becomes editable only while
+        // custom intent is active.
+        let isOverriding =
+            optionalNumericAppearanceUsesCustomBinding(
+                for: key,
+                at: keyPath,
+                effective: { effective ?? 0 }
+            )
+        let sliderValue = optionalNumericAppearanceBinding(
+            for: key,
+            at: keyPath,
+            effective: { effective ?? 0 }
         )
         HStack {
             Toggle(isOn: isOverriding) {
@@ -906,28 +1341,25 @@ struct AppearanceSettingsView: View {
                 Text("Window Background Image")
                     .font(.headline)
 
-                HStack {
-                    Button("Choose Image...") {
-                        chooseWindowBackgroundImage()
-                    }
-
-                    if preferences.windowBackgroundImagePath != nil {
-                        Button("Clear") {
-                            preferences.clearUserAsset(
-                                slot: "appearance:window-background"
-                            ) {
-                                preferences.windowBackgroundImagePath = nil
-                            }
+                optionalImageSourceRow(
+                    title: "Image Source",
+                    key: .windowBackgroundImagePath,
+                    path: preferences.windowBackgroundImagePath,
+                    onChoose: chooseWindowBackgroundImage,
+                    onRemoveCustom: {
+                        preferences.clearUserAsset(
+                            slot: "appearance:window-background"
+                        ) {
+                            preferences.windowBackgroundImagePath = nil
+                            preferences.setOptionalAppearanceMode(
+                                .disabled,
+                                for: .windowBackgroundImagePath
+                            )
                         }
                     }
-                }
+                )
 
-                if let selectedWindowBackgroundImageName {
-                    Text(selectedWindowBackgroundImageName)
-                        .foregroundStyle(.secondary)
-                }
-
-                Text("Use an image with aspect fill behind the dock tiles. When set, it replaces the material tint and opacity until cleared.")
+                Text("Follow the theme image, explicitly use no image, or choose a custom image. An active image replaces the material tint and opacity.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -936,14 +1368,29 @@ struct AppearanceSettingsView: View {
 
                     Spacer()
 
-                    Picker("Background Image Mode", selection: $preferences.windowBackgroundImageMode) {
+                    Picker(
+                        "Background Image Mode",
+                        selection: themeAwareBinding(
+                            for: .windowBackgroundImageMode,
+                            at: \.windowBackgroundImageMode,
+                            effective: {
+                                preferences
+                                    .effectiveWindowBackgroundImageMode
+                            }
+                        )
+                    ) {
                         ForEach(DockBackgroundImageMode.allCases) { mode in
                             Text(mode.title).tag(mode)
                         }
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
-                    .disabled(preferences.windowBackgroundImagePath == nil)
+                    .disabled(
+                        preferences.optionalAppearanceMode(
+                            for: .windowBackgroundImagePath
+                        ) != .custom
+                            || preferences.windowBackgroundImagePath == nil
+                    )
                 }
 
                 Text("Sprite mode keeps the leading and trailing thirds of the image pinned and stretches the middle along the dock's axis.")
@@ -953,14 +1400,21 @@ struct AppearanceSettingsView: View {
             .padding(.vertical, 4)
 
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Use Custom Window Tint", isOn: usesCustomWindowTintBinding)
+                optionalSourceModeRow(
+                    title: "Window Tint",
+                    key: .windowTintColor,
+                    disabledLabel: "System Material",
+                    ensureCustomValue: ensureCustomWindowTint
+                )
                     .font(.headline)
 
-                if preferences.windowTintColor != nil {
+                if preferences.optionalAppearanceMode(
+                    for: .windowTintColor
+                ) == .custom {
                     ColorPicker("Window Tint", selection: windowTintBinding, supportsOpacity: false)
                 }
 
-                Text("Override the translucent tint behind the main dock window. Leave this off to keep following the system material color.")
+                Text("Choose the active theme tint, the native system material with no explicit tint layer, or a custom color.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -985,49 +1439,169 @@ struct AppearanceSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 4)
-            .disabled(usesWindowBackgroundImage)
+            .disabled(
+                usesWindowBackgroundImage
+                    || preferences.optionalAppearanceMode(
+                        for: .windowTintColor
+                    ) == .disabled
+            )
         }
     }
 
+    private func effectiveBinding<Value>(
+        get: @escaping () -> Value,
+        commit: @escaping (Value) -> Void
+    ) -> Binding<Value> {
+        Binding(get: get, set: commit)
+    }
+
+    private func themeAwareBinding(
+        for key: DockyThemeOverrideKey,
+        at keyPath:
+            ReferenceWritableKeyPath<DockyPreferences, CGFloat>,
+        effective: @escaping () -> CGFloat
+    ) -> Binding<CGFloat> {
+        effectiveBinding(get: effective) {
+            preferences.commitUserAppearanceValue(
+                $0,
+                for: key,
+                at: keyPath
+            )
+        }
+    }
+
+    private func themeAwareBinding(
+        for key: DockyThemeOverrideKey,
+        at keyPath:
+            ReferenceWritableKeyPath<DockyPreferences, Bool>,
+        effective: @escaping () -> Bool
+    ) -> Binding<Bool> {
+        effectiveBinding(get: effective) {
+            preferences.commitUserAppearanceValue(
+                $0,
+                for: key,
+                at: keyPath
+            )
+        }
+    }
+
+    private func themeAwareBinding<Value: RawRepresentable>(
+        for key: DockyThemeOverrideKey,
+        at keyPath:
+            ReferenceWritableKeyPath<DockyPreferences, Value>,
+        effective: @escaping () -> Value
+    ) -> Binding<Value> where Value.RawValue == String {
+        effectiveBinding(get: effective) {
+            preferences.commitUserAppearanceValue(
+                $0,
+                for: key,
+                at: keyPath
+            )
+        }
+    }
+
+    /// Displays the resolved theme/default value while committing an explicit
+    /// custom source on every user edit. The forced commit is important when a
+    /// dormant raw value already equals the selection after Clear Overrides.
+    private func optionalNumericAppearanceBinding(
+        for key: DockyThemeOverrideKey,
+        at keyPath:
+            ReferenceWritableKeyPath<DockyPreferences, CGFloat?>,
+        effective: @escaping () -> CGFloat
+    ) -> Binding<Double> {
+        effectiveBinding(
+            get: { Double(effective()) },
+            commit: {
+                preferences.commitUserOptionalAppearanceValue(
+                    CGFloat($0),
+                    for: key,
+                    at: keyPath
+                )
+            }
+        )
+    }
+
+    /// The checkbox reflects source intent, not whether dormant custom storage
+    /// happens to be non-nil. Inherit keeps that storage available for a later
+    /// re-enable.
+    private func optionalNumericAppearanceUsesCustomBinding(
+        for key: DockyThemeOverrideKey,
+        at keyPath:
+            ReferenceWritableKeyPath<DockyPreferences, CGFloat?>,
+        effective: @escaping () -> CGFloat
+    ) -> Binding<Bool> {
+        Binding(
+            get: {
+                preferences.optionalAppearanceMode(for: key) == .custom
+            },
+            set: {
+                preferences.setUserOptionalAppearanceUsesCustom(
+                    $0,
+                    for: key,
+                    at: keyPath,
+                    effectiveValue: effective()
+                )
+            }
+        )
+    }
+
+    private func rangeIncludingCurrent<Value: Comparable>(
+        _ base: ClosedRange<Value>,
+        current: Value
+    ) -> ClosedRange<Value> {
+        min(base.lowerBound, current)
+            ... max(base.upperBound, current)
+    }
+
     private var maximumCornerRadius: CGFloat {
-        (dockSettings.displayTileSize + preferences.tileVerticalPadding * 2) / 2
+        (
+            dockSettings.effectiveTileSize
+                + preferences.effectiveTileVerticalPadding * 2
+        ) / 2
     }
 
     private var systemDockTileSizeBinding: Binding<Double> {
-        Binding(
-            get: { Double(dockSettings.tileSize) },
-            set: { dockSettings.setTileSize(CGFloat($0)) }
+        effectiveBinding(
+            get: { Double(dockSettings.effectiveTileSize) },
+            commit: { dockSettings.setTileSize(CGFloat($0)) }
         )
     }
 
     private var systemDockMagnificationBinding: Binding<Bool> {
-        Binding(
-            get: { dockSettings.magnification },
-            set: { dockSettings.setMagnification($0) }
+        effectiveBinding(
+            get: { dockSettings.effectiveMagnification },
+            commit: { dockSettings.setMagnification($0) }
         )
     }
 
     private var systemDockLargeSizeBinding: Binding<Double> {
-        Binding(
-            get: { Double(dockSettings.largeSize) },
-            set: { dockSettings.setLargeSize(CGFloat($0)) }
+        effectiveBinding(
+            get: { Double(dockSettings.effectiveLargeSize) },
+            commit: { dockSettings.setLargeSize(CGFloat($0)) }
         )
     }
 
     private var largeSizeRange: ClosedRange<Double> {
-        let lower = Double(dockSettings.tileSize)
-        return lower...max(lower, 256)
+        let lower = Double(dockSettings.effectiveTileSize)
+        let current = Double(dockSettings.effectiveLargeSize)
+        return lower...max(max(lower, 256), current)
     }
 
     private var windowCornerRadiusBinding: Binding<CGFloat> {
-        Binding(
-            get: { min(preferences.windowCornerRadius, maximumCornerRadius) },
-            set: { preferences.windowCornerRadius = $0 }
+        themeAwareBinding(
+            for: .windowCornerRadius,
+            at: \.windowCornerRadius,
+            effective: {
+                min(
+                    preferences.effectiveWindowCornerRadius,
+                    maximumCornerRadius
+                )
+            }
         )
     }
 
     private var windowCornerRadiusDescription: String {
-        switch preferences.windowClipShape {
+        switch preferences.effectiveWindowClipShape {
         case .rounded:
             "Controls the roundness of the main dock window and its border, up to a full capsule."
         case .circle:
@@ -1035,14 +1609,10 @@ struct AppearanceSettingsView: View {
         }
     }
 
-    private var usesCustomWindowTintBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.windowTintColor != nil },
-            set: { usesCustomTint in
-                preferences.windowTintColor = usesCustomTint
-                    ? (preferences.windowTintColor ?? DockColor(nsColor: preferences.effectiveWindowTintColor))
-                    : nil
-            }
+    private func ensureCustomWindowTint() {
+        guard preferences.windowTintColor == nil else { return }
+        preferences.windowTintColor = DockColor(
+            nsColor: preferences.effectiveWindowTintColor
         )
     }
 
@@ -1060,7 +1630,7 @@ struct AppearanceSettingsView: View {
     }
 
     private var showsIndicatorColorControls: Bool {
-        switch preferences.activeIndicatorShape {
+        switch preferences.effectiveActiveIndicatorShape {
         case .dot, .pill, .underline:
             true
         case .none, .image:
@@ -1068,14 +1638,10 @@ struct AppearanceSettingsView: View {
         }
     }
 
-    private var usesCustomActiveIndicatorColorBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.activeIndicatorColor != nil },
-            set: { usesCustomColor in
-                preferences.activeIndicatorColor = usesCustomColor
-                    ? (preferences.activeIndicatorColor ?? DockColor(nsColor: preferences.effectiveActiveIndicatorColor))
-                    : nil
-            }
+    private func ensureCustomActiveIndicatorColor() {
+        guard preferences.activeIndicatorColor == nil else { return }
+        preferences.activeIndicatorColor = DockColor(
+            nsColor: preferences.effectiveActiveIndicatorColor
         )
     }
 
@@ -1093,24 +1659,19 @@ struct AppearanceSettingsView: View {
     }
 
     private var windowTintOpacityBinding: Binding<CGFloat> {
-        Binding(
-            get: { preferences.effectiveWindowTintOpacity },
-            set: { preferences.windowTintOpacity = min(max($0, 0), 1) }
+        themeAwareBinding(
+            for: .windowTintOpacity,
+            at: \.windowTintOpacity,
+            effective: {
+                preferences.effectiveWindowTintOpacity
+            }
         )
     }
 
-    private var usesCustomWindowBorderBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.effectiveWindowBorderColor != nil },
-            set: { usesBorder in
-                if usesBorder {
-                    let seed = preferences.effectiveWindowBorderColor ?? .labelColor
-                    preferences.windowBorderColor = DockColor(nsColor: seed)
-                } else {
-                    preferences.windowBorderColor = nil
-                }
-            }
-        )
+    private func ensureCustomWindowBorder() {
+        guard preferences.windowBorderColor == nil else { return }
+        let seed = preferences.effectiveWindowBorderColor ?? .labelColor
+        preferences.windowBorderColor = DockColor(nsColor: seed)
     }
 
     private var windowBorderColorBinding: Binding<Color> {
@@ -1126,18 +1687,10 @@ struct AppearanceSettingsView: View {
         )
     }
 
-    private var usesIconShadowBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.effectiveIconShadowColor != nil },
-            set: { usesShadow in
-                if usesShadow {
-                    let seed = preferences.effectiveIconShadowColor ?? .black
-                    preferences.iconShadowColor = DockColor(nsColor: seed)
-                } else {
-                    preferences.iconShadowColor = nil
-                }
-            }
-        )
+    private func ensureCustomIconShadow() {
+        guard preferences.iconShadowColor == nil else { return }
+        let seed = preferences.effectiveIconShadowColor ?? .black
+        preferences.iconShadowColor = DockColor(nsColor: seed)
     }
 
     private var iconShadowColorBinding: Binding<Color> {
@@ -1153,18 +1706,10 @@ struct AppearanceSettingsView: View {
         )
     }
 
-    private var usesCustomDividerColorBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.effectiveDividerColor != nil },
-            set: { usesColor in
-                if usesColor {
-                    let seed = preferences.effectiveDividerColor ?? .labelColor
-                    preferences.dividerColor = DockColor(nsColor: seed)
-                } else {
-                    preferences.dividerColor = nil
-                }
-            }
-        )
+    private func ensureCustomDividerColor() {
+        guard preferences.dividerColor == nil else { return }
+        let seed = preferences.effectiveDividerColor ?? .labelColor
+        preferences.dividerColor = DockColor(nsColor: seed)
     }
 
     private var dividerColorBinding: Binding<Color> {
@@ -1296,18 +1841,12 @@ struct AppearanceSettingsView: View {
             || preferences.effectiveTileActiveBackgroundImageURL != nil
     }
 
-    private var usesActiveBackgroundColorBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.effectiveTileActiveBackgroundColor != nil },
-            set: { uses in
-                if uses {
-                    let seed = preferences.effectiveTileActiveBackgroundColor ?? .controlAccentColor
-                    preferences.tileActiveBackgroundColor = DockColor(nsColor: seed)
-                } else {
-                    preferences.tileActiveBackgroundColor = nil
-                }
-            }
-        )
+    private func ensureCustomActiveBackgroundColor() {
+        guard preferences.tileActiveBackgroundColor == nil else { return }
+        let seed =
+            preferences.effectiveTileActiveBackgroundColor
+            ?? .controlAccentColor
+        preferences.tileActiveBackgroundColor = DockColor(nsColor: seed)
     }
 
     private var activeBackgroundColorBinding: Binding<Color> {
@@ -1324,16 +1863,22 @@ struct AppearanceSettingsView: View {
     }
 
     private var activeBackgroundOpacityBinding: Binding<Double> {
-        Binding(
-            get: { Double(preferences.effectiveTileActiveBackgroundOpacity) },
-            set: { preferences.tileActiveBackgroundOpacity = CGFloat($0) }
+        optionalNumericAppearanceBinding(
+            for: .tileActiveBackgroundOpacity,
+            at: \.tileActiveBackgroundOpacity,
+            effective: {
+                preferences.effectiveTileActiveBackgroundOpacity
+            }
         )
     }
 
     private var activeBackgroundCornerRadiusBinding: Binding<Double> {
-        Binding(
-            get: { Double(preferences.effectiveTileActiveBackgroundCornerRadius) },
-            set: { preferences.tileActiveBackgroundCornerRadius = CGFloat($0) }
+        optionalNumericAppearanceBinding(
+            for: .tileActiveBackgroundCornerRadius,
+            at: \.tileActiveBackgroundCornerRadius,
+            effective: {
+                preferences.effectiveTileActiveBackgroundCornerRadius
+            }
         )
     }
 
@@ -1373,28 +1918,24 @@ struct AppearanceSettingsView: View {
     }
 
     private var hasHoverBackgroundSource: Bool {
-        preferences.effectiveTileHoverBackgroundColor != nil
-            || preferences.effectiveTileHoverBackgroundImageURL != nil
+        preferences.configuredTileHoverBackgroundColor != nil
+            || preferences.configuredTileHoverBackgroundImageURL != nil
     }
 
-    private var usesHoverBackgroundColorBinding: Binding<Bool> {
-        Binding(
-            get: { preferences.effectiveTileHoverBackgroundColor != nil },
-            set: { uses in
-                if uses {
-                    let seed = preferences.effectiveTileHoverBackgroundColor ?? .white
-                    preferences.tileHoverBackgroundColor = DockColor(nsColor: seed)
-                } else {
-                    preferences.tileHoverBackgroundColor = nil
-                }
-            }
-        )
+    private func ensureCustomHoverBackgroundColor() {
+        guard preferences.tileHoverBackgroundColor == nil else { return }
+        let seed =
+            preferences.configuredTileHoverBackgroundColor
+            ?? .white
+        preferences.tileHoverBackgroundColor = DockColor(nsColor: seed)
     }
 
     private var hoverBackgroundColorBinding: Binding<Color> {
         Binding(
             get: {
-                let ns = preferences.effectiveTileHoverBackgroundColor ?? .white
+                let ns =
+                    preferences.configuredTileHoverBackgroundColor
+                    ?? .white
                 return Color(nsColor: ns)
             },
             set: { newValue in
@@ -1405,57 +1946,66 @@ struct AppearanceSettingsView: View {
     }
 
     private var hoverBackgroundOpacityBinding: Binding<Double> {
-        Binding(
-            get: { Double(preferences.effectiveTileHoverBackgroundOpacity) },
-            set: { preferences.tileHoverBackgroundOpacity = CGFloat($0) }
+        optionalNumericAppearanceBinding(
+            for: .tileHoverBackgroundOpacity,
+            at: \.tileHoverBackgroundOpacity,
+            effective: {
+                preferences.configuredTileHoverBackgroundOpacity
+            }
         )
     }
 
     private var hoverBackgroundCornerRadiusBinding: Binding<Double> {
-        Binding(
-            get: { Double(preferences.effectiveTileHoverBackgroundCornerRadius) },
-            set: { preferences.tileHoverBackgroundCornerRadius = CGFloat($0) }
+        optionalNumericAppearanceBinding(
+            for: .tileHoverBackgroundCornerRadius,
+            at: \.tileHoverBackgroundCornerRadius,
+            effective: {
+                preferences.configuredTileHoverBackgroundCornerRadius
+            }
         )
     }
 
     private var hoverScaleBinding: Binding<Double> {
-        Binding(
-            get: { Double(preferences.effectiveTileHoverScale) },
-            set: { preferences.tileHoverScale = CGFloat($0) }
+        optionalNumericAppearanceBinding(
+            for: .tileHoverScale,
+            at: \.tileHoverScale,
+            effective: {
+                preferences.configuredTileHoverScale
+            }
         )
     }
 
     private var hoverOpacityBinding: Binding<Double> {
-        Binding(
-            get: { Double(preferences.effectiveTileHoverOpacity) },
-            set: { preferences.tileHoverOpacity = CGFloat($0) }
+        optionalNumericAppearanceBinding(
+            for: .tileHoverOpacity,
+            at: \.tileHoverOpacity,
+            effective: {
+                preferences.configuredTileHoverOpacity
+            }
         )
     }
 
     @ViewBuilder
     private func cornerRadiusRow(
         label: String,
-        binding: Binding<CGFloat?>,
+        key: DockyThemeOverrideKey,
+        keyPath:
+            ReferenceWritableKeyPath<DockyPreferences, CGFloat?>,
         effective: CGFloat
     ) -> some View {
-        // Three-state row: the toggle is the user's *intent* (override this
-        // corner or inherit the uniform value); the slider only matters
-        // when the override is on. Mirrors `usesCustomWindowBorderBinding`
-        // pattern, flipping the toggle off restores nil + clears the
-        // appearance-override flag so the theme/uniform value comes back.
-        let usesOverride = Binding<Bool>(
-            get: { binding.wrappedValue != nil },
-            set: { uses in
-                if uses {
-                    binding.wrappedValue = effective
-                } else {
-                    binding.wrappedValue = nil
-                }
-            }
-        )
-        let value = Binding<Double>(
-            get: { Double(binding.wrappedValue ?? effective) },
-            set: { binding.wrappedValue = CGFloat($0) }
+        // The toggle is the user's source intent (custom or inherit), not a
+        // test for non-nil raw storage. Turning it off preserves the dormant
+        // custom radius while the theme/uniform value becomes effective.
+        let usesOverride =
+            optionalNumericAppearanceUsesCustomBinding(
+                for: key,
+                at: keyPath,
+                effective: { effective }
+            )
+        let value = optionalNumericAppearanceBinding(
+            for: key,
+            at: keyPath,
+            effective: { effective }
         )
 
         HStack {
@@ -1478,10 +2028,17 @@ struct AppearanceSettingsView: View {
     private func contentInsetRow(label: String, value: Binding<CGFloat>) -> some View {
         HStack {
             Text(label).frame(width: 120, alignment: .leading)
-            Slider(value: Binding(
-                get: { Double(value.wrappedValue) },
-                set: { value.wrappedValue = CGFloat($0) }
-            ), in: 0...16, step: 1) {
+            Slider(
+                value: Binding(
+                    get: { Double(value.wrappedValue) },
+                    set: { value.wrappedValue = CGFloat($0) }
+                ),
+                in: rangeIncludingCurrent(
+                    0...16,
+                    current: Double(value.wrappedValue)
+                ),
+                step: 1
+            ) {
                 Text(label)
             }
             .labelsHidden()

@@ -42,6 +42,7 @@ final class MainWindowContainerView: NSView {
 
         applyContentInsets()
         observePreferencesForInsets()
+        observeTileHoverEffectsPreference()
     }
 
     /// Re-applies the per-edge content padding. Full-axis mode forces
@@ -81,6 +82,26 @@ final class MainWindowContainerView: NSView {
         }
     }
 
+    /// Bridges the Observation-backed hover master into AppKit's pointer
+    /// tracking. Disabling clears an in-flight magnification immediately.
+    /// Re-enabling resamples the current pointer, so a stationary cursor
+    /// restores magnification without waiting for another mouse-moved event.
+    private func observeTileHoverEffectsPreference() {
+        withObservationTracking {
+            _ = DockyPreferences.shared.tileHoverEffectsEnabled
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if DockyPreferences.shared.tileHoverEffectsEnabled {
+                    self.resampleMagnificationPointerFromCurrentLocation()
+                } else {
+                    DockMagnificationService.shared.clearPointer()
+                }
+                self.observeTileHoverEffectsPreference()
+            }
+        }
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
 
@@ -101,12 +122,16 @@ final class MainWindowContainerView: NSView {
     override func mouseEntered(with event: NSEvent) {
         super.mouseEntered(with: event)
         (window as? MainWindow)?.pointerDidEnterWindow()
-        forwardMagnificationPointer(from: event)
+        forwardMagnificationPointer(
+            locationInWindow: event.locationInWindow
+        )
     }
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        forwardMagnificationPointer(from: event)
+        forwardMagnificationPointer(
+            locationInWindow: event.locationInWindow
+        )
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -125,8 +150,33 @@ final class MainWindowContainerView: NSView {
     /// chrome to make room for magnified icons, so a window-wide tracking
     /// area would magnify tiles as soon as the pointer entered the empty
     /// headroom above the chrome, well before it ever touched a tile.
-    private func forwardMagnificationPointer(from event: NSEvent) {
-        let inHosting = contentView.convert(event.locationInWindow, from: nil)
+    func resampleMagnificationPointerFromCurrentLocation() {
+        guard let window else {
+            DockMagnificationService.shared.clearPointer()
+            return
+        }
+        let locationInWindow = window.mouseLocationOutsideOfEventStream
+        let localPoint = convert(locationInWindow, from: nil)
+        guard bounds.contains(localPoint) else {
+            DockMagnificationService.shared.clearPointer()
+            return
+        }
+        forwardMagnificationPointer(locationInWindow: locationInWindow)
+    }
+
+    private func forwardMagnificationPointer(
+        locationInWindow: CGPoint
+    ) {
+        guard TileHoverEffectsRuntimePolicy.allowsMagnification(
+            isEnabled: DockyPreferences.shared.tileHoverEffectsEnabled,
+            configuredEnabled:
+                DockSettingsService.shared.effectiveMagnification
+        ) else {
+            DockMagnificationService.shared.clearPointer()
+            return
+        }
+
+        let inHosting = contentView.convert(locationInWindow, from: nil)
         let topLeft: CGPoint = contentView.isFlipped
             ? inHosting
             : CGPoint(x: inHosting.x, y: contentView.bounds.height - inHosting.y)
@@ -438,9 +488,9 @@ final class MainWindow: NSPanel {
             _ = preferences.windowPosition
             _ = preferences.windowDisplayTarget
             _ = dockSettings.orientation
-            _ = dockSettings.tileSize
-            _ = dockSettings.largeSize
-            _ = dockSettings.magnification
+            _ = dockSettings.effectiveTileSize
+            _ = dockSettings.effectiveLargeSize
+            _ = dockSettings.effectiveMagnification
             self.applyCurrentFrame(animated: true, duration: self.tileMutationAnimationDuration)
         }
         .store(in: &cancellables)
@@ -463,8 +513,13 @@ final class MainWindow: NSPanel {
         // palette, or icon-out-of-folder). The cursor can briefly be outside
         // the dock window during the transit, so without this the dock would
         // start to auto-hide just as the user is moving the drag toward it.
-        DockDragService.shared.$kind
-            .map { $0 != nil }
+        Publishers.CombineLatest(
+            DockDragService.shared.$kind
+                .map { $0 != nil },
+            DockPresentationService.shared.$internalDrag
+                .map { $0.tileID != nil }
+        )
+            .map { $0 || $1 }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] hasDrag in
@@ -729,7 +784,10 @@ final class MainWindow: NSPanel {
     }
 
     private func syncPointerPresenceForDragSession() {
-        let hasDrag = DockDragService.shared.kind != nil
+        let hasDrag =
+            DockDragService.shared.kind != nil
+            || DockPresentationService.shared
+                .internalDrag.tileID != nil
         if hasDrag != isDragActiveForVisibility {
             isDragActiveForVisibility = hasDrag
             applyEffectiveVisibility(animated: true)
@@ -976,7 +1034,7 @@ final class MainWindow: NSPanel {
         let verticalContentPadding: CGFloat = fullAxis ? 0
             : preferences.effectiveWindowContentInsetTop + preferences.effectiveWindowContentInsetBottom
         let position = preferences.windowPosition.resolved(systemOrientation: dockSettings.orientation)
-        let baseTileSize = dockSettings.displayTileSize
+        let baseTileSize = dockSettings.effectiveTileSize
         let baseTileHeight = baseTileSize + preferences.effectiveTileVerticalPadding * 2
         let sizingTiles = presentation.snapshot.items
         let dockPartition =
@@ -1073,11 +1131,14 @@ final class MainWindow: NSPanel {
         // size is the UNscaled `largeSize` even when overflow has shrunk
         // the resting tiles, so headroom is measured from the scaled
         // chrome height up to that fixed peak.
-        let scaledBaseTileSize = dockSettings.tileSize * contentScale
+        let scaledBaseTileSize =
+            dockSettings.effectiveTileSize * contentScale
+        let magnifiedTileSize = dockSettings.effectiveLargeSize
         let magnificationHeadroom: CGFloat = (
-            dockSettings.magnification && dockSettings.largeSize > scaledBaseTileSize
+            dockSettings.effectiveMagnification
+                && magnifiedTileSize > scaledBaseTileSize
         )
-            ? dockSettings.largeSize - scaledBaseTileSize
+            ? magnifiedTileSize - scaledBaseTileSize
             : 0
         let windowContentSize: CGSize = {
             guard magnificationHeadroom > 0 else { return displayedContentSize }

@@ -38,7 +38,10 @@ struct WindowManagementSettingsView: View {
         Form {
             Section("Window Switcher") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Enable Window Switcher", isOn: $preferences.enablesWindowSwitcher)
+                    Toggle(
+                        "Enable Window Switcher",
+                        isOn: windowSwitcherEnabledBinding
+                    )
                         .font(.headline)
 
                     Text("Turn Docky's Cmd-Tab-style switcher on or off without clearing its shortcut or preview preference.")
@@ -65,7 +68,9 @@ struct WindowManagementSettingsView: View {
                             isRecording: $isRecordingShortcut,
                             resetShortcut: KeyboardShortcut(keyCode: 48, modifierFlags: [.option])
                         ) { shortcut in
-                            preferences.windowSwitcherShortcut = shortcut
+                            preferences.setWindowSwitcherShortcut(
+                                shortcut
+                            )
                         }
                         .disabled(!preferences.enablesWindowSwitcher)
                     }
@@ -73,6 +78,25 @@ struct WindowManagementSettingsView: View {
                     Text(shortcutHelpText)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    Text(
+                        "Shift is reserved for reverse cycling. "
+                            + "Choose a base shortcut without Shift."
+                    )
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                    if let error =
+                        preferences
+                            .windowSwitcherShortcutErrorMessage
+                    {
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .fixedSize(
+                                horizontal: false,
+                                vertical: true
+                            )
+                    }
                 }
                 .padding(.vertical, 4)
 
@@ -171,6 +195,26 @@ struct WindowManagementSettingsView: View {
 
             Section("Window Preview") {
                 VStack(alignment: .leading, spacing: 8) {
+                    Toggle(
+                        "Show Window Previews on Hover",
+                        isOn: $preferences.enablesWindowHoverPreview
+                    )
+                    .font(.headline)
+
+                    Text("Controls the separate window-preview panel for app and app-folder tiles. The Tile Hover Effects master switch in Appearance must also be enabled.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if !preferences.tileHoverEffectsEnabled {
+                        Text("Disabled by the Tile Hover Effects master switch. This preview choice is preserved.")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.vertical, 4)
+                .disabled(!preferences.tileHoverEffectsEnabled)
+
+                VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Hover Delay")
                             .font(.headline)
@@ -195,6 +239,10 @@ struct WindowManagementSettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.vertical, 4)
+                .disabled(
+                    !preferences.tileHoverEffectsEnabled
+                        || !preferences.enablesWindowHoverPreview
+                )
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Layout")
@@ -220,9 +268,20 @@ struct WindowManagementSettingsView: View {
                     }
                 }
                 .padding(.vertical, 4)
+                .disabled(
+                    !preferences.tileHoverEffectsEnabled
+                        || !preferences.enablesWindowHoverPreview
+                )
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var windowSwitcherEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { preferences.enablesWindowSwitcher },
+            set: { preferences.setWindowSwitcherEnabled($0) }
+        )
     }
 
     private func actionKeyRow(

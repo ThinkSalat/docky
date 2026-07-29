@@ -13,9 +13,45 @@ import Combine
 import Foundation
 import UniformTypeIdentifiers
 
+/// Monotonic identity for the current real macOS Space interaction epoch.
+///
+/// Profile activation and settled topology are intentionally asynchronous, so
+/// neither profile ID nor profile revision can prove that a drag still belongs
+/// to the Desktop where it began. This observer runs directly from the
+/// workspace lifecycle notification; every drag credential captures its
+/// generation and fails closed as soon as macOS announces a Space change.
+@MainActor
+final class DockSpaceInteractionEpoch: ObservableObject {
+    static let shared = DockSpaceInteractionEpoch()
+
+    @Published private(set) var generation: UInt64 = 0
+
+    private var activeSpaceObserver: NSObjectProtocol?
+
+    private init() {
+        let center = NSWorkspace.shared.notificationCenter
+        activeSpaceObserver = center.addObserver(
+            forName:
+                NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.generation &+= 1
+            }
+        }
+    }
+}
+
 @MainActor
 final class DockDragService: ObservableObject {
     static let shared = DockDragService()
+
+    struct InteractionCredentials: Equatable {
+        let profileID: String
+        let revision: UInt64
+        let spaceGeneration: UInt64
+    }
 
     enum Kind: Equatable {
         case app(URL, AppTile)
@@ -27,7 +63,7 @@ final class DockDragService: ObservableObject {
         case pinned, trailing
     }
 
-    @Published var kind: Kind?
+    @Published private(set) var kind: Kind?
     @Published var cursorLocation: CGPoint?
     @Published var destinationIndex: Int?
     @Published var destinationSection: Section?
@@ -42,6 +78,11 @@ final class DockDragService: ObservableObject {
     /// onto the dock relocates it instead of duplicating it.
     @Published var sourceFolderTileID: String?
     @Published var sourceFolderBundleIdentifier: String?
+    private(set) var interactionCredentials:
+        InteractionCredentials?
+    private var interactionBeganAtDockySource = false
+    private var interactionInvalidated = false
+    private var draggingSequenceNumber: Int?
 
     private var springLoadCandidateTileID: String?
     private var springLoadWorkItem: DispatchWorkItem?
@@ -50,9 +91,77 @@ final class DockDragService: ObservableObject {
 
     private init() {}
 
-    func begin(kind: Kind, at location: CGPoint) {
+    /// Starts a drag at its Docky-owned source. The destination-side
+    /// `begin(kind:at:)` call preserves these credentials when the cursor
+    /// subsequently enters or re-enters the dock window.
+    func beginSource() {
+        clear()
+        interactionCredentials =
+            currentInteractionCredentials()
+        interactionBeganAtDockySource = true
+    }
+
+    func beginSource(kind: Kind) {
+        beginSource()
+        self.kind = kind
+    }
+
+    func begin(
+        kind: Kind,
+        at location: CGPoint,
+        sequenceNumber: Int
+    ) -> Bool {
+        if interactionInvalidated {
+            if interactionBeganAtDockySource
+                && draggingSequenceNumber == nil {
+                // The source profile changed before this Docky-owned drag
+                // reached the destination. Bind its AppKit sequence only so
+                // every re-entry of that same interaction remains rejected.
+                draggingSequenceNumber = sequenceNumber
+                interactionBeganAtDockySource = false
+                return false
+            }
+            guard draggingSequenceNumber
+                    != sequenceNumber else {
+                return false
+            }
+
+            // A different AppKit sequence is a genuinely new external drag,
+            // so the previous session tombstone no longer applies.
+            clear()
+        }
+
+        if draggingSequenceNumber != sequenceNumber {
+            let isUnboundDockySourceSession =
+                interactionBeganAtDockySource
+                && draggingSequenceNumber == nil
+                && interactionCredentials != nil
+            if !isUnboundDockySourceSession {
+                interactionCredentials =
+                    currentInteractionCredentials()
+                sourceFolderTileID = nil
+                sourceFolderBundleIdentifier = nil
+            }
+            draggingSequenceNumber = sequenceNumber
+            // Once AppKit has bound the source interaction to a concrete
+            // sequence, any later sequence is a new external drag and must
+            // capture fresh credentials rather than inheriting this source.
+            interactionBeganAtDockySource = false
+        } else if interactionCredentials == nil {
+            interactionCredentials =
+                currentInteractionCredentials()
+        }
         self.kind = kind
         self.cursorLocation = location
+        guard hasCurrentInteractionCredentials(
+            sequenceNumber: sequenceNumber
+        ) else {
+            invalidateCurrentInteraction(
+                sequenceNumber: sequenceNumber
+            )
+            return false
+        }
+        return true
     }
 
     func updateCursor(_ location: CGPoint) {
@@ -61,6 +170,10 @@ final class DockDragService: ObservableObject {
 
     func clear() {
         self.kind = nil
+        interactionCredentials = nil
+        interactionBeganAtDockySource = false
+        interactionInvalidated = false
+        draggingSequenceNumber = nil
         self.cursorLocation = nil
         self.destinationIndex = nil
         self.destinationSection = nil
@@ -69,6 +182,56 @@ final class DockDragService: ObservableObject {
         self.sourceFolderBundleIdentifier = nil
         clearSpringLoad()
         cancelMouseReleasePoll()
+    }
+
+    func hasCurrentInteractionCredentials(
+        sequenceNumber: Int
+    ) -> Bool {
+        guard !interactionInvalidated,
+              draggingSequenceNumber == sequenceNumber,
+              let interactionCredentials else {
+            return false
+        }
+        let profileService = ProfileService.shared
+        return interactionCredentials.profileID
+                == profileService.activeProfileID
+            && interactionCredentials.revision
+                == profileService.stateRevision
+            && interactionCredentials.spaceGeneration
+                == DockSpaceInteractionEpoch.shared.generation
+    }
+
+    /// Permanently rejects the current AppKit drag without forgetting its
+    /// sequence. Keeping this tombstone prevents the same still-live drag from
+    /// being admitted as a fresh interaction after a profile switch.
+    func invalidateCurrentInteraction(
+        sequenceNumber: Int? = nil
+    ) {
+        if draggingSequenceNumber == nil,
+           let sequenceNumber {
+            draggingSequenceNumber = sequenceNumber
+        }
+        interactionInvalidated = true
+        interactionCredentials = nil
+        kind = nil
+        cursorLocation = nil
+        destinationIndex = nil
+        destinationSection = nil
+        documentTargetTileID = nil
+        sourceFolderTileID = nil
+        sourceFolderBundleIdentifier = nil
+        clearSpringLoad()
+    }
+
+    private func currentInteractionCredentials()
+        -> InteractionCredentials {
+        let profileService = ProfileService.shared
+        return InteractionCredentials(
+            profileID: profileService.activeProfileID,
+            revision: profileService.stateRevision,
+            spaceGeneration:
+                DockSpaceInteractionEpoch.shared.generation
+        )
     }
 
     /// Polls the global mouse-button state and clears drag state when the
@@ -80,7 +243,8 @@ final class DockDragService: ObservableObject {
     func armMouseReleaseCleanup() {
         cancelMouseReleasePoll()
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        var sawPressed = false
+        var sawPressed =
+            (NSEvent.pressedMouseButtons & 1) != 0
         timer.schedule(deadline: .now() + 0.1, repeating: 0.1)
         timer.setEventHandler { [weak self] in
             let pressed = (NSEvent.pressedMouseButtons & 1) != 0

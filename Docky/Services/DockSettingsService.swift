@@ -2,7 +2,8 @@
 //  DockSettingsService.swift
 //  Docky
 //
-//  Reads system Dock preferences (com.apple.dock) and republishes them.
+//  Owns Docky's imported Dock settings and a separate, read-only snapshot of
+//  the current system Dock preferences.
 //
 //  Reads from `CFPreferences` on `com.apple.dock`.
 //
@@ -15,14 +16,11 @@ import Observation
 final class DockSettingsService {
     static let shared = DockSettingsService()
 
-    enum Orientation: String {
-        case bottom, left, right
-    }
+    typealias Orientation = SystemDockSettingsSnapshot.Orientation
+    typealias MinimizeEffect = SystemDockSettingsSnapshot.MinimizeEffect
 
-    enum MinimizeEffect: String {
-        case genie, scale, suck
-    }
-
+    /// Docky's persisted values. These change only through Docky controls or
+    /// an explicitly requested import, never through snapshot refreshes.
     private(set) var orientation: Orientation = .bottom
     private(set) var tileSize: CGFloat = 48
     private(set) var largeSize: CGFloat = 64
@@ -35,33 +33,123 @@ final class DockSettingsService {
     private(set) var showRecents: Bool = true
     private(set) var showProcessIndicators: Bool = true
 
-    /// Effective tile size used by every dock-rendering surface. Falls
-    /// through to the active theme's `behavior.tileSize` when the user
-    /// hasn't moved the size slider in this build; otherwise returns
-    /// the user's value. Override marking happens in `setTileSize`.
-    var displayTileSize: CGFloat {
-        if !DockyPreferences.shared.isAppearanceOverridden(Keys.tileSize),
-           let themed = ThemeManager.shared.activeManifest?.behavior?.tileSize,
-           themed > 0 {
-            return themed
-        }
-        return tileSize
+    /// Latest read-only view of com.apple.dock. Kept separate from Docky's
+    /// persisted values so diagnostics and refresh actions cannot reset user
+    /// choices.
+    private(set) var systemSnapshot: SystemDockSettingsSnapshot?
+
+    /// Runtime tile size. Theme behavior is used until a Docky control or
+    /// explicit system-Dock import establishes a user override.
+    var effectiveTileSize: CGFloat {
+        DockSettingsThemeResolutionPolicy.tileSize(
+            stored: tileSize,
+            themed:
+                ThemeManager.shared.activeManifest?.behavior?.tileSize,
+            isOverridden:
+                DockyPreferences.shared
+                    .isAppearanceOverridden(Keys.tileSize)
+        )
+    }
+
+    /// Runtime magnified size, always large enough for the effective resting
+    /// tile size even when a theme contains an inconsistent pair.
+    var effectiveLargeSize: CGFloat {
+        DockSettingsThemeResolutionPolicy.largeSize(
+            stored: largeSize,
+            themed:
+                ThemeManager.shared.activeManifest?.behavior?.largeSize,
+            isOverridden:
+                DockyPreferences.shared
+                    .isAppearanceOverridden(Keys.largeSize),
+            effectiveTileSize: effectiveTileSize
+        )
+    }
+
+    /// Runtime magnification switch. A raw Docky value still backs the
+    /// Settings control; the active theme supplies the value until the user
+    /// explicitly overrides it.
+    var effectiveMagnification: Bool {
+        DockSettingsThemeResolutionPolicy.magnification(
+            stored: magnification,
+            themed:
+                ThemeManager.shared.activeManifest?.behavior?.magnification,
+            isOverridden:
+                DockyPreferences.shared
+                    .isAppearanceOverridden(Keys.magnification)
+        )
     }
 
     @ObservationIgnored private let defaults = UserDefaults.standard
 
     private init() {
-        if defaults.bool(forKey: Keys.hasImportedSystemDockSettings) {
+        let hasImportMarker = defaults.bool(
+            forKey: Keys.hasImportedSystemDockSettings
+        )
+        let hasPersistedDockyValues = Keys.persistedValueKeys.contains {
+            defaults.object(forKey: $0) != nil
+        }
+
+        switch SystemDockSettingsStartupPolicy.action(
+            hasImportMarker: hasImportMarker,
+            hasPersistedDockyValues: hasPersistedDockyValues
+        ) {
+        case .loadPersistedValues(let repairImportMarker):
             loadPersistedValues()
-        } else {
-            refresh()
+            if repairImportMarker {
+                defaults.set(
+                    true,
+                    forKey: Keys.hasImportedSystemDockSettings
+                )
+            }
+            refreshSystemDockSnapshot()
+        case .bootstrapFromSystemDock:
+            importCurrentSystemDockSettings(
+                marksAppearanceOverrides: false
+            )
         }
     }
 
-    func refresh() {
-        guard let values = DockPlistReader.read() else { return }
-        applyValues(values)
+    /// Refreshes only the diagnostic snapshot. This is deliberately
+    /// side-effect-free with respect to Docky's persisted settings.
+    @discardableResult
+    func refreshSystemDockSnapshot() -> Bool {
+        guard let snapshot = Self.readSystemDockSnapshot() else {
+            systemSnapshot = nil
+            return false
+        }
+        systemSnapshot = snapshot
+        return true
+    }
+
+    /// Explicitly copies the current system Dock values into Docky.
+    ///
+    /// The user-facing import marks theme-aware values as overrides because
+    /// choosing Import is user intent. The automatic first-run bootstrap uses
+    /// the private overload below and leaves those override flags clear.
+    @discardableResult
+    func importCurrentSystemDockSettings() -> Bool {
+        importCurrentSystemDockSettings(
+            marksAppearanceOverrides: true
+        )
+    }
+
+    @discardableResult
+    private func importCurrentSystemDockSettings(
+        marksAppearanceOverrides: Bool
+    ) -> Bool {
+        guard let snapshot = Self.readSystemDockSnapshot() else {
+            systemSnapshot = nil
+            return false
+        }
+
+        systemSnapshot = snapshot
+        applyImportedValues(snapshot)
         persistValues(hasImportedSystemDockSettings: true)
+
+        if marksAppearanceOverrides {
+            markAppearanceOverrides(for: snapshot)
+        }
+        return true
     }
 
     func setTileSize(_ size: CGFloat) {
@@ -123,42 +211,68 @@ final class DockSettingsService {
         clampLargeSize()
     }
 
-    private func applyValues(_ values: [String: Any]) {
-        if let raw = values["orientation"] as? String, let value = Orientation(rawValue: raw) {
+    private static func readSystemDockSnapshot()
+        -> SystemDockSettingsSnapshot? {
+        guard let values = DockPlistReader.read() else {
+            return nil
+        }
+        let snapshot = SystemDockSettingsSnapshot(values: values)
+        return snapshot.isEmpty ? nil : snapshot
+    }
+
+    private func applyImportedValues(
+        _ snapshot: SystemDockSettingsSnapshot
+    ) {
+        if let value = snapshot.orientation {
             orientation = value
         }
-        if let value = (values["tilesize"] as? NSNumber)?.doubleValue {
+        if let value = snapshot.tileSize {
             tileSize = CGFloat(value)
         }
-        if let value = (values["largesize"] as? NSNumber)?.doubleValue {
+        if let value = snapshot.largeSize {
             largeSize = CGFloat(value)
         }
-        if let value = (values["magnification"] as? NSNumber)?.boolValue {
+        if let value = snapshot.magnification {
             magnification = value
         }
-        if let value = (values["autohide"] as? NSNumber)?.boolValue {
+        if let value = snapshot.autohide {
             autohide = value
         }
-        if let value = (values["autohide-delay"] as? NSNumber)?.doubleValue {
+        if let value = snapshot.autohideDelay {
             autohideDelay = value
         }
-        if let value = (values["autohide-time-modifier"] as? NSNumber)?.doubleValue {
+        if let value = snapshot.autohideTimeModifier {
             autohideTimeModifier = value
         }
-        if let raw = values["mineffect"] as? String, let value = MinimizeEffect(rawValue: raw) {
+        if let value = snapshot.minimizeEffect {
             minimizeEffect = value
         }
-        if let value = (values["minimize-to-application"] as? NSNumber)?.boolValue {
+        if let value = snapshot.minimizeToApplication {
             minimizeToApplication = value
         }
-        if let value = (values["show-recents"] as? NSNumber)?.boolValue {
+        if let value = snapshot.showRecents {
             showRecents = value
         }
-        if let value = (values["show-process-indicators"] as? NSNumber)?.boolValue {
+        if let value = snapshot.showProcessIndicators {
             showProcessIndicators = value
         }
-
         clampLargeSize()
+    }
+
+    private func markAppearanceOverrides(
+        for snapshot: SystemDockSettingsSnapshot
+    ) {
+        let preferences = DockyPreferences.shared
+        for value in snapshot.importedAppearanceValues {
+            switch value {
+            case .tileSize:
+                preferences.markAppearanceOverride(Keys.tileSize)
+            case .largeSize:
+                preferences.markAppearanceOverride(Keys.largeSize)
+            case .magnification:
+                preferences.markAppearanceOverride(Keys.magnification)
+            }
+        }
     }
 
     private func clampLargeSize() {
@@ -198,6 +312,20 @@ final class DockSettingsService {
         static let minimizeToApplication = "docky.dockSettings.minimizeToApplication"
         static let showRecents = "docky.dockSettings.showRecents"
         static let showProcessIndicators = "docky.dockSettings.showProcessIndicators"
+
+        static let persistedValueKeys = [
+            orientation,
+            tileSize,
+            largeSize,
+            magnification,
+            autohide,
+            autohideDelay,
+            autohideTimeModifier,
+            minimizeEffect,
+            minimizeToApplication,
+            showRecents,
+            showProcessIndicators,
+        ]
     }
 
 }

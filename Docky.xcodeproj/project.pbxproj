@@ -57,6 +57,19 @@
 		D0C2A1402FB0000000000140 /* PresentedTileSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1422FB0000000000142 /* PresentedTileSnapshotTests.swift */; };
 		D0C2A1412FB0000000000141 /* PresentedTileSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1432FB0000000000143 /* PresentedTileSnapshot.swift */; };
 		D0C2A1512FB0000000000151 /* DockWindowTintLayerPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1532FB0000000000153 /* DockWindowTintLayerPolicy.swift */; };
+		D0C2A1602FB0000000000160 /* DockDropMutationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1622FB0000000000162 /* DockDropMutationPolicyTests.swift */; };
+		D0C2A1612FB0000000000161 /* DockDropMutationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1632FB0000000000163 /* DockDropMutationPolicy.swift */; };
+		D0C2A1702FB0000000000170 /* SystemDockSettingsSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1722FB0000000000172 /* SystemDockSettingsSnapshotTests.swift */; };
+		D0C2A1712FB0000000000171 /* SystemDockSettingsSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1732FB0000000000173 /* SystemDockSettingsSnapshot.swift */; };
+		D0C2A1802FB0000000000180 /* DockDragProfileIntegritySourceContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2A1822FB0000000000182 /* DockDragProfileIntegritySourceContractTests.swift */; };
+		D0C2B0002FB0000000000010 /* NormalizedPreferenceMutationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2B0002FB0000000000012 /* NormalizedPreferenceMutationTests.swift */; };
+		D0C2B0002FB0000000000011 /* NormalizedPreferenceMutation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2B0002FB0000000000013 /* NormalizedPreferenceMutation.swift */; };
+		D0C2C0002FB0000000000010 /* StartMenuEnablementPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2C0002FB0000000000012 /* StartMenuEnablementPolicyTests.swift */; };
+		D0C2C0002FB0000000000011 /* StartMenuEnablementPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2C0002FB0000000000013 /* StartMenuEnablementPolicy.swift */; };
+		D0C2D0002FB0000000000010 /* SystemDockRecoveryCoordination.swift in Watchdog Sources */ = {isa = PBXBuildFile; fileRef = D0C2D0002FB0000000000012 /* SystemDockRecoveryCoordination.swift */; };
+		D0C2D0002FB0000000000011 /* SystemDockRecoveryCoordination.swift in Test Sources */ = {isa = PBXBuildFile; fileRef = D0C2D0002FB0000000000012 /* SystemDockRecoveryCoordination.swift */; };
+		D0C2E0002FB0000000000010 /* MediaRemoteProcessLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2E0002FB0000000000012 /* MediaRemoteProcessLifecycleTests.swift */; };
+		D0C2E0002FB0000000000011 /* MediaRemoteProcessLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C2E0002FB0000000000013 /* MediaRemoteProcessLifecycle.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -146,6 +159,18 @@
 		D0C2A1422FB0000000000142 /* PresentedTileSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresentedTileSnapshotTests.swift; sourceTree = "<group>"; };
 		D0C2A1432FB0000000000143 /* PresentedTileSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PresentedTileSnapshot.swift; path = Docky/Models/PresentedTileSnapshot.swift; sourceTree = SOURCE_ROOT; };
 		D0C2A1532FB0000000000153 /* DockWindowTintLayerPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DockWindowTintLayerPolicy.swift; path = Docky/Models/DockWindowTintLayerPolicy.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1622FB0000000000162 /* DockDropMutationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DockDropMutationPolicyTests.swift; sourceTree = "<group>"; };
+		D0C2A1632FB0000000000163 /* DockDropMutationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DockDropMutationPolicy.swift; path = Docky/Models/DockDropMutationPolicy.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1722FB0000000000172 /* SystemDockSettingsSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemDockSettingsSnapshotTests.swift; sourceTree = "<group>"; };
+		D0C2A1732FB0000000000173 /* SystemDockSettingsSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SystemDockSettingsSnapshot.swift; path = Docky/Models/SystemDockSettingsSnapshot.swift; sourceTree = SOURCE_ROOT; };
+		D0C2A1822FB0000000000182 /* DockDragProfileIntegritySourceContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DockDragProfileIntegritySourceContractTests.swift; sourceTree = "<group>"; };
+		D0C2B0002FB0000000000012 /* NormalizedPreferenceMutationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NormalizedPreferenceMutationTests.swift; sourceTree = "<group>"; };
+		D0C2B0002FB0000000000013 /* NormalizedPreferenceMutation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NormalizedPreferenceMutation.swift; path = Docky/Models/NormalizedPreferenceMutation.swift; sourceTree = SOURCE_ROOT; };
+		D0C2C0002FB0000000000012 /* StartMenuEnablementPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartMenuEnablementPolicyTests.swift; sourceTree = "<group>"; };
+		D0C2C0002FB0000000000013 /* StartMenuEnablementPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = StartMenuEnablementPolicy.swift; path = Docky/Models/StartMenuEnablementPolicy.swift; sourceTree = SOURCE_ROOT; };
+		D0C2D0002FB0000000000012 /* SystemDockRecoveryCoordination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SystemDockRecoveryCoordination.swift; path = Docky/Models/SystemDockRecoveryCoordination.swift; sourceTree = SOURCE_ROOT; };
+		D0C2E0002FB0000000000012 /* MediaRemoteProcessLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaRemoteProcessLifecycleTests.swift; sourceTree = "<group>"; };
+		D0C2E0002FB0000000000013 /* MediaRemoteProcessLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MediaRemoteProcessLifecycle.swift; path = Docky/Models/MediaRemoteProcessLifecycle.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -267,6 +292,18 @@
 				D0C2A1422FB0000000000142 /* PresentedTileSnapshotTests.swift */,
 				D0C2A1432FB0000000000143 /* PresentedTileSnapshot.swift */,
 				D0C2A1532FB0000000000153 /* DockWindowTintLayerPolicy.swift */,
+				D0C2A1622FB0000000000162 /* DockDropMutationPolicyTests.swift */,
+				D0C2A1632FB0000000000163 /* DockDropMutationPolicy.swift */,
+				D0C2A1722FB0000000000172 /* SystemDockSettingsSnapshotTests.swift */,
+				D0C2A1732FB0000000000173 /* SystemDockSettingsSnapshot.swift */,
+				D0C2A1822FB0000000000182 /* DockDragProfileIntegritySourceContractTests.swift */,
+				D0C2B0002FB0000000000012 /* NormalizedPreferenceMutationTests.swift */,
+				D0C2B0002FB0000000000013 /* NormalizedPreferenceMutation.swift */,
+				D0C2C0002FB0000000000012 /* StartMenuEnablementPolicyTests.swift */,
+				D0C2C0002FB0000000000013 /* StartMenuEnablementPolicy.swift */,
+				D0C2D0002FB0000000000012 /* SystemDockRecoveryCoordination.swift */,
+				D0C2E0002FB0000000000012 /* MediaRemoteProcessLifecycleTests.swift */,
+				D0C2E0002FB0000000000013 /* MediaRemoteProcessLifecycle.swift */,
 			);
 			path = DockyTests;
 			sourceTree = "<group>";
@@ -442,6 +479,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D0C2D0002FB0000000000010 /* SystemDockRecoveryCoordination.swift in Watchdog Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -465,6 +503,7 @@
 				D0C2A0612FB0000000000061 /* PresentationGeneration.swift in Sources */,
 				D0C2A0602FB0000000000060 /* PresentationGenerationTests.swift in Sources */,
 				D0C2A0712FB0000000000071 /* PreferenceResetScope.swift in Sources */,
+				D0C2D0002FB0000000000011 /* SystemDockRecoveryCoordination.swift in Test Sources */,
 				D0C2A0702FB0000000000070 /* PreferenceResetScopeTests.swift in Sources */,
 				D0C2A0802FB0000000000080 /* FolderRenderAccessSourceContractTests.swift in Sources */,
 				D0C2A0912FB0000000000091 /* ProfileStoreEnvelope.swift in Sources */,
@@ -495,6 +534,17 @@
 				D0C2A1402FB0000000000140 /* PresentedTileSnapshotTests.swift in Sources */,
 				D0C2A1412FB0000000000141 /* PresentedTileSnapshot.swift in Sources */,
 				D0C2A1512FB0000000000151 /* DockWindowTintLayerPolicy.swift in Sources */,
+				D0C2A1602FB0000000000160 /* DockDropMutationPolicyTests.swift in Sources */,
+				D0C2A1612FB0000000000161 /* DockDropMutationPolicy.swift in Sources */,
+				D0C2A1702FB0000000000170 /* SystemDockSettingsSnapshotTests.swift in Sources */,
+				D0C2A1712FB0000000000171 /* SystemDockSettingsSnapshot.swift in Sources */,
+				D0C2A1802FB0000000000180 /* DockDragProfileIntegritySourceContractTests.swift in Sources */,
+				D0C2B0002FB0000000000010 /* NormalizedPreferenceMutationTests.swift in Sources */,
+				D0C2B0002FB0000000000011 /* NormalizedPreferenceMutation.swift in Sources */,
+				D0C2C0002FB0000000000010 /* StartMenuEnablementPolicyTests.swift in Sources */,
+				D0C2C0002FB0000000000011 /* StartMenuEnablementPolicy.swift in Sources */,
+				D0C2E0002FB0000000000010 /* MediaRemoteProcessLifecycleTests.swift in Sources */,
+				D0C2E0002FB0000000000011 /* MediaRemoteProcessLifecycle.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

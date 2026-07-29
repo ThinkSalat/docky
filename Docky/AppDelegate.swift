@@ -43,6 +43,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         Task { @MainActor in
             do {
                 try await ThemeManager.shared.bootstrap()
+                guard ThemeManager.shared.hasLoadedCatalog else {
+                    DiagnosticsTrace.shared.record(
+                        .preferences,
+                        "tileHoverMasterMigrationDeferred",
+                        fields: [
+                            "reason": "themeCatalogUnavailable",
+                        ]
+                    )
+                    return
+                }
+                DockyPreferences.shared
+                    .resolveTileHoverEffectsMigrationAfterThemeBootstrap()
             } catch {
                 DiagnosticsTrace.shared.record(
                     .lifecycle,
@@ -59,7 +71,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DockBadgeService.shared.start()
 
         DockyPreferences.shared.applySystemDockVisibilityPreference()
-        DockyPreferences.shared.applyOpenAtLoginPreference()
+        DockyPreferences.shared.refreshOpenAtLoginStatus()
 
         // Profiles are authoritative for their tile-store fields. Reapply
         // the persisted active profile before any import can mirror a stale
@@ -142,6 +154,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 toggle: { LaunchpadOverlayService.shared.toggle() }
             )
         case "start-menu":
+            guard DockyPreferences.shared.enablesStartMenuOverlay else {
+                return
+            }
             applyOverlayAction(
                 path: path,
                 show: { StartMenuService.shared.present() },
@@ -227,9 +242,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DiagnosticsTrace.shared.record(.lifecycle, "willTerminate")
         ProfileService.shared.flushPersistence()
         if SystemDockVisibilityService.shared.hasSnapshot {
-            SystemDockVisibilityService.shared.restore()
+            _ = SystemDockVisibilityService.shared.restore()
         }
         DiagnosticsTrace.shared.flush()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // System Settings can approve, disable, or remove a login item while
+        // Docky is running. Refresh the observed status only; never replay the
+        // persisted intent merely because the app became active.
+        DockyPreferences.shared.refreshOpenAtLoginStatus()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
@@ -282,7 +304,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func showMainWindow() {
         mainWindowController = makeMainWindowController()
         mainWindowController?.showWindow(self)
-        DockyPreferences.shared.enableOpenAtLoginOnFirstLaunchIfNeeded()
     }
 
     private func makeMainWindowController() -> MainWindowController? {
@@ -329,7 +350,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     #if DEBUG
     @objc private func showDebugSnapshot(_ sender: Any?) {
-        DockSettingsService.shared.refresh()
+        DockSettingsService.shared.refreshSystemDockSnapshot()
 
         if debugSnapshotWindowController == nil {
             let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 560, height: 360))
@@ -691,6 +712,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func debugSnapshotText() -> String {
         let preferences = DockyPreferences.shared
         let dockSettings = DockSettingsService.shared
+        let systemSnapshot = dockSettings.systemSnapshot
+
+        func snapshotValue<T>(_ value: T?) -> String {
+            value.map { String(describing: $0) } ?? "unavailable"
+        }
 
         return [
             "Docky Preferences",
@@ -712,19 +738,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             "pinnedItems: \(formattedJSON(preferences.pinnedItems))",
             "widgetPlacements: \(formattedJSON(preferences.widgetPlacements))",
             "",
-            "Dock Settings",
-            "-------------",
+            "Docky Imported Dock Settings",
+            "----------------------------",
             "orientation: \(dockSettings.orientation.rawValue)",
             "tileSize: \(dockSettings.tileSize)",
             "largeSize: \(dockSettings.largeSize)",
             "magnification: \(dockSettings.magnification)",
+            "effectiveTileSize: \(dockSettings.effectiveTileSize)",
+            "effectiveLargeSize: \(dockSettings.effectiveLargeSize)",
+            "effectiveMagnification: \(dockSettings.effectiveMagnification)",
             "autohide: \(dockSettings.autohide)",
             "autohideDelay: \(dockSettings.autohideDelay)",
             "autohideTimeModifier: \(dockSettings.autohideTimeModifier)",
             "minimizeEffect: \(dockSettings.minimizeEffect.rawValue)",
             "minimizeToApplication: \(dockSettings.minimizeToApplication)",
             "showRecents: \(dockSettings.showRecents)",
-            "showProcessIndicators: \(dockSettings.showProcessIndicators)"
+            "showProcessIndicators: \(dockSettings.showProcessIndicators)",
+            "",
+            "Current macOS Dock Snapshot (Read-Only)",
+            "---------------------------------------",
+            "orientation: \(snapshotValue(systemSnapshot?.orientation?.rawValue))",
+            "tileSize: \(snapshotValue(systemSnapshot?.tileSize))",
+            "largeSize: \(snapshotValue(systemSnapshot?.largeSize))",
+            "magnification: \(snapshotValue(systemSnapshot?.magnification))",
+            "autohide: \(snapshotValue(systemSnapshot?.autohide))",
+            "autohideDelay: \(snapshotValue(systemSnapshot?.autohideDelay))",
+            "autohideTimeModifier: \(snapshotValue(systemSnapshot?.autohideTimeModifier))",
+            "minimizeEffect: \(snapshotValue(systemSnapshot?.minimizeEffect?.rawValue))",
+            "minimizeToApplication: \(snapshotValue(systemSnapshot?.minimizeToApplication))",
+            "showRecents: \(snapshotValue(systemSnapshot?.showRecents))",
+            "showProcessIndicators: \(snapshotValue(systemSnapshot?.showProcessIndicators))"
         ].joined(separator: "\n")
     }
 
@@ -763,6 +806,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             _ = settings.tileSize
             _ = settings.largeSize
             _ = settings.magnification
+            _ = settings.effectiveTileSize
+            _ = settings.effectiveLargeSize
+            _ = settings.effectiveMagnification
             _ = settings.autohide
             _ = settings.autohideDelay
             _ = settings.autohideTimeModifier
@@ -770,6 +816,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             _ = settings.minimizeToApplication
             _ = settings.showRecents
             _ = settings.showProcessIndicators
+            _ = settings.systemSnapshot
             self?.refreshDebugSnapshotText()
         }
         .store(in: &debugSnapshotCancellables)

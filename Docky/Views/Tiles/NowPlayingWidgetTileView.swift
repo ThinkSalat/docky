@@ -88,6 +88,7 @@ struct NowPlayingWidgetTileView: View {
     var isExpanded: Bool = false
     var isExpandedPreviewOpen: Bool = false
     @ObservedObject private var mediaPlayback = MediaPlaybackService.shared
+    @Bindable private var preferences = DockyPreferences.shared
     @State private var isHovering = false
     @State private var isLyricsOverlayPresented = false
     @State private var artworkPresentation:
@@ -157,7 +158,7 @@ struct NowPlayingWidgetTileView: View {
         artworkView(size: nil, artworkCornerRadius: layout.artworkCornerRadius)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay {
-                if isHovering {
+                if showsHoverTransportOverlay {
                     ZStack {
                         Color.black.opacity(0.18)
 
@@ -170,6 +171,17 @@ struct NowPlayingWidgetTileView: View {
                 }
             }
             .onHover { isHovering = $0 }
+            .animation(
+                .easeOut(duration: 0.12),
+                value: showsHoverTransportOverlay
+            )
+    }
+
+    private var showsHoverTransportOverlay: Bool {
+        TileHoverEffectsRuntimePolicy.allowsHoverPresentation(
+            isEnabled: preferences.tileHoverEffectsEnabled,
+            featureEnabled: isHovering
+        )
     }
 
     private func nowPlayingTwoUp(layout: LayoutMetrics) -> some View {

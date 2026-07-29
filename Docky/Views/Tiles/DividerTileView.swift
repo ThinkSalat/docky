@@ -43,8 +43,14 @@ struct DividerTileView: View {
             .action(preferences.autohidesWindow ? "Turn Hiding Off" : "Turn Hiding On") {
                 preferences.autohidesWindow.toggle()
             },
-            .action(dockSettings.magnification ? "Turn Magnification Off" : "Turn Magnification On") {
-                dockSettings.setMagnification(!dockSettings.magnification)
+            .action(
+                dockSettings.effectiveMagnification
+                    ? "Turn Magnification Off"
+                    : "Turn Magnification On"
+            ) {
+                dockSettings.setMagnification(
+                    !dockSettings.effectiveMagnification
+                )
             },
             .submenu(String(localized: "Position on Screen"), children: positionActions),
             .divider,
@@ -85,8 +91,9 @@ struct DividerTileView: View {
 
     private var troubleshootActions: [ContextAction] {
         [
-            .action(String(localized: "Sync Dock")) {
-                DockSettingsService.shared.refresh()
+            .action(String(localized: "Refresh System Dock Data")) {
+                DockSettingsService.shared
+                    .refreshSystemDockSnapshot()
                 TileStore.shared.refresh()
             }
         ]
@@ -185,7 +192,7 @@ struct DividerTileView: View {
 
     private var lineInset: CGFloat {
         let fraction = min(max(preferences.effectiveDividerPaddingFraction, 0), 0.5)
-        return layout.scaled(dockSettings.displayTileSize) * fraction
+        return layout.scaled(dockSettings.effectiveTileSize) * fraction
     }
 
     private var position: ResolvedDockWindowPosition {

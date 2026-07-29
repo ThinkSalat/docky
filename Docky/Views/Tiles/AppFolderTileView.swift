@@ -57,7 +57,7 @@ struct AppFolderTileView: View {
     }
 
     private var tileSize: CGFloat {
-        layout.scaled(dockSettings.displayTileSize)
+        layout.scaled(dockSettings.effectiveTileSize)
     }
 
     private var position: ResolvedDockWindowPosition {
@@ -114,7 +114,9 @@ struct AppFolderTileView: View {
         // Magnification reshapes the tile group every frame; the backdrop
         // sized against rest geometry would visibly lag behind, so hide
         // it when the user has magnification turned on.
-        guard !dockSettings.magnification else { return false }
+        guard !dockSettings.effectiveMagnification else {
+            return false
+        }
         return openedAppCount > 0 && preferences.showsGroupedOpenedAppsBackdrop
     }
 
@@ -835,15 +837,23 @@ struct AppFolderPopoverView: View {
             ?? workspace.runningApps.first {
                 $0.bundleIdentifier == app.bundleIdentifier
             }?.bundleURL
-        DockDragService.shared.sourceFolderTileID = tileID
-        DockDragService.shared.sourceFolderBundleIdentifier = app.bundleIdentifier
-        // Set kind synchronously so the dock's drag visibility hold engages
-        // before the popover would otherwise close. draggingEntered
-        // overwrites kind with the same value once the cursor reaches the
-        // dock window.
+        // Capture the source profile and revision before AppKit starts moving
+        // the payload. The destination may appear on another Space/profile;
+        // in that case the session must be rejected instead of relocating the
+        // folder member into whichever profile happens to be active at drop.
         if let url {
-            DockDragService.shared.kind = .app(url, app)
+            DockDragService.shared.beginSource(
+                kind: .app(url, app)
+            )
+        } else {
+            // Deferred URL resolution still belongs to the profile that owns
+            // this folder, even though the concrete drag kind is unavailable
+            // until AppKit asks the provider for its payload.
+            DockDragService.shared.beginSource()
         }
+        DockDragService.shared.sourceFolderTileID = tileID
+        DockDragService.shared.sourceFolderBundleIdentifier =
+            app.bundleIdentifier
         // Arm a polling cleanup. Drags that never cross the dock view (e.g.
         // user drops on Finder) won't trigger the dock's draggingEnded, so
         // this is what eventually clears the kind+source-folder state and

@@ -1030,6 +1030,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     private let appearanceOverrideStore =
         DockyThemeOverrideObservationStore()
 
+    /// Explicit source modes for nullable appearance values. The stored
+    /// custom value remains dormant when a source is disabled or inherited,
+    /// so changing modes never destroys the user's color, image, or numeric
+    /// choice.
+    private(set) var optionalAppearanceModes:
+        [String: ThemeOptionalAppearanceMode] = [:]
+
     /// Set of `Keys.*` strings the user has explicitly customized. Each
     /// theme-aware setter inserts its key; setters that clear a value
     /// (e.g. setting `windowTintColor` back to `nil`) remove it.
@@ -1069,23 +1076,112 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         persistUserOverriddenAppearanceKeys()
     }
 
+    /// Commits an explicit Settings choice for a theme-aware scalar.
+    ///
+    /// The raw stored value can already equal the user's selection while an
+    /// active theme supplies a different effective value. Assigning through
+    /// the property alone would then hit its equality guard and skip both the
+    /// defaults write and override marker. These user-intent setters always
+    /// perform all three operations so the choice takes effect immediately
+    /// and remains stable across relaunches and future default changes.
+    func commitUserAppearanceValue(
+        _ value: CGFloat,
+        for key: DockyThemeOverrideKey,
+        at keyPath: ReferenceWritableKeyPath<DockyPreferences, CGFloat>
+    ) {
+        self[keyPath: keyPath] = value
+        defaults.set(Double(value), forKey: key.rawValue)
+        markAppearanceOverride(key.rawValue)
+    }
+
+    func commitUserAppearanceValue(
+        _ value: Bool,
+        for key: DockyThemeOverrideKey,
+        at keyPath: ReferenceWritableKeyPath<DockyPreferences, Bool>
+    ) {
+        self[keyPath: keyPath] = value
+        defaults.set(value, forKey: key.rawValue)
+        markAppearanceOverride(key.rawValue)
+    }
+
+    func commitUserAppearanceValue<Value: RawRepresentable>(
+        _ value: Value,
+        for key: DockyThemeOverrideKey,
+        at keyPath: ReferenceWritableKeyPath<DockyPreferences, Value>
+    ) where Value.RawValue == String {
+        self[keyPath: keyPath] = value
+        defaults.set(value.rawValue, forKey: key.rawValue)
+        markAppearanceOverride(key.rawValue)
+    }
+
+    /// Commits a nullable numeric appearance choice without relying on its
+    /// property observer. A dormant raw value may already equal `value` after
+    /// "Clear Overrides"; in that case `didSet` does not run, but the user's
+    /// explicit selection must still restore `.custom` intent.
+    func commitUserOptionalAppearanceValue(
+        _ value: CGFloat,
+        for key: DockyThemeOverrideKey,
+        at keyPath:
+            ReferenceWritableKeyPath<DockyPreferences, CGFloat?>
+    ) {
+        self[keyPath: keyPath] = value
+        persistOptionalDouble(value, forKey: key.rawValue)
+        setOptionalAppearanceMode(.custom, for: key)
+    }
+
+    /// Changes only the source intent for a nullable numeric appearance
+    /// value. Inheriting preserves dormant custom storage. Re-enabling custom
+    /// uses that dormant value when available, otherwise seeds it from the
+    /// currently effective value.
+    func setUserOptionalAppearanceUsesCustom(
+        _ usesCustom: Bool,
+        for key: DockyThemeOverrideKey,
+        at keyPath:
+            ReferenceWritableKeyPath<DockyPreferences, CGFloat?>,
+        effectiveValue: @autoclosure () -> CGFloat
+    ) {
+        guard usesCustom else {
+            setOptionalAppearanceMode(.inherit, for: key)
+            return
+        }
+
+        commitUserOptionalAppearanceValue(
+            self[keyPath: keyPath] ?? effectiveValue(),
+            for: key,
+            at: keyPath
+        )
+    }
+
     /// Clears the override flag for a single theme-aware key. The
     /// stored value is left untouched, `effective<X>` simply starts
     /// preferring the theme value (or built-in default). Used by the
     /// Settings UI "revert to theme" affordance.
     func clearAppearanceOverride(_ key: String) {
-        guard appearanceOverrideStore.setOverridden(false, for: key) else {
-            return
+        var changed = appearanceOverrideStore.setOverridden(
+            false,
+            for: key
+        )
+        if optionalAppearanceModes.removeValue(forKey: key) != nil {
+            persistOptionalAppearanceModes()
+            changed = true
         }
-        persistUserOverriddenAppearanceKeys()
+        if changed {
+            persistUserOverriddenAppearanceKeys()
+        }
     }
 
     /// Clears every theme override. Used only by the explicit
     /// "use theme as-is" flow; partial resets use scoped clearing.
     func clearAllAppearanceOverrides() {
-        guard !userOverriddenAppearanceKeys.isEmpty else { return }
+        guard !userOverriddenAppearanceKeys.isEmpty
+                || !optionalAppearanceModes.isEmpty
+        else {
+            return
+        }
         appearanceOverrideStore.replaceAll(with: [])
+        optionalAppearanceModes = [:]
         persistUserOverriddenAppearanceKeys()
+        persistOptionalAppearanceModes()
     }
 
     /// Clears only the override flags owned by a partial reset. Unknown keys
@@ -1097,15 +1193,97 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
             userOverriddenAppearanceKeys,
             afterReset: scope
         )
-        guard retained != userOverriddenAppearanceKeys else { return }
-        appearanceOverrideStore.replaceAll(with: retained)
-        persistUserOverriddenAppearanceKeys()
+        if retained != userOverriddenAppearanceKeys {
+            appearanceOverrideStore.replaceAll(with: retained)
+            persistUserOverriddenAppearanceKeys()
+        }
+
+        let clearedKeys =
+            DockyPreferenceResetScopeModel.themeOverrideKeysCleared(by: scope)
+        let retainedModes = optionalAppearanceModes.filter {
+            !clearedKeys.contains($0.key)
+        }
+        if retainedModes != optionalAppearanceModes {
+            optionalAppearanceModes = retainedModes
+            persistOptionalAppearanceModes()
+        }
     }
 
     private func persistUserOverriddenAppearanceKeys() {
         defaults.set(
             Array(userOverriddenAppearanceKeys),
             forKey: Keys.userOverriddenAppearanceKeys
+        )
+    }
+
+    /// Returns the persisted three-state intent for a nullable appearance
+    /// source. Older preferences have no mode map, so their existing override
+    /// membership remains the migration source of truth.
+    func optionalAppearanceMode(
+        for key: DockyThemeOverrideKey
+    ) -> ThemeOptionalAppearanceMode {
+        optionalAppearanceMode(forRawKey: key.rawValue)
+    }
+
+    func setOptionalAppearanceMode(
+        _ mode: ThemeOptionalAppearanceMode,
+        for key: DockyThemeOverrideKey
+    ) {
+        let rawKey = key.rawValue
+        if optionalAppearanceModes[rawKey] != mode {
+            optionalAppearanceModes[rawKey] = mode
+            persistOptionalAppearanceModes()
+        }
+
+        switch mode {
+        case .inherit:
+            clearAppearanceOverride(rawKey)
+        case .disabled, .custom:
+            markAppearanceOverride(rawKey)
+        }
+    }
+
+    private func optionalAppearanceMode(
+        forRawKey key: String
+    ) -> ThemeOptionalAppearanceMode {
+        if let stored = optionalAppearanceModes[key] {
+            return stored
+        }
+        return isAppearanceOverridden(key) ? .custom : .inherit
+    }
+
+    private func resolveOptionalAppearance<Value>(
+        key: String,
+        custom: Value?,
+        themed: Value?
+    ) -> Value? {
+        ThemeOptionalAppearanceResolution.value(
+            mode: optionalAppearanceMode(forRawKey: key),
+            custom: custom,
+            themed: themed
+        )
+    }
+
+    private func updateOptionalAppearanceModeForStoredValue(
+        _ hasStoredValue: Bool,
+        key: String
+    ) {
+        guard let typedKey = DockyThemeOverrideKey(rawValue: key) else {
+            return
+        }
+        if hasStoredValue {
+            setOptionalAppearanceMode(.custom, for: typedKey)
+        } else if optionalAppearanceMode(forRawKey: key) != .disabled {
+            setOptionalAppearanceMode(.inherit, for: typedKey)
+        }
+    }
+
+    private func persistOptionalAppearanceModes() {
+        defaults.set(
+            ThemeOptionalAppearanceModeStorage.encode(
+                optionalAppearanceModes
+            ),
+            forKey: Keys.optionalAppearanceModes
         )
     }
 
@@ -1147,6 +1325,25 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+    /// Master switch for visual tile-hover effects. The individual values
+    /// below remain persisted while this is off so re-enabling restores the
+    /// user's exact color, image, scale, and opacity choices.
+    var tileHoverEffectsEnabled: Bool {
+        didSet {
+            guard !isApplyingTileHoverEffectsMigration else {
+                return
+            }
+            // Any mutation outside the migration transaction is explicit user
+            // intent (including Reset Appearance) and is authoritative even
+            // if asynchronous theme bootstrap has not completed.
+            tileHoverEffectsMigrationPending = false
+            persistTileHoverEffectsMaster(
+                tileHoverEffectsEnabled,
+                provenance: .user
+            )
+        }
+    }
+
     /// Optional tile-hover effects. Each property is nullable; if the
     /// user clears one (sets it back to its absent state) the override
     /// flag is cleared so the active theme can resume providing the
@@ -1155,11 +1352,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard tileHoverOpacity != oldValue else { return }
             persistOptionalDouble(tileHoverOpacity, forKey: Keys.tileHoverOpacity)
-            if tileHoverOpacity == nil {
-                clearAppearanceOverride(Keys.tileHoverOpacity)
-            } else {
-                markAppearanceOverride(Keys.tileHoverOpacity)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                tileHoverOpacity != nil,
+                key: Keys.tileHoverOpacity
+            )
         }
     }
 
@@ -1167,11 +1363,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard tileHoverScale != oldValue else { return }
             persistOptionalDouble(tileHoverScale, forKey: Keys.tileHoverScale)
-            if tileHoverScale == nil {
-                clearAppearanceOverride(Keys.tileHoverScale)
-            } else {
-                markAppearanceOverride(Keys.tileHoverScale)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                tileHoverScale != nil,
+                key: Keys.tileHoverScale
+            )
         }
     }
 
@@ -1179,11 +1374,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard tileHoverBackgroundColor != oldValue else { return }
             persistOptionalColor(tileHoverBackgroundColor, forKey: Keys.tileHoverBackgroundColor)
-            if tileHoverBackgroundColor == nil {
-                clearAppearanceOverride(Keys.tileHoverBackgroundColor)
-            } else {
-                markAppearanceOverride(Keys.tileHoverBackgroundColor)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                tileHoverBackgroundColor != nil,
+                key: Keys.tileHoverBackgroundColor
+            )
         }
     }
 
@@ -1192,11 +1386,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
             guard tileHoverBackgroundImagePath != oldValue else { return }
             if let path = tileHoverBackgroundImagePath, !path.isEmpty {
                 defaults.set(path, forKey: Keys.tileHoverBackgroundImagePath)
-                markAppearanceOverride(Keys.tileHoverBackgroundImagePath)
             } else {
                 defaults.removeObject(forKey: Keys.tileHoverBackgroundImagePath)
-                clearAppearanceOverride(Keys.tileHoverBackgroundImagePath)
             }
+            updateOptionalAppearanceModeForStoredValue(
+                tileHoverBackgroundImagePath?.isEmpty == false,
+                key: Keys.tileHoverBackgroundImagePath
+            )
         }
     }
 
@@ -1204,11 +1400,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard tileHoverBackgroundOpacity != oldValue else { return }
             persistOptionalDouble(tileHoverBackgroundOpacity, forKey: Keys.tileHoverBackgroundOpacity)
-            if tileHoverBackgroundOpacity == nil {
-                clearAppearanceOverride(Keys.tileHoverBackgroundOpacity)
-            } else {
-                markAppearanceOverride(Keys.tileHoverBackgroundOpacity)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                tileHoverBackgroundOpacity != nil,
+                key: Keys.tileHoverBackgroundOpacity
+            )
         }
     }
 
@@ -1216,11 +1411,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard tileHoverBackgroundCornerRadius != oldValue else { return }
             persistOptionalDouble(tileHoverBackgroundCornerRadius, forKey: Keys.tileHoverBackgroundCornerRadius)
-            if tileHoverBackgroundCornerRadius == nil {
-                clearAppearanceOverride(Keys.tileHoverBackgroundCornerRadius)
-            } else {
-                markAppearanceOverride(Keys.tileHoverBackgroundCornerRadius)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                tileHoverBackgroundCornerRadius != nil,
+                key: Keys.tileHoverBackgroundCornerRadius
+            )
         }
     }
 
@@ -1232,11 +1426,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard tileActiveBackgroundColor != oldValue else { return }
             persistOptionalColor(tileActiveBackgroundColor, forKey: Keys.tileActiveBackgroundColor)
-            if tileActiveBackgroundColor == nil {
-                clearAppearanceOverride(Keys.tileActiveBackgroundColor)
-            } else {
-                markAppearanceOverride(Keys.tileActiveBackgroundColor)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                tileActiveBackgroundColor != nil,
+                key: Keys.tileActiveBackgroundColor
+            )
         }
     }
 
@@ -1245,11 +1438,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
             guard tileActiveBackgroundImagePath != oldValue else { return }
             if let path = tileActiveBackgroundImagePath, !path.isEmpty {
                 defaults.set(path, forKey: Keys.tileActiveBackgroundImagePath)
-                markAppearanceOverride(Keys.tileActiveBackgroundImagePath)
             } else {
                 defaults.removeObject(forKey: Keys.tileActiveBackgroundImagePath)
-                clearAppearanceOverride(Keys.tileActiveBackgroundImagePath)
             }
+            updateOptionalAppearanceModeForStoredValue(
+                tileActiveBackgroundImagePath?.isEmpty == false,
+                key: Keys.tileActiveBackgroundImagePath
+            )
         }
     }
 
@@ -1257,11 +1452,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard tileActiveBackgroundOpacity != oldValue else { return }
             persistOptionalDouble(tileActiveBackgroundOpacity, forKey: Keys.tileActiveBackgroundOpacity)
-            if tileActiveBackgroundOpacity == nil {
-                clearAppearanceOverride(Keys.tileActiveBackgroundOpacity)
-            } else {
-                markAppearanceOverride(Keys.tileActiveBackgroundOpacity)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                tileActiveBackgroundOpacity != nil,
+                key: Keys.tileActiveBackgroundOpacity
+            )
         }
     }
 
@@ -1269,11 +1463,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard tileActiveBackgroundCornerRadius != oldValue else { return }
             persistOptionalDouble(tileActiveBackgroundCornerRadius, forKey: Keys.tileActiveBackgroundCornerRadius)
-            if tileActiveBackgroundCornerRadius == nil {
-                clearAppearanceOverride(Keys.tileActiveBackgroundCornerRadius)
-            } else {
-                markAppearanceOverride(Keys.tileActiveBackgroundCornerRadius)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                tileActiveBackgroundCornerRadius != nil,
+                key: Keys.tileActiveBackgroundCornerRadius
+            )
         }
     }
 
@@ -1288,11 +1481,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard widget1xContentPadding != oldValue else { return }
             persistOptionalDouble(widget1xContentPadding, forKey: Keys.widget1xContentPadding)
-            if widget1xContentPadding == nil {
-                clearAppearanceOverride(Keys.widget1xContentPadding)
-            } else {
-                markAppearanceOverride(Keys.widget1xContentPadding)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                widget1xContentPadding != nil,
+                key: Keys.widget1xContentPadding
+            )
         }
     }
 
@@ -1300,11 +1492,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard widget1xCornerRadius != oldValue else { return }
             persistOptionalDouble(widget1xCornerRadius, forKey: Keys.widget1xCornerRadius)
-            if widget1xCornerRadius == nil {
-                clearAppearanceOverride(Keys.widget1xCornerRadius)
-            } else {
-                markAppearanceOverride(Keys.widget1xCornerRadius)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                widget1xCornerRadius != nil,
+                key: Keys.widget1xCornerRadius
+            )
         }
     }
 
@@ -1312,11 +1503,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard widget2xContentPadding != oldValue else { return }
             persistOptionalDouble(widget2xContentPadding, forKey: Keys.widget2xContentPadding)
-            if widget2xContentPadding == nil {
-                clearAppearanceOverride(Keys.widget2xContentPadding)
-            } else {
-                markAppearanceOverride(Keys.widget2xContentPadding)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                widget2xContentPadding != nil,
+                key: Keys.widget2xContentPadding
+            )
         }
     }
 
@@ -1324,11 +1514,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard widget2xCornerRadius != oldValue else { return }
             persistOptionalDouble(widget2xCornerRadius, forKey: Keys.widget2xCornerRadius)
-            if widget2xCornerRadius == nil {
-                clearAppearanceOverride(Keys.widget2xCornerRadius)
-            } else {
-                markAppearanceOverride(Keys.widget2xCornerRadius)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                widget2xCornerRadius != nil,
+                key: Keys.widget2xCornerRadius
+            )
         }
     }
 
@@ -1336,11 +1525,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard widget3xContentPadding != oldValue else { return }
             persistOptionalDouble(widget3xContentPadding, forKey: Keys.widget3xContentPadding)
-            if widget3xContentPadding == nil {
-                clearAppearanceOverride(Keys.widget3xContentPadding)
-            } else {
-                markAppearanceOverride(Keys.widget3xContentPadding)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                widget3xContentPadding != nil,
+                key: Keys.widget3xContentPadding
+            )
         }
     }
 
@@ -1348,11 +1536,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard widget3xCornerRadius != oldValue else { return }
             persistOptionalDouble(widget3xCornerRadius, forKey: Keys.widget3xCornerRadius)
-            if widget3xCornerRadius == nil {
-                clearAppearanceOverride(Keys.widget3xCornerRadius)
-            } else {
-                markAppearanceOverride(Keys.widget3xCornerRadius)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                widget3xCornerRadius != nil,
+                key: Keys.widget3xCornerRadius
+            )
         }
     }
 
@@ -1360,11 +1547,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard widget4xContentPadding != oldValue else { return }
             persistOptionalDouble(widget4xContentPadding, forKey: Keys.widget4xContentPadding)
-            if widget4xContentPadding == nil {
-                clearAppearanceOverride(Keys.widget4xContentPadding)
-            } else {
-                markAppearanceOverride(Keys.widget4xContentPadding)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                widget4xContentPadding != nil,
+                key: Keys.widget4xContentPadding
+            )
         }
     }
 
@@ -1372,11 +1558,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard widget4xCornerRadius != oldValue else { return }
             persistOptionalDouble(widget4xCornerRadius, forKey: Keys.widget4xCornerRadius)
-            if widget4xCornerRadius == nil {
-                clearAppearanceOverride(Keys.widget4xCornerRadius)
-            } else {
-                markAppearanceOverride(Keys.widget4xCornerRadius)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                widget4xCornerRadius != nil,
+                key: Keys.widget4xCornerRadius
+            )
         }
     }
 
@@ -1387,25 +1572,21 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     func effectiveWidgetContentPadding(for span: TileSpan) -> CGFloat? {
         let (userKey, userValue) = widgetContentPaddingPair(for: span)
         let themed = themedWidgetSpan(for: span)?.contentPadding
-        if isAppearanceOverridden(userKey), let userValue {
-            return max(0, userValue)
-        }
-        if let themed {
-            return max(0, themed)
-        }
-        return nil
+        return resolveOptionalAppearance(
+            key: userKey,
+            custom: userValue,
+            themed: themed
+        ).map { max(0, $0) }
     }
 
     func effectiveWidgetCornerRadius(for span: TileSpan) -> CGFloat? {
         let (userKey, userValue) = widgetCornerRadiusPair(for: span)
         let themed = themedWidgetSpan(for: span)?.cornerRadius
-        if isAppearanceOverridden(userKey), let userValue {
-            return max(0, userValue)
-        }
-        if let themed {
-            return max(0, themed)
-        }
-        return nil
+        return resolveOptionalAppearance(
+            key: userKey,
+            custom: userValue,
+            themed: themed
+        ).map { max(0, $0) }
     }
 
     private func widgetContentPaddingPair(for span: TileSpan) -> (String, CGFloat?) {
@@ -1458,7 +1639,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard windowCornerRadiusTopLeading != oldValue else { return }
             persistOptionalDouble(windowCornerRadiusTopLeading, forKey: Keys.windowCornerRadiusTopLeading)
-            markAppearanceOverride(Keys.windowCornerRadiusTopLeading)
+            updateOptionalAppearanceModeForStoredValue(
+                windowCornerRadiusTopLeading != nil,
+                key: Keys.windowCornerRadiusTopLeading
+            )
         }
     }
 
@@ -1466,7 +1650,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard windowCornerRadiusTopTrailing != oldValue else { return }
             persistOptionalDouble(windowCornerRadiusTopTrailing, forKey: Keys.windowCornerRadiusTopTrailing)
-            markAppearanceOverride(Keys.windowCornerRadiusTopTrailing)
+            updateOptionalAppearanceModeForStoredValue(
+                windowCornerRadiusTopTrailing != nil,
+                key: Keys.windowCornerRadiusTopTrailing
+            )
         }
     }
 
@@ -1474,7 +1661,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard windowCornerRadiusBottomLeading != oldValue else { return }
             persistOptionalDouble(windowCornerRadiusBottomLeading, forKey: Keys.windowCornerRadiusBottomLeading)
-            markAppearanceOverride(Keys.windowCornerRadiusBottomLeading)
+            updateOptionalAppearanceModeForStoredValue(
+                windowCornerRadiusBottomLeading != nil,
+                key: Keys.windowCornerRadiusBottomLeading
+            )
         }
     }
 
@@ -1482,7 +1672,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard windowCornerRadiusBottomTrailing != oldValue else { return }
             persistOptionalDouble(windowCornerRadiusBottomTrailing, forKey: Keys.windowCornerRadiusBottomTrailing)
-            markAppearanceOverride(Keys.windowCornerRadiusBottomTrailing)
+            updateOptionalAppearanceModeForStoredValue(
+                windowCornerRadiusBottomTrailing != nil,
+                key: Keys.windowCornerRadiusBottomTrailing
+            )
         }
     }
 
@@ -1543,11 +1736,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard windowTintColor != oldValue else { return }
             persistWindowTintColor(windowTintColor)
-            if windowTintColor == nil {
-                clearAppearanceOverride(Keys.windowTintColor)
-            } else {
-                markAppearanceOverride(Keys.windowTintColor)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                windowTintColor != nil,
+                key: Keys.windowTintColor
+            )
         }
     }
 
@@ -1576,11 +1768,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard windowBorderColor != oldValue else { return }
             persistOptionalColor(windowBorderColor, forKey: Keys.windowBorderColor)
-            if windowBorderColor == nil {
-                clearAppearanceOverride(Keys.windowBorderColor)
-            } else {
-                markAppearanceOverride(Keys.windowBorderColor)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                windowBorderColor != nil,
+                key: Keys.windowBorderColor
+            )
         }
     }
 
@@ -1603,11 +1794,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard iconShadowColor != oldValue else { return }
             persistOptionalColor(iconShadowColor, forKey: Keys.iconShadowColor)
-            if iconShadowColor == nil {
-                clearAppearanceOverride(Keys.iconShadowColor)
-            } else {
-                markAppearanceOverride(Keys.iconShadowColor)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                iconShadowColor != nil,
+                key: Keys.iconShadowColor
+            )
         }
     }
 
@@ -1638,11 +1828,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
             if let windowBackgroundImagePath, !windowBackgroundImagePath.isEmpty {
                 defaults.set(windowBackgroundImagePath, forKey: Keys.windowBackgroundImagePath)
-                markAppearanceOverride(Keys.windowBackgroundImagePath)
             } else {
                 defaults.removeObject(forKey: Keys.windowBackgroundImagePath)
-                clearAppearanceOverride(Keys.windowBackgroundImagePath)
             }
+            updateOptionalAppearanceModeForStoredValue(
+                windowBackgroundImagePath?.isEmpty == false,
+                key: Keys.windowBackgroundImagePath
+            )
         }
     }
 
@@ -1742,40 +1934,40 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    /// Whether Docky should register itself to launch when the user logs in.
+    /// The last login-item mutation failure, surfaced in Settings instead of
+    /// silently snapping the toggle back with no explanation.
+    private(set) var openAtLoginErrorMessage: String?
+    private(set) var openAtLoginRequiresApproval = false
+    private(set) var openAtLoginObservedStatus:
+        LaunchAtLoginObservedStatus = .unavailable
+
+    /// The user's persisted intent for whether Docky should launch at login.
+    /// The independently observed macOS state lives in
+    /// `openAtLoginObservedStatus`; startup refreshes that state but never
+    /// replays this value as an external mutation.
     var opensAtLogin: Bool {
         didSet {
             guard opensAtLogin != oldValue else { return }
             defaults.set(opensAtLogin, forKey: Keys.opensAtLogin)
-
-            guard !isSyncingOpenAtLoginPreference else {
-                return
-            }
-
-            guard LaunchAtLoginService.shared.setEnabled(opensAtLogin) else {
-                syncOpenAtLoginPreferenceFromSystem()
-                return
-            }
         }
     }
 
     /// Delay before Docky hides its own window after interaction ends.
     var autohideWindowDelay: TimeInterval {
         didSet {
-            let clampedValue = max(0, autohideWindowDelay)
-            guard clampedValue != oldValue else {
-                if autohideWindowDelay != clampedValue {
-                    autohideWindowDelay = clampedValue
-                }
-                return
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: autohideWindowDelay,
+                normalize: { max(0, $0) }
+            )
+            if autohideWindowDelay != mutation.normalizedValue {
+                autohideWindowDelay = mutation.normalizedValue
             }
-
-            if autohideWindowDelay != clampedValue {
-                autohideWindowDelay = clampedValue
-                return
-            }
-
-            defaults.set(clampedValue, forKey: Keys.autohideWindowDelay)
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                mutation.normalizedValue,
+                forKey: Keys.autohideWindowDelay
+            )
         }
     }
 
@@ -1783,20 +1975,19 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// of 0 snaps the window into place instantly.
     var autohideAnimationDuration: TimeInterval {
         didSet {
-            let clampedValue = min(max(0, autohideAnimationDuration), 1)
-            guard clampedValue != oldValue else {
-                if autohideAnimationDuration != clampedValue {
-                    autohideAnimationDuration = clampedValue
-                }
-                return
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: autohideAnimationDuration,
+                normalize: { min(max(0, $0), 1) }
+            )
+            if autohideAnimationDuration != mutation.normalizedValue {
+                autohideAnimationDuration = mutation.normalizedValue
             }
-
-            if autohideAnimationDuration != clampedValue {
-                autohideAnimationDuration = clampedValue
-                return
-            }
-
-            defaults.set(clampedValue, forKey: Keys.autohideAnimationDuration)
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                mutation.normalizedValue,
+                forKey: Keys.autohideAnimationDuration
+            )
         }
     }
 
@@ -1819,20 +2010,30 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// macOS Dock's intent-gating behavior in fullscreen.
     var fullscreenRevealDelay: TimeInterval {
         didSet {
-            let clampedValue = max(0, fullscreenRevealDelay)
-            guard clampedValue != oldValue else {
-                if fullscreenRevealDelay != clampedValue {
-                    fullscreenRevealDelay = clampedValue
-                }
-                return
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: fullscreenRevealDelay,
+                normalize: { max(0, $0) }
+            )
+            if fullscreenRevealDelay != mutation.normalizedValue {
+                fullscreenRevealDelay = mutation.normalizedValue
             }
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                mutation.normalizedValue,
+                forKey: Keys.fullscreenRevealDelay
+            )
+        }
+    }
 
-            if fullscreenRevealDelay != clampedValue {
-                fullscreenRevealDelay = clampedValue
-                return
-            }
-
-            defaults.set(clampedValue, forKey: Keys.fullscreenRevealDelay)
+    /// Whether hovering an app tile may open a window-preview panel.
+    var enablesWindowHoverPreview: Bool {
+        didSet {
+            guard enablesWindowHoverPreview != oldValue else { return }
+            defaults.set(
+                enablesWindowHoverPreview,
+                forKey: Keys.enablesWindowHoverPreview
+            )
         }
     }
 
@@ -1841,20 +2042,19 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// negative.
     var windowPreviewHoverDelay: TimeInterval {
         didSet {
-            let clampedValue = max(0, windowPreviewHoverDelay)
-            guard clampedValue != oldValue else {
-                if windowPreviewHoverDelay != clampedValue {
-                    windowPreviewHoverDelay = clampedValue
-                }
-                return
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: windowPreviewHoverDelay,
+                normalize: { max(0, $0) }
+            )
+            if windowPreviewHoverDelay != mutation.normalizedValue {
+                windowPreviewHoverDelay = mutation.normalizedValue
             }
-
-            if windowPreviewHoverDelay != clampedValue {
-                windowPreviewHoverDelay = clampedValue
-                return
-            }
-
-            defaults.set(clampedValue, forKey: Keys.windowPreviewHoverDelay)
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                mutation.normalizedValue,
+                forKey: Keys.windowPreviewHoverDelay
+            )
         }
     }
 
@@ -1872,11 +2072,12 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// Turning this on snapshots the user's current Dock preferences and
     /// overwrites autohide/bounce behavior; turning it off restores the
     /// snapshot. The snapshot is also restored when Docky quits.
-    var hidesSystemDock: Bool {
+    private(set) var systemDockVisibilityErrorMessage: String?
+
+    private(set) var hidesSystemDock: Bool {
         didSet {
             guard hidesSystemDock != oldValue else { return }
             defaults.set(hidesSystemDock, forKey: Keys.hidesSystemDock)
-            applySystemDockVisibilityPreference()
         }
     }
 
@@ -1929,20 +2130,19 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// How long the cursor must rest on a widget before its expanded preview appears. Zero = immediate.
     var widgetHoverPreviewDelay: TimeInterval {
         didSet {
-            let clampedValue = max(0, widgetHoverPreviewDelay)
-            guard clampedValue != oldValue else {
-                if widgetHoverPreviewDelay != clampedValue {
-                    widgetHoverPreviewDelay = clampedValue
-                }
-                return
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: widgetHoverPreviewDelay,
+                normalize: { max(0, $0) }
+            )
+            if widgetHoverPreviewDelay != mutation.normalizedValue {
+                widgetHoverPreviewDelay = mutation.normalizedValue
             }
-
-            if widgetHoverPreviewDelay != clampedValue {
-                widgetHoverPreviewDelay = clampedValue
-                return
-            }
-
-            defaults.set(clampedValue, forKey: Keys.widgetHoverPreviewDelay)
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                mutation.normalizedValue,
+                forKey: Keys.widgetHoverPreviewDelay
+            )
         }
     }
 
@@ -2090,11 +2290,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
             if let activeIndicatorImagePath, !activeIndicatorImagePath.isEmpty {
                 defaults.set(activeIndicatorImagePath, forKey: Keys.activeIndicatorImagePath)
-                markAppearanceOverride(Keys.activeIndicatorImagePath)
             } else {
                 defaults.removeObject(forKey: Keys.activeIndicatorImagePath)
-                clearAppearanceOverride(Keys.activeIndicatorImagePath)
             }
+            updateOptionalAppearanceModeForStoredValue(
+                activeIndicatorImagePath?.isEmpty == false,
+                key: Keys.activeIndicatorImagePath
+            )
         }
     }
 
@@ -2103,11 +2305,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard activeIndicatorColor != oldValue else { return }
             persistActiveIndicatorColor(activeIndicatorColor)
-            if activeIndicatorColor == nil {
-                clearAppearanceOverride(Keys.activeIndicatorColor)
-            } else {
-                markAppearanceOverride(Keys.activeIndicatorColor)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                activeIndicatorColor != nil,
+                key: Keys.activeIndicatorColor
+            )
         }
     }
 
@@ -2118,11 +2319,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
             if let dividerImagePath, !dividerImagePath.isEmpty {
                 defaults.set(dividerImagePath, forKey: Keys.dividerImagePath)
-                markAppearanceOverride(Keys.dividerImagePath)
             } else {
                 defaults.removeObject(forKey: Keys.dividerImagePath)
-                clearAppearanceOverride(Keys.dividerImagePath)
             }
+            updateOptionalAppearanceModeForStoredValue(
+                dividerImagePath?.isEmpty == false,
+                key: Keys.dividerImagePath
+            )
         }
     }
 
@@ -2133,11 +2336,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
             if let leftDividerImagePath, !leftDividerImagePath.isEmpty {
                 defaults.set(leftDividerImagePath, forKey: Keys.leftDividerImagePath)
-                markAppearanceOverride(Keys.leftDividerImagePath)
             } else {
                 defaults.removeObject(forKey: Keys.leftDividerImagePath)
-                clearAppearanceOverride(Keys.leftDividerImagePath)
             }
+            updateOptionalAppearanceModeForStoredValue(
+                leftDividerImagePath?.isEmpty == false,
+                key: Keys.leftDividerImagePath
+            )
         }
     }
 
@@ -2148,11 +2353,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
             if let rightDividerImagePath, !rightDividerImagePath.isEmpty {
                 defaults.set(rightDividerImagePath, forKey: Keys.rightDividerImagePath)
-                markAppearanceOverride(Keys.rightDividerImagePath)
             } else {
                 defaults.removeObject(forKey: Keys.rightDividerImagePath)
-                clearAppearanceOverride(Keys.rightDividerImagePath)
             }
+            updateOptionalAppearanceModeForStoredValue(
+                rightDividerImagePath?.isEmpty == false,
+                key: Keys.rightDividerImagePath
+            )
         }
     }
 
@@ -2229,11 +2436,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard dividerColor != oldValue else { return }
             persistOptionalColor(dividerColor, forKey: Keys.dividerColor)
-            if dividerColor == nil {
-                clearAppearanceOverride(Keys.dividerColor)
-            } else {
-                markAppearanceOverride(Keys.dividerColor)
-            }
+            updateOptionalAppearanceModeForStoredValue(
+                dividerColor != nil,
+                key: Keys.dividerColor
+            )
         }
     }
 
@@ -2318,21 +2524,18 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     var hiddenAppBundleIdentifiers: [String] {
         didSet {
             guard !isRevertingProfileBackedPreference else { return }
-            let normalizedIdentifiers = Self.normalizedBundleIdentifiers(hiddenAppBundleIdentifiers)
-            guard normalizedIdentifiers != oldValue else {
-                if hiddenAppBundleIdentifiers != normalizedIdentifiers {
-                    hiddenAppBundleIdentifiers = normalizedIdentifiers
-                }
-                return
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: hiddenAppBundleIdentifiers,
+                normalize: Self.normalizedBundleIdentifiers
+            )
+            if hiddenAppBundleIdentifiers != mutation.normalizedValue {
+                hiddenAppBundleIdentifiers = mutation.normalizedValue
             }
-
-            if hiddenAppBundleIdentifiers != normalizedIdentifiers {
-                hiddenAppBundleIdentifiers = normalizedIdentifiers
-                return
-            }
+            guard mutation.shouldPersist else { return }
 
             guard mirrorToActiveProfile({
-                $0.hiddenAppBundleIdentifiers = normalizedIdentifiers
+                $0.hiddenAppBundleIdentifiers = mutation.normalizedValue
             }) else {
                 let authoritativeIdentifiers =
                     profileService?.activeProfile?.hiddenAppBundleIdentifiers
@@ -2343,7 +2546,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
                 return
             }
 
-            defaults.set(normalizedIdentifiers, forKey: Keys.hiddenAppBundleIdentifiers)
+            defaults.set(
+                mutation.normalizedValue,
+                forKey: Keys.hiddenAppBundleIdentifiers
+            )
         }
     }
 
@@ -2366,7 +2572,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     /// Whether Docky's Launchpad overlay is enabled.
-    var enablesLaunchpadOverlay: Bool {
+    private(set) var enablesLaunchpadOverlay: Bool {
         didSet {
             guard enablesLaunchpadOverlay != oldValue else { return }
             defaults.set(enablesLaunchpadOverlay, forKey: Keys.enablesLaunchpadOverlay)
@@ -2380,6 +2586,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         didSet {
             guard enablesStartMenuOverlay != oldValue else { return }
             defaults.set(enablesStartMenuOverlay, forKey: Keys.enablesStartMenuOverlay)
+            StartMenuService.shared.setEnabled(enablesStartMenuOverlay)
         }
     }
 
@@ -2398,60 +2605,57 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// (only the live blur remains, no tint on top).
     var launchpadOverlayTransparency: CGFloat {
         didSet {
-            let clampedValue = min(max(launchpadOverlayTransparency, 0), 1)
-            guard clampedValue != oldValue else {
-                if launchpadOverlayTransparency != clampedValue {
-                    launchpadOverlayTransparency = clampedValue
-                }
-                return
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: launchpadOverlayTransparency,
+                normalize: { min(max($0, 0), 1) }
+            )
+            if launchpadOverlayTransparency != mutation.normalizedValue {
+                launchpadOverlayTransparency = mutation.normalizedValue
             }
-
-            if launchpadOverlayTransparency != clampedValue {
-                launchpadOverlayTransparency = clampedValue
-                return
-            }
-
-            defaults.set(Double(clampedValue), forKey: Keys.launchpadOverlayTransparency)
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                Double(mutation.normalizedValue),
+                forKey: Keys.launchpadOverlayTransparency
+            )
         }
     }
 
     /// Preferred column count for the Launchpad overlay grid.
     var launchpadGridColumnCount: Int {
         didSet {
-            let clampedValue = max(1, launchpadGridColumnCount)
-            guard clampedValue != oldValue else {
-                if launchpadGridColumnCount != clampedValue {
-                    launchpadGridColumnCount = clampedValue
-                }
-                return
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: launchpadGridColumnCount,
+                normalize: { max(1, $0) }
+            )
+            if launchpadGridColumnCount != mutation.normalizedValue {
+                launchpadGridColumnCount = mutation.normalizedValue
             }
-
-            if launchpadGridColumnCount != clampedValue {
-                launchpadGridColumnCount = clampedValue
-                return
-            }
-
-            defaults.set(clampedValue, forKey: Keys.launchpadGridColumnCount)
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                mutation.normalizedValue,
+                forKey: Keys.launchpadGridColumnCount
+            )
         }
     }
 
     /// Preferred row count for the Launchpad overlay grid.
     var launchpadGridRowCount: Int {
         didSet {
-            let clampedValue = max(1, launchpadGridRowCount)
-            guard clampedValue != oldValue else {
-                if launchpadGridRowCount != clampedValue {
-                    launchpadGridRowCount = clampedValue
-                }
-                return
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: launchpadGridRowCount,
+                normalize: { max(1, $0) }
+            )
+            if launchpadGridRowCount != mutation.normalizedValue {
+                launchpadGridRowCount = mutation.normalizedValue
             }
-
-            if launchpadGridRowCount != clampedValue {
-                launchpadGridRowCount = clampedValue
-                return
-            }
-
-            defaults.set(clampedValue, forKey: Keys.launchpadGridRowCount)
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                mutation.normalizedValue,
+                forKey: Keys.launchpadGridRowCount
+            )
         }
     }
 
@@ -2463,23 +2667,24 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// the icon outside that range.
     var launchpadBaseIconSize: CGFloat {
         didSet {
-            let clampedValue = min(
-                max(launchpadBaseIconSize, DefaultValues.launchpadBaseIconSizeMin),
-                DefaultValues.launchpadBaseIconSizeMax
-            )
-            guard clampedValue != oldValue else {
-                if launchpadBaseIconSize != clampedValue {
-                    launchpadBaseIconSize = clampedValue
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: launchpadBaseIconSize,
+                normalize: {
+                    min(
+                        max($0, DefaultValues.launchpadBaseIconSizeMin),
+                        DefaultValues.launchpadBaseIconSizeMax
+                    )
                 }
-                return
+            )
+            if launchpadBaseIconSize != mutation.normalizedValue {
+                launchpadBaseIconSize = mutation.normalizedValue
             }
-
-            if launchpadBaseIconSize != clampedValue {
-                launchpadBaseIconSize = clampedValue
-                return
-            }
-
-            defaults.set(Double(clampedValue), forKey: Keys.launchpadBaseIconSize)
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                Double(mutation.normalizedValue),
+                forKey: Keys.launchpadBaseIconSize
+            )
         }
     }
 
@@ -2488,23 +2693,24 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// factor as the icon. Clamped to the bookends below.
     var launchpadColumnSpacing: CGFloat {
         didSet {
-            let clampedValue = min(
-                max(launchpadColumnSpacing, DefaultValues.launchpadSpacingMin),
-                DefaultValues.launchpadSpacingMax
-            )
-            guard clampedValue != oldValue else {
-                if launchpadColumnSpacing != clampedValue {
-                    launchpadColumnSpacing = clampedValue
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: launchpadColumnSpacing,
+                normalize: {
+                    min(
+                        max($0, DefaultValues.launchpadSpacingMin),
+                        DefaultValues.launchpadSpacingMax
+                    )
                 }
-                return
+            )
+            if launchpadColumnSpacing != mutation.normalizedValue {
+                launchpadColumnSpacing = mutation.normalizedValue
             }
-
-            if launchpadColumnSpacing != clampedValue {
-                launchpadColumnSpacing = clampedValue
-                return
-            }
-
-            defaults.set(Double(clampedValue), forKey: Keys.launchpadColumnSpacing)
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                Double(mutation.normalizedValue),
+                forKey: Keys.launchpadColumnSpacing
+            )
         }
     }
 
@@ -2561,7 +2767,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     /// Global shortcut that toggles Docky's Launchpad overlay.
-    var launchpadShortcut: KeyboardShortcut {
+    private(set) var launchpadShortcutErrorMessage: String?
+
+    private(set) var launchpadShortcut: KeyboardShortcut {
         didSet {
             guard launchpadShortcut != oldValue else { return }
             persistLaunchpadShortcut(launchpadShortcut)
@@ -2569,7 +2777,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     /// Whether Docky's window switcher is enabled.
-    var enablesWindowSwitcher: Bool {
+    private(set) var enablesWindowSwitcher: Bool {
         didSet {
             guard enablesWindowSwitcher != oldValue else { return }
             defaults.set(enablesWindowSwitcher, forKey: Keys.enablesWindowSwitcher)
@@ -2587,7 +2795,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     /// Global shortcut that opens Docky's window switcher.
-    var windowSwitcherShortcut: KeyboardShortcut {
+    private(set) var windowSwitcherShortcutErrorMessage: String?
+
+    private(set) var windowSwitcherShortcut: KeyboardShortcut {
         didSet {
             guard windowSwitcherShortcut != oldValue else { return }
             persistWindowSwitcherShortcut(windowSwitcherShortcut)
@@ -2743,7 +2953,6 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     private let defaults: UserDefaults
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
-    private var isSyncingOpenAtLoginPreference = false
     private weak var profileService: ProfileService?
     @ObservationIgnored
     private var userAssetImportGenerationBySlot: [String: UInt64] = [:]
@@ -2752,6 +2961,12 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         [String: (path: String, generation: UInt64)] = [:]
     @ObservationIgnored
     private var userAssetCleanupRevision: UInt64 = 0
+    @ObservationIgnored
+    private var tileHoverEffectsMigrationPending = false
+    @ObservationIgnored
+    private var tileHoverEffectsMigrationWasExistingInstall = false
+    @ObservationIgnored
+    private var isApplyingTileHoverEffectsMigration = false
 
     /// Legacy profile-backed values that existed in UserDefaults but could
     /// not be decoded during bootstrap. Profile migration treats these as a
@@ -2845,9 +3060,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     // built-in default when the key isn't in UserDefaults).
     //
     // Consumers in `Views/` should read `effective<X>` rather than
-    // the raw stored property. Settings UI is the exception, its
-    // sliders/pickers bind to the raw stored property so the user
-    // sees and edits their own value, not the theme's.
+    // the raw stored property. Settings controls also display effective
+    // values, then use explicit user-intent commits so selecting a dormant
+    // same-value choice still establishes an override.
 
     /// Returns `raw` when the user has overridden this key, otherwise
     /// the supplied theme value (when present), otherwise `raw` again
@@ -2888,122 +3103,162 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         return max(0, resolved)
     }
 
-    /// Hover opacity multiplier; 1.0 when no theme/user value is set.
-    var effectiveTileHoverOpacity: CGFloat {
+    /// Configured hover opacity before the master enable switch is applied.
+    /// Settings reads this value so dormant choices remain visible while
+    /// hover effects are disabled.
+    var configuredTileHoverOpacity: CGFloat {
         let themed = ThemeManager.shared.activeManifest?.appearance.tile?.hover?.opacity
-        if isAppearanceOverridden(Keys.tileHoverOpacity), let user = tileHoverOpacity {
-            return max(0, min(1, user))
-        }
-        if let themed {
-            return max(0, min(1, themed))
-        }
-        return 1
+        let resolved = resolveOptionalAppearance(
+            key: Keys.tileHoverOpacity,
+            custom: tileHoverOpacity,
+            themed: themed
+        ) ?? 1
+        return max(0, min(1, resolved))
     }
 
-    /// Hover scale; 1.0 when no theme/user value is set.
-    var effectiveTileHoverScale: CGFloat {
+    /// Runtime hover opacity multiplier. Disabled effects are a strict no-op.
+    var effectiveTileHoverOpacity: CGFloat {
+        TileHoverEffectsRuntimePolicy.tileOpacity(
+            isEnabled: tileHoverEffectsEnabled,
+            configured: configuredTileHoverOpacity
+        )
+    }
+
+    /// Configured hover scale before the master enable switch is applied.
+    var configuredTileHoverScale: CGFloat {
         let themed = ThemeManager.shared.activeManifest?.appearance.tile?.hover?.scale
-        if isAppearanceOverridden(Keys.tileHoverScale), let user = tileHoverScale {
-            return max(0.1, user)
-        }
-        if let themed {
-            return max(0.1, themed)
-        }
-        return 1
+        let resolved = resolveOptionalAppearance(
+            key: Keys.tileHoverScale,
+            custom: tileHoverScale,
+            themed: themed
+        ) ?? 1
+        return max(0.1, resolved)
+    }
+
+    /// Runtime hover scale. Disabled effects are a strict no-op.
+    var effectiveTileHoverScale: CGFloat {
+        TileHoverEffectsRuntimePolicy.scale(
+            isEnabled: tileHoverEffectsEnabled,
+            configured: configuredTileHoverScale
+        )
+    }
+
+    var configuredTileHoverBackgroundColor: NSColor? {
+        resolveOptionalAppearance(
+            key: Keys.tileHoverBackgroundColor,
+            custom: tileHoverBackgroundColor?.nsColor,
+            themed:
+                ThemeManager.shared.activeManifest?
+                    .appearance.tile?.hover?.backgroundColor?.nsColor
+        )
     }
 
     var effectiveTileHoverBackgroundColor: NSColor? {
-        if isAppearanceOverridden(Keys.tileHoverBackgroundColor), let user = tileHoverBackgroundColor {
-            return user.nsColor
+        guard TileHoverEffectsRuntimePolicy.allowsBackgroundSource(
+            isEnabled: tileHoverEffectsEnabled
+        ) else {
+            return nil
         }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.tile?.hover?.backgroundColor,
-           let resolved = themed.nsColor {
-            return resolved
-        }
-        return nil
+        return configuredTileHoverBackgroundColor
+    }
+
+    var configuredTileHoverBackgroundImageURL: URL? {
+        resolveOptionalAppearance(
+            key: Keys.tileHoverBackgroundImagePath,
+            custom: ManagedUserAssetStore.managedCandidateURL(
+                forPath: tileHoverBackgroundImagePath
+            ),
+            themed: ThemeManager.shared.activeAssetURL(
+                ThemeManager.shared.activeManifest?
+                    .appearance.tile?.hover?.backgroundImage
+            )
+        )
     }
 
     var effectiveTileHoverBackgroundImageURL: URL? {
-        if isAppearanceOverridden(Keys.tileHoverBackgroundImagePath),
-           let url = ManagedUserAssetStore.managedCandidateURL(
-               forPath: tileHoverBackgroundImagePath
-           ) {
-            return url
+        guard TileHoverEffectsRuntimePolicy.allowsBackgroundSource(
+            isEnabled: tileHoverEffectsEnabled
+        ) else {
+            return nil
         }
-        if let assetPath = ThemeManager.shared.activeManifest?.appearance.tile?.hover?.backgroundImage,
-           let url = ThemeManager.shared.activeAssetURL(assetPath) {
-            return url
-        }
-        return nil
+        return configuredTileHoverBackgroundImageURL
+    }
+
+    var configuredTileHoverBackgroundOpacity: CGFloat {
+        let themed = ThemeManager.shared.activeManifest?.appearance.tile?.hover?.backgroundOpacity
+        let resolved = resolveOptionalAppearance(
+            key: Keys.tileHoverBackgroundOpacity,
+            custom: tileHoverBackgroundOpacity,
+            themed: themed
+        ) ?? 1
+        return max(0, min(1, resolved))
     }
 
     var effectiveTileHoverBackgroundOpacity: CGFloat {
-        let themed = ThemeManager.shared.activeManifest?.appearance.tile?.hover?.backgroundOpacity
-        if isAppearanceOverridden(Keys.tileHoverBackgroundOpacity), let user = tileHoverBackgroundOpacity {
-            return max(0, min(1, user))
-        }
-        if let themed {
-            return max(0, min(1, themed))
-        }
-        return 1
+        TileHoverEffectsRuntimePolicy.backgroundOpacity(
+            isEnabled: tileHoverEffectsEnabled,
+            configured: configuredTileHoverBackgroundOpacity
+        )
+    }
+
+    var configuredTileHoverBackgroundCornerRadius: CGFloat {
+        let themed = ThemeManager.shared.activeManifest?.appearance.tile?.hover?.backgroundCornerRadius
+        let resolved = resolveOptionalAppearance(
+            key: Keys.tileHoverBackgroundCornerRadius,
+            custom: tileHoverBackgroundCornerRadius,
+            themed: themed
+        ) ?? 0
+        return max(0, resolved)
     }
 
     var effectiveTileHoverBackgroundCornerRadius: CGFloat {
-        let themed = ThemeManager.shared.activeManifest?.appearance.tile?.hover?.backgroundCornerRadius
-        if isAppearanceOverridden(Keys.tileHoverBackgroundCornerRadius), let user = tileHoverBackgroundCornerRadius {
-            return max(0, user)
-        }
-        if let themed {
-            return max(0, themed)
-        }
-        return 0
+        TileHoverEffectsRuntimePolicy.backgroundCornerRadius(
+            isEnabled: tileHoverEffectsEnabled,
+            configured: configuredTileHoverBackgroundCornerRadius
+        )
     }
 
     var effectiveTileActiveBackgroundColor: NSColor? {
-        if isAppearanceOverridden(Keys.tileActiveBackgroundColor), let user = tileActiveBackgroundColor {
-            return user.nsColor
-        }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.tile?.active?.backgroundColor,
-           let resolved = themed.nsColor {
-            return resolved
-        }
-        return nil
+        resolveOptionalAppearance(
+            key: Keys.tileActiveBackgroundColor,
+            custom: tileActiveBackgroundColor?.nsColor,
+            themed:
+                ThemeManager.shared.activeManifest?
+                    .appearance.tile?.active?.backgroundColor?.nsColor
+        )
     }
 
     var effectiveTileActiveBackgroundImageURL: URL? {
-        if isAppearanceOverridden(Keys.tileActiveBackgroundImagePath),
-           let url = ManagedUserAssetStore.managedCandidateURL(
-               forPath: tileActiveBackgroundImagePath
-           ) {
-            return url
-        }
-        if let assetPath = ThemeManager.shared.activeManifest?.appearance.tile?.active?.backgroundImage,
-           let url = ThemeManager.shared.activeAssetURL(assetPath) {
-            return url
-        }
-        return nil
+        resolveOptionalAppearance(
+            key: Keys.tileActiveBackgroundImagePath,
+            custom: ManagedUserAssetStore.managedCandidateURL(
+                forPath: tileActiveBackgroundImagePath
+            ),
+            themed: ThemeManager.shared.activeAssetURL(
+                ThemeManager.shared.activeManifest?
+                    .appearance.tile?.active?.backgroundImage
+            )
+        )
     }
 
     var effectiveTileActiveBackgroundOpacity: CGFloat {
         let themed = ThemeManager.shared.activeManifest?.appearance.tile?.active?.backgroundOpacity
-        if isAppearanceOverridden(Keys.tileActiveBackgroundOpacity), let user = tileActiveBackgroundOpacity {
-            return max(0, min(1, user))
-        }
-        if let themed {
-            return max(0, min(1, themed))
-        }
-        return 1
+        let resolved = resolveOptionalAppearance(
+            key: Keys.tileActiveBackgroundOpacity,
+            custom: tileActiveBackgroundOpacity,
+            themed: themed
+        ) ?? 1
+        return max(0, min(1, resolved))
     }
 
     var effectiveTileActiveBackgroundCornerRadius: CGFloat {
         let themed = ThemeManager.shared.activeManifest?.appearance.tile?.active?.backgroundCornerRadius
-        if isAppearanceOverridden(Keys.tileActiveBackgroundCornerRadius), let user = tileActiveBackgroundCornerRadius {
-            return max(0, user)
-        }
-        if let themed {
-            return max(0, themed)
-        }
-        return 0
+        let resolved = resolveOptionalAppearance(
+            key: Keys.tileActiveBackgroundCornerRadius,
+            custom: tileActiveBackgroundCornerRadius,
+            themed: themed
+        ) ?? 0
+        return max(0, resolved)
     }
 
     var effectiveWindowCornerRadius: CGFloat {
@@ -3025,13 +3280,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         userValue: CGFloat?,
         themed: CGFloat?
     ) -> CGFloat {
-        if isAppearanceOverridden(userKey), let userValue {
-            return max(0, userValue)
-        }
-        if let themed {
-            return max(0, themed)
-        }
-        return effectiveWindowCornerRadius
+        let resolved = resolveOptionalAppearance(
+            key: userKey,
+            custom: userValue,
+            themed: themed
+        )
+        return resolved.map { max(0, $0) }
+            ?? effectiveWindowCornerRadius
     }
 
     var effectiveWindowCornerRadiusTopLeading: CGFloat {
@@ -3107,14 +3362,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// User/theme tint color without the built-in material fallback.
     /// `nil` means native Liquid Glass should supply its own color.
     var effectiveExplicitWindowTintColor: NSColor? {
-        if isAppearanceOverridden(Keys.windowTintColor), let user = windowTintColor {
-            return user.nsColor
-        }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.window?.tintColor,
-           let resolved = themed.nsColor {
-            return resolved
-        }
-        return nil
+        resolveOptionalAppearance(
+            key: Keys.windowTintColor,
+            custom: windowTintColor?.nsColor,
+            themed:
+                ThemeManager.shared.activeManifest?
+                    .appearance.window?.tintColor?.nsColor
+        )
     }
 
     var effectiveWindowTintColor: NSColor {
@@ -3125,6 +3379,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// fallback material color. This preserves existing themes that tune
     /// `tintOpacity` without supplying their own tint color.
     var hasExplicitWindowTintPresentation: Bool {
+        if optionalAppearanceMode(forRawKey: Keys.windowTintColor)
+            == .disabled
+        {
+            return false
+        }
         if isAppearanceOverridden(Keys.windowTintColor)
             || isAppearanceOverridden(Keys.windowTintOpacity) {
             return true
@@ -3154,19 +3413,16 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     var effectiveWindowBackgroundImageURL: URL? {
-        if isAppearanceOverridden(Keys.windowBackgroundImagePath),
-           let url = ManagedUserAssetStore.managedCandidateURL(
-               forPath: windowBackgroundImagePath
-           ) {
-            return url
-        }
-
-        if let assetPath = ThemeManager.shared.activeManifest?.appearance.window?.backgroundImage,
-           let url = ThemeManager.shared.activeAssetURL(assetPath) {
-            return url
-        }
-
-        return nil
+        resolveOptionalAppearance(
+            key: Keys.windowBackgroundImagePath,
+            custom: ManagedUserAssetStore.managedCandidateURL(
+                forPath: windowBackgroundImagePath
+            ),
+            themed: ThemeManager.shared.activeAssetURL(
+                ThemeManager.shared.activeManifest?
+                    .appearance.window?.backgroundImage
+            )
+        )
     }
 
     var effectiveWindowBackgroundImageMode: DockBackgroundImageMode {
@@ -3178,14 +3434,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// Theme-aware border color. `nil` means no theme-supplied border
     /// is set; callers should fall back to the default glass treatment.
     var effectiveWindowBorderColor: NSColor? {
-        if isAppearanceOverridden(Keys.windowBorderColor), let user = windowBorderColor {
-            return user.nsColor
-        }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.window?.borderColor,
-           let resolved = themed.nsColor {
-            return resolved
-        }
-        return nil
+        resolveOptionalAppearance(
+            key: Keys.windowBorderColor,
+            custom: windowBorderColor?.nsColor,
+            themed:
+                ThemeManager.shared.activeManifest?
+                    .appearance.window?.borderColor?.nsColor
+        )
     }
 
     var effectiveWindowBorderWidth: CGFloat {
@@ -3198,14 +3453,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     /// Theme-aware icon shadow color. `nil` disables the shadow.
     var effectiveIconShadowColor: NSColor? {
-        if isAppearanceOverridden(Keys.iconShadowColor), let user = iconShadowColor {
-            return user.nsColor
-        }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.iconShadow?.color,
-           let resolved = themed.nsColor {
-            return resolved
-        }
-        return nil
+        resolveOptionalAppearance(
+            key: Keys.iconShadowColor,
+            custom: iconShadowColor?.nsColor,
+            themed:
+                ThemeManager.shared.activeManifest?
+                    .appearance.iconShadow?.color?.nsColor
+        )
     }
 
     var effectiveIconShadowRadius: CGFloat {
@@ -3228,14 +3482,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     /// Theme-aware flat divider fill. `nil` means the divider should
     /// fall back to SwiftUI's `.primary`.
     var effectiveDividerColor: NSColor? {
-        if isAppearanceOverridden(Keys.dividerColor), let user = dividerColor {
-            return user.nsColor
-        }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.indicators?.divider?.color,
-           let resolved = themed.nsColor {
-            return resolved
-        }
-        return nil
+        resolveOptionalAppearance(
+            key: Keys.dividerColor,
+            custom: dividerColor?.nsColor,
+            themed:
+                ThemeManager.shared.activeManifest?
+                    .appearance.indicators?.divider?.color?.nsColor
+        )
     }
 
     var effectiveActiveIndicatorShape: DockTileIndicatorShape {
@@ -3245,30 +3498,26 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     var effectiveActiveIndicatorColor: NSColor {
-        if isAppearanceOverridden(Keys.activeIndicatorColor), let user = activeIndicatorColor {
-            return user.nsColor
-        }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.indicators?.color,
-           let resolved = themed.nsColor {
-            return resolved
-        }
-        return .labelColor
+        resolveOptionalAppearance(
+            key: Keys.activeIndicatorColor,
+            custom: activeIndicatorColor?.nsColor,
+            themed:
+                ThemeManager.shared.activeManifest?
+                    .appearance.indicators?.color?.nsColor
+        ) ?? .labelColor
     }
 
     var effectiveActiveIndicatorImageURL: URL? {
-        if isAppearanceOverridden(Keys.activeIndicatorImagePath),
-           let url = ManagedUserAssetStore.managedCandidateURL(
-               forPath: activeIndicatorImagePath
-           ) {
-            return url
-        }
-
-        if let assetPath = ThemeManager.shared.activeManifest?.appearance.indicators?.image,
-           let url = ThemeManager.shared.activeAssetURL(assetPath) {
-            return url
-        }
-
-        return nil
+        resolveOptionalAppearance(
+            key: Keys.activeIndicatorImagePath,
+            custom: ManagedUserAssetStore.managedCandidateURL(
+                forPath: activeIndicatorImagePath
+            ),
+            themed: ThemeManager.shared.activeAssetURL(
+                ThemeManager.shared.activeManifest?
+                    .appearance.indicators?.image
+            )
+        )
     }
 
     var effectiveActiveIndicatorOffset: CGFloat {
@@ -3328,48 +3577,61 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     }
 
     var effectiveDividerImageURL: URL? {
-        if isAppearanceOverridden(Keys.dividerImagePath),
-           let url = ManagedUserAssetStore.managedCandidateURL(
-               forPath: dividerImagePath
-           ) {
-            return url
-        }
-        if let assetPath = ThemeManager.shared.activeManifest?.appearance.indicators?.divider?.center,
-           let url = ThemeManager.shared.activeAssetURL(assetPath) {
-            return url
-        }
-        return nil
+        resolveOptionalAppearance(
+            key: Keys.dividerImagePath,
+            custom: ManagedUserAssetStore.managedCandidateURL(
+                forPath: dividerImagePath
+            ),
+            themed: ThemeManager.shared.activeAssetURL(
+                ThemeManager.shared.activeManifest?
+                    .appearance.indicators?.divider?.center
+            )
+        )
     }
 
     var effectiveLeftDividerImageURL: URL? {
-        if isAppearanceOverridden(Keys.leftDividerImagePath),
-           let url = ManagedUserAssetStore.managedCandidateURL(
-               forPath: leftDividerImagePath
-           ) {
-            return url
+        switch optionalAppearanceMode(
+            forRawKey: Keys.leftDividerImagePath
+        ) {
+        case .custom:
+            return ManagedUserAssetStore.managedCandidateURL(
+                forPath: leftDividerImagePath
+            )
+        case .disabled:
+            return nil
+        case .inherit:
+            if let assetPath =
+                ThemeManager.shared.activeManifest?
+                    .appearance.indicators?.divider?.left,
+               let url = ThemeManager.shared.activeAssetURL(assetPath) {
+                return url
+            }
+            return effectiveDividerImageURL
         }
-        if let assetPath = ThemeManager.shared.activeManifest?.appearance.indicators?.divider?.left,
-           let url = ThemeManager.shared.activeAssetURL(assetPath) {
-            return url
-        }
-        return effectiveDividerImageURL
     }
 
     var effectiveRightDividerImageURL: URL? {
         if effectiveMirrorsLeftDividerOnRight {
             return effectiveLeftDividerImageURL
         }
-        if isAppearanceOverridden(Keys.rightDividerImagePath),
-           let url = ManagedUserAssetStore.managedCandidateURL(
-               forPath: rightDividerImagePath
-           ) {
-            return url
+        switch optionalAppearanceMode(
+            forRawKey: Keys.rightDividerImagePath
+        ) {
+        case .custom:
+            return ManagedUserAssetStore.managedCandidateURL(
+                forPath: rightDividerImagePath
+            )
+        case .disabled:
+            return nil
+        case .inherit:
+            if let assetPath =
+                ThemeManager.shared.activeManifest?
+                    .appearance.indicators?.divider?.right,
+               let url = ThemeManager.shared.activeAssetURL(assetPath) {
+                return url
+            }
+            return effectiveDividerImageURL
         }
-        if let assetPath = ThemeManager.shared.activeManifest?.appearance.indicators?.divider?.right,
-           let url = ThemeManager.shared.activeAssetURL(assetPath) {
-            return url
-        }
-        return effectiveDividerImageURL
     }
 
     // MARK: - Explicit appearance values (for theme export)
@@ -3381,53 +3643,75 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
     // portable to another machine.
 
     var explicitWindowTintColor: ThemeColor? {
-        if isAppearanceOverridden(Keys.windowTintColor), let user = windowTintColor {
-            return ThemeColor(r: user.red, g: user.green, b: user.blue)
+        switch optionalAppearanceMode(forRawKey: Keys.windowTintColor) {
+        case .inherit:
+            return ThemeManager.shared.activeManifest?
+                .appearance.window?.tintColor
+        case .disabled:
+            return nil
+        case .custom:
+            return windowTintColor.map {
+                ThemeColor(r: $0.red, g: $0.green, b: $0.blue)
+            }
         }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.window?.tintColor {
-            return themed
-        }
-        return nil
     }
 
     var explicitActiveIndicatorColor: ThemeColor? {
-        if isAppearanceOverridden(Keys.activeIndicatorColor), let user = activeIndicatorColor {
-            return ThemeColor(r: user.red, g: user.green, b: user.blue)
+        switch optionalAppearanceMode(
+            forRawKey: Keys.activeIndicatorColor
+        ) {
+        case .inherit:
+            return ThemeManager.shared.activeManifest?
+                .appearance.indicators?.color
+        case .disabled:
+            return nil
+        case .custom:
+            return activeIndicatorColor.map {
+                ThemeColor(r: $0.red, g: $0.green, b: $0.blue)
+            }
         }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.indicators?.color {
-            return themed
-        }
-        return nil
     }
 
     var explicitWindowBorderColor: ThemeColor? {
-        if isAppearanceOverridden(Keys.windowBorderColor), let user = windowBorderColor {
-            return ThemeColor(r: user.red, g: user.green, b: user.blue)
+        switch optionalAppearanceMode(forRawKey: Keys.windowBorderColor) {
+        case .inherit:
+            return ThemeManager.shared.activeManifest?
+                .appearance.window?.borderColor
+        case .disabled:
+            return nil
+        case .custom:
+            return windowBorderColor.map {
+                ThemeColor(r: $0.red, g: $0.green, b: $0.blue)
+            }
         }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.window?.borderColor {
-            return themed
-        }
-        return nil
     }
 
     var explicitIconShadowColor: ThemeColor? {
-        if isAppearanceOverridden(Keys.iconShadowColor), let user = iconShadowColor {
-            return ThemeColor(r: user.red, g: user.green, b: user.blue)
+        switch optionalAppearanceMode(forRawKey: Keys.iconShadowColor) {
+        case .inherit:
+            return ThemeManager.shared.activeManifest?
+                .appearance.iconShadow?.color
+        case .disabled:
+            return nil
+        case .custom:
+            return iconShadowColor.map {
+                ThemeColor(r: $0.red, g: $0.green, b: $0.blue)
+            }
         }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.iconShadow?.color {
-            return themed
-        }
-        return nil
     }
 
     var explicitDividerColor: ThemeColor? {
-        if isAppearanceOverridden(Keys.dividerColor), let user = dividerColor {
-            return ThemeColor(r: user.red, g: user.green, b: user.blue)
+        switch optionalAppearanceMode(forRawKey: Keys.dividerColor) {
+        case .inherit:
+            return ThemeManager.shared.activeManifest?
+                .appearance.indicators?.divider?.color
+        case .disabled:
+            return nil
+        case .custom:
+            return dividerColor.map {
+                ThemeColor(r: $0.red, g: $0.green, b: $0.blue)
+            }
         }
-        if let themed = ThemeManager.shared.activeManifest?.appearance.indicators?.divider?.color {
-            return themed
-        }
-        return nil
     }
 
     /// Resolves the divider image and mirroring flag for a given divider position class.
@@ -4238,6 +4522,13 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let tileSpacing = "docky.tileSpacing"
         static let tileClipShape = "docky.tileClipShape"
         static let tileIconPadding = "docky.tileIconPadding"
+        static let tileHoverEffectsEnabled = "docky.tileHoverEffectsEnabled"
+        static let tileHoverEffectsInstallClassification =
+            "docky.tileHoverEffectsInstallClassification"
+        static let tileHoverEffectsMasterProvenance =
+            "docky.tileHoverEffectsMasterProvenance"
+        static let tileHoverEffectsMigrationVersion =
+            "docky.tileHoverEffectsMigrationVersion"
         static let tileHoverOpacity = "docky.tileHoverOpacity"
         static let tileHoverScale = "docky.tileHoverScale"
         static let tileHoverBackgroundColor = "docky.tileHoverBackgroundColor"
@@ -4283,6 +4574,8 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let autohideWindowDelay = "docky.autohideWindowDelay"
         static let autohideAnimationDuration = "docky.autohideAnimationDuration"
         static let fullscreenRevealDelay = "docky.fullscreenRevealDelay"
+        static let enablesWindowHoverPreview =
+            "docky.enablesWindowHoverPreview"
         static let windowPreviewHoverDelay = "docky.windowPreviewHoverDelay"
         static let windowPreviewLayout = "docky.windowPreviewLayout"
         static let maximizedWindowBehavior = "docky.maximizedWindowBehavior"
@@ -4363,6 +4656,8 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let hasSeenDockEditorHint = "docky.hasSeenDockEditorHint"
         static let photoFrameBookmarks = "docky.photoFrameBookmarks"
         static let userOverriddenAppearanceKeys = "docky.userOverriddenAppearanceKeys"
+        static let optionalAppearanceModes =
+            "docky.optionalAppearanceModes"
         static let appearanceOverrideMigrationVersion = "docky.appearanceOverrideMigrationVersion"
     }
 
@@ -4371,6 +4666,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let tileSpacing: CGFloat = 0
         static let tileClipShape: DockClipShape = .rounded
         static let tileIconPadding: CGFloat = 0
+        static let tileHoverEffectsEnabled = true
         static let tileHoverOptional: CGFloat? = nil
         static let tileHoverBackgroundColor: DockColor? = nil
         static let tileHoverBackgroundImagePath: String? = nil
@@ -4391,14 +4687,16 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let showsAppBadges = true
         static let folderBadgeMode: FolderBadgeMode = .combined
         static let folderBadgePreviewStyle: FolderBadgePreviewStyle = .dot
-        static let opensAtLogin = true
+        static let opensAtLogin = false
         static let autohideWindowDelay: TimeInterval = 0.5
         static let autohideAnimationDuration: TimeInterval = 0.22
         static let fullscreenRevealDelay: TimeInterval = 0.5
+        static let enablesWindowHoverPreview = true
         static let windowPreviewHoverDelay: TimeInterval = 1.0
         static let windowPreviewLayout: WindowSwitcherLayout = .auto
         static let maximizedWindowBehavior: MaximizedWindowBehavior = .ignore
-        static let hidesSystemDock = true
+        static let hidesSystemDock =
+            SystemDockVisibilityStoredPreferencePolicy.legacyDefault
         static let overflowBehavior: DockOverflowBehavior = .rescale
         static let windowAxisSizing: DockWindowAxisSizing = .fitContent
         static let enablesWidgetHoverPreview = true
@@ -4479,10 +4777,47 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
 
     fileprivate init() {
         self.defaults = .standard
+        let applicationDomain =
+            defaults.persistentDomain(
+                forName:
+                    Bundle.main.bundleIdentifier
+                    ?? "gt.quintero.Docky"
+            ) ?? [:]
+        let storedHoverInstallClassification =
+            defaults.string(
+                forKey:
+                    Keys.tileHoverEffectsInstallClassification
+            )
+        let hoverInstallClassification =
+            TileHoverEffectsInstallEvidencePolicy.classification(
+                storedValue: storedHoverInstallClassification,
+                persistedKeys: Set(applicationDomain.keys)
+            )
+        let hadExistingDockyPreferenceState =
+            hoverInstallClassification == .existing
+        let storedOptionalAppearanceModes =
+            ThemeOptionalAppearanceModeStorage.decode(
+                defaults.dictionary(
+                    forKey: Keys.optionalAppearanceModes
+                ) as? [String: String] ?? [:],
+                recognizedKeys:
+                    DockyPreferenceResetScopeModel
+                        .allKnownThemeOverrideKeys
+            )
         let storedVerticalPadding = defaults.object(forKey: Keys.tileVerticalPadding) as? Double
         let storedTileSpacing = defaults.object(forKey: Keys.tileSpacing) as? Double
         let storedTileClipShape = defaults.string(forKey: Keys.tileClipShape)
         let storedTileIconPadding = defaults.object(forKey: Keys.tileIconPadding) as? Double
+        let storedTileHoverEffectsEnabled =
+            defaults.object(forKey: Keys.tileHoverEffectsEnabled) as? Bool
+        let storedTileHoverEffectsMasterProvenance =
+            defaults.string(
+                forKey: Keys.tileHoverEffectsMasterProvenance
+            )
+        let storedTileHoverEffectsMigrationVersion =
+            defaults.object(
+                forKey: Keys.tileHoverEffectsMigrationVersion
+            ) as? Int
         let storedTileHoverOpacity = defaults.object(forKey: Keys.tileHoverOpacity) as? Double
         let storedTileHoverScale = defaults.object(forKey: Keys.tileHoverScale) as? Double
         let storedTileHoverBackgroundColor = defaults.data(forKey: Keys.tileHoverBackgroundColor)
@@ -4530,6 +4865,8 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         let storedAutohideWindowDelay = defaults.object(forKey: Keys.autohideWindowDelay) as? Double
         let storedAutohideAnimationDuration = defaults.object(forKey: Keys.autohideAnimationDuration) as? Double
         let storedFullscreenRevealDelay = defaults.object(forKey: Keys.fullscreenRevealDelay) as? Double
+        let storedEnablesWindowHoverPreview =
+            defaults.object(forKey: Keys.enablesWindowHoverPreview) as? Bool
         let storedWindowPreviewHoverDelay = defaults.object(forKey: Keys.windowPreviewHoverDelay) as? Double
         let storedWindowPreviewLayout = defaults.string(forKey: Keys.windowPreviewLayout)
         let storedMaximizedWindowBehavior = defaults.string(forKey: Keys.maximizedWindowBehavior)
@@ -4646,6 +4983,11 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         self.tileSpacing = storedTileSpacing.map { CGFloat($0) } ?? DefaultValues.tileSpacing
         self.tileClipShape = (storedTileClipShape.flatMap(DockClipShape.init(rawValue:)) ?? DefaultValues.tileClipShape)
         self.tileIconPadding = storedTileIconPadding.map { CGFloat($0) } ?? DefaultValues.tileIconPadding
+        // Missing-master migration is finalized only after the active theme
+        // catalog is available. Until then, fail closed rather than briefly
+        // showing an effect the old interface represented as disabled.
+        self.tileHoverEffectsEnabled =
+            storedTileHoverEffectsEnabled ?? false
         self.tileHoverOpacity = storedTileHoverOpacity.map { CGFloat($0) }
         self.tileHoverScale = storedTileHoverScale.map { CGFloat($0) }
         self.tileHoverBackgroundColor = Self.decodeColor(from: storedTileHoverBackgroundColor)
@@ -4693,14 +5035,22 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         self.folderBadgePreviewStyle = storedFolderBadgePreviewStyle
             .flatMap(FolderBadgePreviewStyle.init(rawValue:))
             ?? DefaultValues.folderBadgePreviewStyle
-        self.opensAtLogin = storedOpensAtLogin ?? LaunchAtLoginService.shared.isEnabled
+        self.opensAtLogin =
+            storedOpensAtLogin
+            ?? DockyBehaviorResetSafetyPolicy.opensAtLogin
         self.autohideWindowDelay = max(storedAutohideWindowDelay ?? DefaultValues.autohideWindowDelay, 0)
         self.autohideAnimationDuration = min(max(storedAutohideAnimationDuration ?? DefaultValues.autohideAnimationDuration, 0), 1)
         self.fullscreenRevealDelay = max(storedFullscreenRevealDelay ?? DefaultValues.fullscreenRevealDelay, 0)
+        self.enablesWindowHoverPreview =
+            storedEnablesWindowHoverPreview
+            ?? DefaultValues.enablesWindowHoverPreview
         self.windowPreviewHoverDelay = max(storedWindowPreviewHoverDelay ?? DefaultValues.windowPreviewHoverDelay, 0)
         self.windowPreviewLayout = storedWindowPreviewLayout.flatMap(WindowSwitcherLayout.init(rawValue:)) ?? DefaultValues.windowPreviewLayout
         self.maximizedWindowBehavior = (storedMaximizedWindowBehavior.flatMap(MaximizedWindowBehavior.init(rawValue:)) ?? DefaultValues.maximizedWindowBehavior)
-        self.hidesSystemDock = storedHidesSystemDock ?? DefaultValues.hidesSystemDock
+        self.hidesSystemDock =
+            SystemDockVisibilityStoredPreferencePolicy.resolve(
+                storedValue: storedHidesSystemDock
+            )
         self.overflowBehavior = (storedOverflowBehavior.flatMap(DockOverflowBehavior.init(rawValue:)) ?? DefaultValues.overflowBehavior)
         self.windowAxisSizing = (storedWindowAxisSizing.flatMap(DockWindowAxisSizing.init(rawValue:)) ?? DefaultValues.windowAxisSizing)
         self.enablesWidgetHoverPreview = storedEnablesWidgetHoverPreview ?? DefaultValues.enablesWidgetHoverPreview
@@ -4799,6 +5149,42 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         self.hasSeenDockEditorHint = storedHasSeenDockEditorHint ?? DefaultValues.hasSeenDockEditorHint
         self.legacyProfileSnapshotDecodeFailures = profileSnapshotDecodeFailures
         self.photoFrameBookmarks = (defaults.array(forKey: Keys.photoFrameBookmarks) as? [Data]) ?? []
+        self.optionalAppearanceModes = storedOptionalAppearanceModes
+
+        let initialHoverMigrationAction =
+            TileHoverEffectsMigrationPolicy.action(
+                storedMasterValue: storedTileHoverEffectsEnabled,
+                storedProvenance:
+                    storedTileHoverEffectsMasterProvenance,
+                storedMigrationVersion:
+                    storedTileHoverEffectsMigrationVersion,
+                hasUsableThemeBootstrap: false,
+                isExistingInstall:
+                    hadExistingDockyPreferenceState,
+                legacyToggleHadEffectiveColor: false
+            )
+        self.tileHoverEffectsMigrationPending =
+            initialHoverMigrationAction
+                == .deferUntilUsableTheme
+        self.tileHoverEffectsMigrationWasExistingInstall =
+            hadExistingDockyPreferenceState
+        if tileHoverEffectsMigrationPending,
+           storedHoverInstallClassification == nil {
+            defaults.set(
+                hoverInstallClassification.rawValue,
+                forKey:
+                    Keys.tileHoverEffectsInstallClassification
+            )
+        }
+
+        if SystemDockVisibilityStoredPreferencePolicy.shouldMaterialize(
+            storedValue: storedHidesSystemDock
+        ) {
+            defaults.set(
+                hidesSystemDock,
+                forKey: Keys.hidesSystemDock
+            )
+        }
 
         // Load the user-override set, then run the one-shot migration
         // that infers overrides from existing UserDefaults presence.
@@ -4845,31 +5231,313 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
             persistUserOverriddenAppearanceKeys()
             defaults.set(2, forKey: Keys.appearanceOverrideMigrationVersion)
         }
+
+        // The explicit optional-source mode is authoritative when present.
+        // Keep the compatibility override set synchronized so the Themes
+        // screen counts disabled sources and "Clear Overrides" remains a
+        // complete return-to-theme operation.
+        var reconciledOverrides = userOverriddenAppearanceKeys
+        for (key, mode) in optionalAppearanceModes {
+            switch mode {
+            case .inherit:
+                reconciledOverrides.remove(key)
+            case .disabled, .custom:
+                reconciledOverrides.insert(key)
+            }
+        }
+        if reconciledOverrides != userOverriddenAppearanceKeys {
+            userOverriddenAppearanceKeys = reconciledOverrides
+            persistUserOverriddenAppearanceKeys()
+        }
+    }
+
+    /// Completes the one-time hover-master migration after ThemeManager has
+    /// published its active manifest. The legacy Settings toggle reflected
+    /// the effective decoded background color, not raw key presence, so this
+    /// decision cannot be made correctly during synchronous preferences init.
+    func resolveTileHoverEffectsMigrationAfterThemeBootstrap() {
+        guard tileHoverEffectsMigrationPending else { return }
+
+        let hasDecodedCustomColor =
+            tileHoverBackgroundColor != nil
+        let hasValidatedThemeColor =
+            ThemeManager.shared.activeManifest?
+                .appearance.tile?.hover?.backgroundColor?.nsColor
+                != nil
+
+        let legacyToggleHadEffectiveColor =
+            TileHoverEffectsMigrationPolicy
+                .legacyToggleHadEffectiveColor(
+                    explicitMode:
+                        optionalAppearanceModes[
+                            Keys.tileHoverBackgroundColor
+                        ],
+                    legacyAppearanceOverrideIsSet:
+                        userOverriddenAppearanceKeys.contains(
+                            Keys.tileHoverBackgroundColor
+                        ),
+                    hasDecodedCustomColor:
+                        hasDecodedCustomColor,
+                    hasValidatedThemeColor:
+                        hasValidatedThemeColor
+                )
+
+        let storedMasterValue =
+            defaults.object(
+                forKey: Keys.tileHoverEffectsEnabled
+            ) as? Bool
+        let action = TileHoverEffectsMigrationPolicy.action(
+                storedMasterValue: storedMasterValue,
+                storedProvenance:
+                    defaults.string(
+                        forKey:
+                            Keys.tileHoverEffectsMasterProvenance
+                    ),
+                storedMigrationVersion:
+                    defaults.object(
+                        forKey:
+                            Keys.tileHoverEffectsMigrationVersion
+                    ) as? Int,
+                hasUsableThemeBootstrap:
+                    ThemeManager.shared.hasLoadedCatalog,
+                isExistingInstall:
+                    tileHoverEffectsMigrationWasExistingInstall,
+                legacyToggleHadEffectiveColor:
+                    legacyToggleHadEffectiveColor
+            )
+
+        let resolved: Bool
+        let outcome: String
+        switch action {
+        case .deferUntilUsableTheme:
+            DiagnosticsTrace.shared.record(
+                .preferences,
+                "tileHoverMasterMigrationDeferred",
+                fields: [
+                    "themeCatalogLoaded":
+                        ThemeManager.shared.hasLoadedCatalog,
+                ]
+            )
+            return
+        case .keepStored(let stored):
+            tileHoverEffectsMigrationPending = false
+            resolved = stored
+            outcome = "keptStored"
+            applyTileHoverEffectsMasterRuntimeValue(stored)
+        case .materialize(let migrated):
+            tileHoverEffectsMigrationPending = false
+            resolved = migrated
+            outcome = "materializedV2"
+            applyTileHoverEffectsMasterRuntimeValue(migrated)
+            persistTileHoverEffectsMaster(
+                migrated,
+                provenance: .automaticMigration
+            )
+        }
+        defaults.removeObject(
+            forKey: Keys.tileHoverEffectsInstallClassification
+        )
+
+        DiagnosticsTrace.shared.record(
+            .preferences,
+            "tileHoverMasterMigrationCompleted",
+            fields: [
+                "existingInstall":
+                    tileHoverEffectsMigrationWasExistingInstall,
+                "legacyToggleHadEffectiveColor":
+                    legacyToggleHadEffectiveColor,
+                "resolvedEnabled": resolved,
+                "outcome": outcome,
+                "themeCatalogLoaded":
+                    ThemeManager.shared.hasLoadedCatalog,
+            ]
+        )
+    }
+
+    private func applyTileHoverEffectsMasterRuntimeValue(
+        _ value: Bool
+    ) {
+        guard tileHoverEffectsEnabled != value else { return }
+        isApplyingTileHoverEffectsMigration = true
+        defer { isApplyingTileHoverEffectsMigration = false }
+        tileHoverEffectsEnabled = value
+    }
+
+    private func persistTileHoverEffectsMaster(
+        _ value: Bool,
+        provenance: TileHoverEffectsMasterProvenance
+    ) {
+        defaults.set(value, forKey: Keys.tileHoverEffectsEnabled)
+        defaults.set(
+            provenance.rawValue,
+            forKey: Keys.tileHoverEffectsMasterProvenance
+        )
+        defaults.set(
+            TileHoverEffectsMigrationPolicy.currentVersion,
+            forKey: Keys.tileHoverEffectsMigrationVersion
+        )
     }
 
     func applySystemDockVisibilityPreference() {
-        if hidesSystemDock {
-            SystemDockVisibilityService.shared.hide()
-            syncSystemDockPositionIfNeeded()
+        applySystemDockVisibilityMutation(
+            requestedValue: hidesSystemDock,
+            persistSameValue: false
+        )
+    }
+
+    func setHidesSystemDock(_ enabled: Bool) {
+        applySystemDockVisibilityMutation(
+            requestedValue: enabled,
+            persistSameValue: true
+        )
+    }
+
+    var hasSystemDockRecoverySnapshot: Bool {
+        SystemDockVisibilityService.shared.hasSnapshot
+    }
+
+    func setLaunchpadOverlayEnabled(_ enabled: Bool) {
+        let result =
+            LaunchpadHotKeyService.shared.setEnabled(
+                enabled,
+                shortcut: launchpadShortcut
+            )
+        let resolution =
+            GlobalHotKeyEnablementPreferencePolicy.resolve(
+                previousValue: enablesLaunchpadOverlay,
+                requestedValue: enabled,
+                expectsRegistrationWhenEnabled:
+                    launchpadShortcut.isValid,
+                result: result
+            )
+        launchpadShortcutErrorMessage =
+            resolution.errorMessage
+        guard resolution.shouldPersist else { return }
+
+        if enablesLaunchpadOverlay != resolution.value {
+            enablesLaunchpadOverlay = resolution.value
         } else {
-            SystemDockVisibilityService.shared.restore()
+            defaults.set(
+                resolution.value,
+                forKey: Keys.enablesLaunchpadOverlay
+            )
+        }
+        if !resolution.value {
+            LaunchpadOverlayService.shared.dismiss()
         }
     }
 
-    func applyOpenAtLoginPreference() {
-        guard !LaunchAtLoginService.shared.setEnabled(opensAtLogin) else {
-            return
-        }
+    @discardableResult
+    func setLaunchpadShortcut(
+        _ shortcut: KeyboardShortcut
+    ) -> Bool {
+        let result =
+            LaunchpadHotKeyService.shared
+                .replaceHotKey(with: shortcut)
+        let resolution =
+            GlobalHotKeyPreferencePolicy.resolve(result: result)
+        launchpadShortcutErrorMessage =
+            resolution.errorMessage
+        guard resolution.shouldCommit else { return false }
 
-        syncOpenAtLoginPreferenceFromSystem()
+        if launchpadShortcut != shortcut {
+            launchpadShortcut = shortcut
+        } else {
+            persistLaunchpadShortcut(shortcut)
+        }
+        return true
     }
 
-    func enableOpenAtLoginOnFirstLaunchIfNeeded() {
-        guard defaults.object(forKey: Keys.opensAtLogin) == nil else {
-            return
-        }
+    func recordLaunchpadHotKeyRegistrationResult(
+        _ result: GlobalHotKeyRegistrationResult
+    ) {
+        launchpadShortcutErrorMessage =
+            GlobalHotKeyPreferencePolicy.resolve(
+                result: result
+            ).errorMessage
+    }
 
-        opensAtLogin = true
+    func setWindowSwitcherEnabled(_ enabled: Bool) {
+        let result =
+            WindowSwitcherService.shared.setEnabled(
+                enabled,
+                shortcut: windowSwitcherShortcut
+            )
+        let resolution =
+            GlobalHotKeyEnablementPreferencePolicy.resolve(
+                previousValue: enablesWindowSwitcher,
+                requestedValue: enabled,
+                expectsRegistrationWhenEnabled:
+                    windowSwitcherShortcut.isValid,
+                result: result
+            )
+        windowSwitcherShortcutErrorMessage =
+            resolution.errorMessage
+        guard resolution.shouldPersist else { return }
+
+        if enablesWindowSwitcher != resolution.value {
+            enablesWindowSwitcher = resolution.value
+        } else {
+            defaults.set(
+                resolution.value,
+                forKey: Keys.enablesWindowSwitcher
+            )
+        }
+        if !resolution.value {
+            WindowSwitcherService.shared.dismiss()
+        }
+    }
+
+    @discardableResult
+    func setWindowSwitcherShortcut(
+        _ shortcut: KeyboardShortcut
+    ) -> Bool {
+        let result =
+            WindowSwitcherService.shared
+                .replaceHotKey(with: shortcut)
+        let resolution =
+            GlobalHotKeyPreferencePolicy.resolve(result: result)
+        windowSwitcherShortcutErrorMessage =
+            resolution.errorMessage
+        guard resolution.shouldCommit else { return false }
+
+        if windowSwitcherShortcut != shortcut {
+            windowSwitcherShortcut = shortcut
+        } else {
+            persistWindowSwitcherShortcut(shortcut)
+        }
+        return true
+    }
+
+    func recordWindowSwitcherHotKeyRegistrationResult(
+        _ result: GlobalHotKeyRegistrationResult
+    ) {
+        windowSwitcherShortcutErrorMessage =
+            GlobalHotKeyPreferencePolicy.resolve(
+                result: result
+            ).errorMessage
+    }
+
+    func refreshOpenAtLoginStatus() {
+        let observedStatus =
+            LaunchAtLoginService.shared.observedStatus
+        let presentation =
+            LaunchAtLoginStatusPresentationPolicy.resolve(
+                desiredValue: opensAtLogin,
+                observedStatus: observedStatus
+            )
+
+        openAtLoginObservedStatus = observedStatus
+        openAtLoginRequiresApproval =
+            presentation.requiresApproval
+        openAtLoginErrorMessage = presentation.mismatchMessage
+    }
+
+    func setOpenAtLogin(_ enabled: Bool) {
+        applyOpenAtLoginMutation(
+            requestedValue: enabled,
+            persistSameValue: true
+        )
     }
 
     /// Resets only the preferences exposed in Settings → Appearance
@@ -4915,6 +5583,7 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         tileIconPadding = DefaultValues.tileIconPadding
 
         // Tile Hover Effect
+        tileHoverEffectsEnabled = DefaultValues.tileHoverEffectsEnabled
         tileHoverOpacity = nil
         tileHoverScale = nil
         tileHoverBackgroundColor = nil
@@ -5016,15 +5685,18 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         showsGroupedOpenedAppsBackdrop = DefaultValues.showsGroupedOpenedAppsBackdrop
 
         // Widgets
-        enablesWidgetHoverPreview = DefaultValues.enablesWidgetHoverPreview
+        enablesWidgetHoverPreview =
+            DockyBehaviorResetSafetyPolicy.enablesWidgetHoverPreview
         widgetHoverPreviewSpans = DefaultValues.widgetHoverPreviewSpans
         widgetHoverPreviewDelay = DefaultValues.widgetHoverPreviewDelay
 
         // Launch
-        opensAtLogin = DefaultValues.opensAtLogin
+        setOpenAtLogin(DockyBehaviorResetSafetyPolicy.opensAtLogin)
 
         // System dock
-        hidesSystemDock = DefaultValues.hidesSystemDock
+        setHidesSystemDock(
+            DockyBehaviorResetSafetyPolicy.hidesSystemDock
+        )
 
         // Clear only theme overrides for behavior values reset above.
         // Appearance and DockSettings-owned overrides remain untouched.
@@ -5078,7 +5750,6 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         }
 
         // Launchpad and Start Menu.
-        enablesLaunchpadOverlay = DefaultValues.enablesLaunchpadOverlay
         enablesStartMenuOverlay = DefaultValues.enablesStartMenuOverlay
         opensStartMenuFromFinderTile = DefaultValues.opensStartMenuFromFinderTile
         launchpadOverlayTransparency = DefaultValues.launchpadOverlayTransparency
@@ -5093,14 +5764,25 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         launchpadBackgroundBlursImage = DefaultValues.launchpadBackgroundBlursImage
         launchpadLayoutAxis = DefaultValues.launchpadLayoutAxis
         launchpadSortMode = DefaultValues.launchpadSortMode
-        launchpadShortcut = DefaultValues.launchpadShortcut
+        if setLaunchpadShortcut(DefaultValues.launchpadShortcut) {
+            setLaunchpadOverlayEnabled(
+                DefaultValues.enablesLaunchpadOverlay
+            )
+        }
 
         // Window Manager.
+        enablesWindowHoverPreview =
+            DefaultValues.enablesWindowHoverPreview
         windowPreviewHoverDelay = DefaultValues.windowPreviewHoverDelay
         windowPreviewLayout = DefaultValues.windowPreviewLayout
-        enablesWindowSwitcher = DefaultValues.enablesWindowSwitcher
         includesMinimizedWindows = DefaultValues.includesMinimizedWindows
-        windowSwitcherShortcut = DefaultValues.windowSwitcherShortcut
+        if setWindowSwitcherShortcut(
+            DefaultValues.windowSwitcherShortcut
+        ) {
+            setWindowSwitcherEnabled(
+                DefaultValues.enablesWindowSwitcher
+            )
+        }
         showsWindowSwitcherFocusPreview = DefaultValues.showsWindowSwitcherFocusPreview
         windowSwitcherPreviewMode = DefaultValues.windowSwitcherPreviewMode
         windowSwitcherLayout = DefaultValues.windowSwitcherLayout
@@ -5124,19 +5806,83 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
             orientation = .bottom
         }
 
-        SystemDockVisibilityService.shared.setOrientation(orientation)
+        let result =
+            SystemDockVisibilityService.shared
+                .setOrientation(orientation)
+        if case .failed(let message) = result {
+            systemDockVisibilityErrorMessage = message
+        }
     }
 
-    private func syncOpenAtLoginPreferenceFromSystem() {
-        let actualValue = LaunchAtLoginService.shared.isEnabled
-        guard opensAtLogin != actualValue else {
-            defaults.set(actualValue, forKey: Keys.opensAtLogin)
-            return
+    private func applySystemDockVisibilityMutation(
+        requestedValue: Bool,
+        persistSameValue: Bool
+    ) {
+        let result: SystemDockVisibilityMutationResult
+        if requestedValue {
+            result = SystemDockVisibilityService.shared.hide()
+        } else {
+            result = SystemDockVisibilityService.shared.restore()
         }
 
-        isSyncingOpenAtLoginPreference = true
-        opensAtLogin = actualValue
-        isSyncingOpenAtLoginPreference = false
+        let resolution =
+            SystemDockVisibilityPreferencePolicy.resolve(
+                previousValue: hidesSystemDock,
+                requestedValue: requestedValue,
+                result: result
+            )
+        systemDockVisibilityErrorMessage =
+            resolution.errorMessage
+        guard resolution.shouldPersist else { return }
+
+        if hidesSystemDock != resolution.value {
+            hidesSystemDock = resolution.value
+        } else if persistSameValue {
+            defaults.set(
+                resolution.value,
+                forKey: Keys.hidesSystemDock
+            )
+        }
+
+        if resolution.value {
+            syncSystemDockPositionIfNeeded()
+        }
+    }
+
+    private func applyOpenAtLoginMutation(
+        requestedValue: Bool,
+        persistSameValue: Bool
+    ) {
+        let service = LaunchAtLoginService.shared
+        let result = service.setEnabled(requestedValue)
+        let resolution = LaunchAtLoginPreferencePolicy.resolve(
+            previousValue: opensAtLogin,
+            requestedValue: requestedValue,
+            result: result
+        )
+        let observedStatus = service.observedStatus
+        let presentation =
+            LaunchAtLoginStatusPresentationPolicy.resolve(
+                desiredValue: resolution.value,
+                observedStatus: observedStatus
+            )
+
+        openAtLoginObservedStatus = observedStatus
+        openAtLoginRequiresApproval =
+            resolution.requiresApproval
+            || presentation.requiresApproval
+        openAtLoginErrorMessage =
+            resolution.errorMessage
+            ?? presentation.mismatchMessage
+        guard resolution.shouldPersist else { return }
+        if opensAtLogin != resolution.value {
+            opensAtLogin = resolution.value
+        } else if persistSameValue {
+            defaults.set(
+                resolution.value,
+                forKey: Keys.opensAtLogin
+            )
+        }
     }
 
     private func persistWindowTintColor(_ color: DockColor?) {
@@ -5289,7 +6035,9 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    private static func normalizedBundleIdentifiers(_ bundleIdentifiers: [String]) -> [String] {
+    nonisolated private static func normalizedBundleIdentifiers(
+        _ bundleIdentifiers: [String]
+    ) -> [String] {
         Array(Set(bundleIdentifiers.filter { !$0.isEmpty })).sorted {
             $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
         }

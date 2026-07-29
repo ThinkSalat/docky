@@ -603,6 +603,44 @@ struct TileView: View {
                 TilePressService.shared.registerHover(tileID: tile.id, isHovering: isHovering)
                 updateWidgetExpansionPresentation(isHovering: isHovering, sourceFrame: globalTileFrame)
             }
+            .onChange(of: preferences.tileHoverEffectsEnabled) {
+                updateTooltipPresentation()
+                updateWindowPreviewPresentation(isHovering: isHovering)
+                updateWidgetExpansionPresentation(
+                    isHovering: isHovering,
+                    sourceFrame: globalTileFrame
+                )
+            }
+            .onChange(of: preferences.enablesWidgetHoverPreview) {
+                updateWidgetExpansionPresentation(
+                    isHovering: isHovering,
+                    sourceFrame: globalTileFrame
+                )
+            }
+            .onChange(of: preferences.widgetHoverPreviewSpans) {
+                updateWidgetExpansionPresentation(
+                    isHovering: isHovering,
+                    sourceFrame: globalTileFrame
+                )
+            }
+            .onChange(of: preferences.widgetHoverPreviewDelay) {
+                guard widgetExpansion.activeSourceTileID != tile.id else {
+                    return
+                }
+                updateWidgetExpansionPresentation(
+                    isHovering: isHovering,
+                    sourceFrame: globalTileFrame
+                )
+            }
+            .onChange(of: preferences.enablesWindowHoverPreview) {
+                updateWindowPreviewPresentation(isHovering: isHovering)
+            }
+            .onChange(of: preferences.windowPreviewHoverDelay) {
+                guard windowPreview.activeSourceTileID != tile.id else {
+                    return
+                }
+                updateWindowPreviewPresentation(isHovering: isHovering)
+            }
             .onDisappear {
                 widgetExpansionTask?.cancel()
                 widgetExpansionTask = nil
@@ -1011,7 +1049,8 @@ struct TileView: View {
     }
 
     private var effectiveTileSize: CGFloat {
-        renderedTileSize ?? layout.scaled(dockSettings.displayTileSize)
+        renderedTileSize
+            ?? layout.scaled(dockSettings.effectiveTileSize)
     }
 
     private func renderedWidgetSpan(for span: TileSpan) -> TileSpan {
@@ -1261,15 +1300,25 @@ struct TileView: View {
     /// and `.appFolder` tiles participate, the app-folder case aggregates
     /// windows from every contained app.
     private func updateWindowPreviewPresentation(isHovering: Bool) {
+        windowPreviewDelayTask?.cancel()
+        windowPreviewDelayTask = nil
+
+        guard TileHoverEffectsRuntimePolicy.allowsHoverPresentation(
+            isEnabled: preferences.tileHoverEffectsEnabled,
+            featureEnabled: preferences.enablesWindowHoverPreview
+        ) else {
+            WindowPreviewWindowController.shared.dismiss(
+                sourceTileID: tile.id
+            )
+            return
+        }
+
         // Freeze preview state while a context menu is open on this tile ,
         // the menu's mouse handling can drop us out of hover and prematurely
         // dismiss, or restart the dwell once the user moves off. The
         // preview's own hover monitor still keeps it alive if the cursor is
         // over it; we just don't react from the tile side.
         if isContextMenuPresented { return }
-
-        windowPreviewDelayTask?.cancel()
-        windowPreviewDelayTask = nil
 
         let bundleIDs = windowPreviewBundleIdentifiers
         guard !bundleIDs.isEmpty,
@@ -1298,7 +1347,16 @@ struct TileView: View {
         let delay = max(0, preferences.windowPreviewHoverDelay)
         windowPreviewDelayTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled, self.isHovering else { return }
+            guard !Task.isCancelled,
+                  TileHoverEffectsRuntimePolicy.allowsHoverPresentation(
+                      isEnabled: preferences.tileHoverEffectsEnabled,
+                      featureEnabled:
+                          preferences.enablesWindowHoverPreview
+                  ),
+                  self.isHovering
+            else {
+                return
+            }
             WindowPreviewWindowController.shared.present(
                 forBundleIdentifiers: bundleIDs,
                 sourceTileID: tile.id,
@@ -1356,9 +1414,24 @@ struct TileView: View {
         widgetExpansionTask?.cancel()
         widgetExpansionTask = nil
 
-        guard preferences.enablesWidgetHoverPreview,
-              preferences.widgetHoverPreviewSpans.contains(expandableWidgetRenderedSpan),
-              isHovering,
+        guard TileHoverEffectsRuntimePolicy.allowsHoverPresentation(
+                  isEnabled: preferences.tileHoverEffectsEnabled,
+                  featureEnabled:
+                      preferences.enablesWidgetHoverPreview
+              ),
+              preferences.widgetHoverPreviewSpans.contains(
+                  expandableWidgetRenderedSpan
+              )
+        else {
+            // A policy change is authoritative even while the cursor is over
+            // the preview window. Do not use the hover-out grace period here.
+            WidgetExpansionWindowController.shared.dismiss(
+                sourceTileID: tile.id
+            )
+            return
+        }
+
+        guard isHovering,
               let widget = expandableWidget,
               !isContextMenuPresented,
               !editMode.isActive
@@ -1370,7 +1443,20 @@ struct TileView: View {
         widgetExpansionTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(max(0, preferences.widgetHoverPreviewDelay)))
             guard !Task.isCancelled else { return }
-            guard self.isHovering, !self.isContextMenuPresented, !self.editMode.isActive else { return }
+            guard TileHoverEffectsRuntimePolicy.allowsHoverPresentation(
+                      isEnabled: preferences.tileHoverEffectsEnabled,
+                      featureEnabled:
+                          preferences.enablesWidgetHoverPreview
+                  ),
+                  preferences.widgetHoverPreviewSpans.contains(
+                      expandableWidgetRenderedSpan
+                  ),
+                  self.isHovering,
+                  !self.isContextMenuPresented,
+                  !self.editMode.isActive
+            else {
+                return
+            }
             WidgetExpansionWindowController.shared.present(
                 widget: widget,
                 sourceTileID: tile.id,
@@ -1405,7 +1491,12 @@ struct TileView: View {
         tooltipDelayTask?.cancel()
         tooltipDelayTask = nil
 
-        let shouldShow = isHovering
+        let shouldShow =
+            TileHoverEffectsRuntimePolicy.allowsHoverPresentation(
+                isEnabled: preferences.tileHoverEffectsEnabled,
+                featureEnabled: true
+            )
+            && isHovering
             && tooltipTitle != nil
             && !isFolderPopoverPresented
             && !isFolderListMenuPresented

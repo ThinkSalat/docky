@@ -459,7 +459,8 @@ struct FolderFanPresenter: NSViewRepresentable {
             // cursor sits directly on the tile. Used by
             // `FolderFanView` to scale per-item spacing so a
             // magnified tile produces a proportionally wider fan.
-            let baseTileSize = DockSettingsService.shared.displayTileSize
+            let baseTileSize =
+                DockSettingsService.shared.effectiveTileSize
             let magnificationFactor: CGFloat = baseTileSize > 0
                 ? tileSide / baseTileSize
                 : 1.0
