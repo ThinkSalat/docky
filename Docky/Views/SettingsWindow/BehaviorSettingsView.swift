@@ -55,7 +55,7 @@ struct BehaviorSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Stored placement, visibility, app-tile click, app-folder, widget-preview, launch, and system-dock values will return to their built-in defaults, and their behavior theme overrides will be cleared. An active theme can still supply supported behavior values. Appearance, app icons, and other settings are unaffected. This cannot be undone.")
+            Text("Stored placement, visibility, app-tile click, and app-folder values will return to their defaults. For safe recovery, widget hover previews, Open at Login, and Hide System Dock will be turned off. Behavior theme overrides will be cleared. Appearance, app icons, and other settings are unaffected. This cannot be undone.")
         }
     }
 
@@ -73,7 +73,7 @@ struct BehaviorSettingsView: View {
                     Spacer()
                 }
 
-                Text("Reverts behavior settings (placement, visibility, app-tile click, app folders, widget previews, launch, system Dock) to their built-in defaults and clears only their behavior theme overrides.")
+                Text("Reverts behavior settings and clears only their behavior theme overrides. For safe recovery, widget hover previews, Open at Login, and Hide System Dock are turned off.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -349,7 +349,10 @@ struct BehaviorSettingsView: View {
 
                     Spacer()
 
-                    Picker("Window Axis Size", selection: $preferences.windowAxisSizing) {
+                    Picker(
+                        "Window Axis Size",
+                        selection: windowAxisSizingBinding
+                    ) {
                         ForEach(DockWindowAxisSizing.allCases) { sizing in
                             Text(sizing.title).tag(sizing)
                         }
@@ -365,7 +368,10 @@ struct BehaviorSettingsView: View {
             .padding(.vertical, 4)
 
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Show Active/Pinned Separator", isOn: $preferences.showsActivePinnedSeparator)
+                Toggle(
+                    "Show Active/Pinned Separator",
+                    isOn: activePinnedSeparatorBinding
+                )
                     .font(.headline)
 
                 Text("When turned off, unpinned running apps are merged into the pinned section so the dock behaves like a single app strip.")
@@ -522,11 +528,18 @@ struct BehaviorSettingsView: View {
                 Toggle("Show Expanded Preview on Hover", isOn: $preferences.enablesWidgetHoverPreview)
                     .font(.headline)
 
-                Text("When enabled, hovering an expandable widget tile shows a larger preview in a separate window. Turn this off to keep widgets at their pinned size.")
+                Text("When enabled, hovering an expandable widget tile shows a larger preview in a separate window. The Tile Hover Effects master switch in Appearance must also be enabled.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                if !preferences.tileHoverEffectsEnabled {
+                    Text("Disabled by the Tile Hover Effects master switch. This preview choice is preserved.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(.vertical, 4)
+            .disabled(!preferences.tileHoverEffectsEnabled)
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Apply To Sizes")
@@ -543,7 +556,10 @@ struct BehaviorSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 4)
-            .disabled(!preferences.enablesWidgetHoverPreview)
+            .disabled(
+                !preferences.tileHoverEffectsEnabled
+                    || !preferences.enablesWidgetHoverPreview
+            )
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Hover Preview Delay")
@@ -556,10 +572,10 @@ struct BehaviorSettingsView: View {
                     .labelsHidden()
 
                     Text(preferences.widgetHoverPreviewDelay == 0
-                        ? "Off"
+                        ? "Immediate"
                         : "\(String(format: "%.2f", preferences.widgetHoverPreviewDelay)) s")
                         .foregroundStyle(.secondary)
-                        .frame(width: 56, alignment: .trailing)
+                        .frame(width: 72, alignment: .trailing)
                 }
 
                 Text("Time the cursor must rest on a widget before its expanded preview window appears. Set to zero for an immediate preview.")
@@ -567,7 +583,10 @@ struct BehaviorSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 4)
-            .disabled(!preferences.enablesWidgetHoverPreview)
+            .disabled(
+                !preferences.tileHoverEffectsEnabled
+                    || !preferences.enablesWidgetHoverPreview
+            )
         }
     }
 
@@ -575,12 +594,31 @@ struct BehaviorSettingsView: View {
     private var launchSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Open at Login", isOn: $preferences.opensAtLogin)
+                Toggle("Open at Login", isOn: openAtLoginBinding)
                     .font(.headline)
 
                 Text("Registers Docky as a login item so it starts automatically after you sign in.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Text(
+                    "macOS status: "
+                        + openAtLoginObservedStatusTitle
+                )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                if preferences.openAtLoginRequiresApproval {
+                    Text("macOS has the login item pending approval. Allow Docky in System Settings → General → Login Items.")
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let error = preferences.openAtLoginErrorMessage {
+                    Text("Open at Login could not be changed: \(error)")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(.vertical, 4)
         }
@@ -590,7 +628,10 @@ struct BehaviorSettingsView: View {
     private var systemDockSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Hide System Dock", isOn: $preferences.hidesSystemDock)
+                Toggle(
+                    "Hide System Dock",
+                    isOn: hidesSystemDockBinding
+                )
                     .font(.headline)
 
                 Text("Forces the macOS Dock to autohide with a long delay, disables bouncing and launch animations, and keeps the system Dock aligned with Docky's explicit edge selection while this stays on. Docky snapshots your current Dock settings first and restores them when you turn this off or quit Docky. This no longer affects Docky's own autohide delay.")
@@ -598,12 +639,85 @@ struct BehaviorSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 Button("Restore System Dock") {
-                    preferences.hidesSystemDock = false
+                    preferences.setHidesSystemDock(false)
                 }
-                .disabled(!preferences.hidesSystemDock)
+                .disabled(
+                    !preferences.hidesSystemDock
+                        && !preferences.hasSystemDockRecoverySnapshot
+                )
+
+                if let error =
+                    preferences.systemDockVisibilityErrorMessage
+                {
+                    Text(
+                        "System Dock settings could not be changed: "
+                            + error
+                    )
+                        .foregroundStyle(.red)
+                        .fixedSize(
+                            horizontal: false,
+                            vertical: true
+                        )
+                }
             }
             .padding(.vertical, 4)
         }
+    }
+
+    private var openAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { preferences.opensAtLogin },
+            set: { preferences.setOpenAtLogin($0) }
+        )
+    }
+
+    private var hidesSystemDockBinding: Binding<Bool> {
+        Binding(
+            get: { preferences.hidesSystemDock },
+            set: { preferences.setHidesSystemDock($0) }
+        )
+    }
+
+    private var openAtLoginObservedStatusTitle: String {
+        switch preferences.openAtLoginObservedStatus {
+        case .enabled:
+            "Enabled"
+        case .disabled:
+            "Disabled"
+        case .requiresApproval:
+            "Pending approval"
+        case .unavailable:
+            "Unavailable"
+        }
+    }
+
+    private var windowAxisSizingBinding:
+        Binding<DockWindowAxisSizing> {
+        Binding(
+            get: { preferences.effectiveWindowAxisSizing },
+            set: {
+                preferences.commitUserAppearanceValue(
+                    $0,
+                    for: .windowAxisSizing,
+                    at: \.windowAxisSizing
+                )
+            }
+        )
+    }
+
+    private var activePinnedSeparatorBinding: Binding<Bool> {
+        Binding(
+            get: {
+                preferences.effectiveShowsActivePinnedSeparator
+            },
+            set: {
+                preferences.commitUserAppearanceValue(
+                    $0,
+                    for: .showsActivePinnedSeparator,
+                    at: \.showsActivePinnedSeparator
+                )
+            }
+        )
     }
 
     @ViewBuilder

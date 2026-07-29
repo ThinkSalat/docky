@@ -539,6 +539,19 @@ private enum DockPresentationComposer {
                 if appendedTrailingSection {
                     continue
                 }
+                if draggedPinnedDestinationIndex
+                    != nil,
+                   (
+                    tile.id == draggedTileID
+                        || additionalTileIDs
+                        .contains(tile.id)
+                   ) {
+                    // A running/unpinned app being promoted has one preview
+                    // identity in `pinnedBaseTiles`. Suppress its original
+                    // running-strip copy instead of relying on `uniqueTiles`
+                    // to discard a duplicate after composition.
+                    continue
+                }
                 if groupedOpenedAppFolderID(for: tile.id) != nil {
                     continue
                 }

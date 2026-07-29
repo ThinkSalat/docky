@@ -50,8 +50,8 @@ final class TileStore: ObservableObject {
         [String: Task<Void, Never>] = [:]
     private var systemDockReloadTask: Task<Void, Never>?
     private var systemDockReloadGeneration: UInt64 = 0
-    private var pendingSystemDockPreferenceSync = false
-    private var pendingSystemDockImportCompletion = false
+    private var pendingSystemDockPreferenceSync:
+        SystemDockPreferenceSyncRequest?
     private var expandedInlineAppFolderIDs: Set<String> = [] {
         didSet {
             guard expandedInlineAppFolderIDs != oldValue else { return }
@@ -104,7 +104,6 @@ final class TileStore: ObservableObject {
         //, calling `rebuildTiles` etc. then is safe and idempotent.)
         observeChanges { [weak self] in
             _ = DockyPreferences.shared.pinnedItems
-            self?.synchronizeAppWidgetDisplaysWithFolders()
             self?.refreshPinnedTilesFromPreferences()
             self?.rebuildTiles()
         }
@@ -165,8 +164,13 @@ final class TileStore: ObservableObject {
         reloadSystemDockState(syncPreferencesFromSystemDock: false)
     }
 
-    func refreshAfterDockyEditedSystemDock() {
-        reloadSystemDockState(syncPreferencesFromSystemDock: true)
+    func refreshAfterDockyEditedSystemDock(
+        credentials: ProfileMutationCredentials
+    ) {
+        reloadSystemDockState(
+            syncPreferencesFromSystemDock: true,
+            preferenceSyncCredentials: credentials
+        )
     }
 
     func syncPreferencesFromSystemDockIfNeeded() {
@@ -174,33 +178,57 @@ final class TileStore: ObservableObject {
             return
         }
 
-        guard preferences.pinnedItems.isEmpty, preferences.trailingItems.isEmpty else {
+        let profileService = ProfileService.shared
+        let credentials =
+            profileService.captureMutationCredentials()
+        guard let profile = profileService.activeProfile,
+              profile.id == credentials.profileID else {
+            return
+        }
+        guard profile.pinnedItems.isEmpty,
+              profile.trailingItems.isEmpty else {
             hasImportedSystemDockPreferences = true
             return
         }
 
         reloadSystemDockState(
             syncPreferencesFromSystemDock: true,
+            preferenceSyncCredentials: credentials,
             marksSystemImportComplete: true
         )
     }
 
     private func reloadSystemDockState(
         syncPreferencesFromSystemDock: Bool,
+        preferenceSyncCredentials:
+            ProfileMutationCredentials? = nil,
         marksSystemImportComplete: Bool = false
     ) {
-        pendingSystemDockPreferenceSync =
-            pendingSystemDockPreferenceSync
-            || syncPreferencesFromSystemDock
-        pendingSystemDockImportCompletion =
-            pendingSystemDockImportCompletion
-            || marksSystemImportComplete
+        if syncPreferencesFromSystemDock {
+            guard let preferenceSyncCredentials else {
+                assertionFailure(
+                    "A system-Dock preference sync requires "
+                        + "pre-await profile credentials."
+                )
+                return
+            }
+            pendingSystemDockPreferenceSync =
+                SystemDockPreferenceSyncRequest(
+                    credentials:
+                        preferenceSyncCredentials,
+                    marksSystemImportComplete:
+                        marksSystemImportComplete,
+                    reason:
+                        marksSystemImportComplete
+                        ? "initialSystemDockImport"
+                        : "systemDockEditorSync"
+                )
+        }
 
         systemDockReloadGeneration &+= 1
         let generation = systemDockReloadGeneration
-        let shouldSyncPreferences = pendingSystemDockPreferenceSync
-        let shouldMarkImportComplete =
-            pendingSystemDockImportCompletion
+        let preferenceSyncRequest =
+            pendingSystemDockPreferenceSync
 
         systemDockReloadTask?.cancel()
         systemDockReloadTask = Task { [weak self] in
@@ -214,13 +242,17 @@ final class TileStore: ObservableObject {
             }
 
             self.systemDockReloadTask = nil
-            self.pendingSystemDockPreferenceSync = false
-            self.pendingSystemDockImportCompletion = false
-            self.applySystemDockSnapshot(
-                snapshot,
-                syncPreferencesFromSystemDock: shouldSyncPreferences
-            )
-            if shouldMarkImportComplete, snapshot != nil {
+            self.pendingSystemDockPreferenceSync = nil
+            let didApplyPreferenceSync =
+                self.applySystemDockSnapshot(
+                    snapshot,
+                    preferenceSyncRequest:
+                        preferenceSyncRequest
+                )
+            if preferenceSyncRequest?
+                .marksSystemImportComplete == true,
+               snapshot != nil,
+               didApplyPreferenceSync {
                 self.hasImportedSystemDockPreferences = true
             }
         }
@@ -228,8 +260,9 @@ final class TileStore: ObservableObject {
 
     private func applySystemDockSnapshot(
         _ snapshot: SystemDockSnapshot?,
-        syncPreferencesFromSystemDock: Bool
-    ) {
+        preferenceSyncRequest:
+            SystemDockPreferenceSyncRequest?
+    ) -> Bool {
         guard let snapshot else {
             dockPinnedTilesByBundleIdentifier = [:]
             systemPinnedTiles = []
@@ -239,7 +272,7 @@ final class TileStore: ObservableObject {
             refreshPinnedTilesFromPreferences()
             refreshTrailingTilesFromPreferences()
             rebuildTiles()
-            return
+            return preferenceSyncRequest == nil
         }
 
         let refreshedPinnedTiles = snapshot.pinnedTiles
@@ -251,19 +284,19 @@ final class TileStore: ObservableObject {
             },
             uniquingKeysWith: { first, _ in first }
         )
-        if syncPreferencesFromSystemDock {
-            seedPinnedPreferencesIfNeeded(from: refreshedPinnedTiles)
-            mergePinnedPreferencesAdditionsIfNeeded(from: refreshedPinnedTiles)
-        }
-        synchronizeAppWidgetDisplaysWithFolders()
-        refreshPinnedTilesFromPreferences()
         systemOtherTiles = snapshot.otherTiles
         systemOtherTilesByID = Dictionary(uniqueKeysWithValues: systemOtherTiles.map { ($0.id, $0) })
-        if syncPreferencesFromSystemDock {
-            refreshTrailingPreferencesIfNeeded()
-        }
+        let didApplyPreferenceSync =
+            preferenceSyncRequest.map {
+                applySystemDockPreferenceSync(
+                    snapshot,
+                    request: $0
+                )
+            } ?? true
+        refreshPinnedTilesFromPreferences()
         refreshTrailingTilesFromPreferences()
         rebuildTiles()
+        return didApplyPreferenceSync
     }
 
     nonisolated private static func loadSystemDockSnapshot()
@@ -356,7 +389,12 @@ final class TileStore: ObservableObject {
         return true
     }
 
-    func setPinnedTileOrder(ids: [String]) {
+    @discardableResult
+    func setPinnedTileOrder(
+        ids: [String],
+        expectedProfileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) -> Bool {
         TileStore.logger.info("setPinnedTileOrder called with ids.count=\(ids.count) pinnedTiles.count=\(self.pinnedTiles.count)")
         let diagnostics = DiagnosticsTrace.shared
         diagnostics.record(.profiles, "pinnedTileReorderRequested", fields: [
@@ -372,36 +410,76 @@ final class TileStore: ObservableObject {
                 "requestedCount": ids.count,
                 "currentCount": pinnedTiles.count,
             ])
-            return
+            return false
         }
 
-        let tilesByID = Dictionary(uniqueKeysWithValues: pinnedTiles.map { ($0.id, $0) })
-        let reorderedTiles = ids.compactMap { tilesByID[$0] }
-        guard reorderedTiles.count == pinnedTiles.count else {
-            TileStore.logger.warning("setPinnedTileOrder: reorderedTiles count mismatch: \(reorderedTiles.count) vs \(self.pinnedTiles.count)")
+        let visibleIDs = pinnedTiles.map(\.id)
+        guard Set(ids).count == ids.count,
+              Set(visibleIDs).count
+                == visibleIDs.count,
+              Set(ids) == Set(visibleIDs) else {
+            TileStore.logger.warning("setPinnedTileOrder rejected unknown or duplicate visible IDs")
             diagnostics.record(.profiles, "pinnedTileReorderRejected", fields: [
                 "reason": "unknownTileIDs",
-                "resolvedCount": reorderedTiles.count,
+                "resolvedCount": Set(ids).intersection(visibleIDs).count,
                 "currentCount": pinnedTiles.count,
             ])
-            return
+            return false
         }
 
-        let idsSet = Set(ids)
-        let filteredItems = preferences.pinnedItems.filter { idsSet.contains(Self.pinnedTileID(for: $0)) }
+        // `pinnedTiles` contains only materialized/visible preferences. Hidden
+        // apps and temporarily unresolved applications are deliberately absent.
+        // Reorder only those visible slots inside the authoritative array;
+        // replacing the whole array with `ids` would silently delete every
+        // non-materialized preference.
+        guard let candidateItems =
+                DockDropMutationPolicy
+                .reorderingVisibleSubset(
+                    authoritative:
+                        preferences.pinnedItems,
+                    requestedVisibleIDs: ids,
+                    id: Self.pinnedTileID(for:)
+                )
+        else {
+            diagnostics.record(.profiles, "pinnedTileReorderRejected", fields: [
+                "reason": "authoritativeItemUnavailable",
+                "requestedCount": ids.count,
+            ])
+            return false
+        }
 
-        let itemsByID = Dictionary(uniqueKeysWithValues: filteredItems.map { (Self.pinnedTileID(for: $0), $0) })
-        let reorderedItems = ids.compactMap { itemsByID[$0] }
+        let profileService = ProfileService.shared
+        let profileID = expectedProfileID ?? profileService.activeProfileID
+        let revision = expectedRevision ?? profileService.stateRevision
+        let applied = profileService.applyActiveProfileTransaction(
+            expectedProfileID: profileID,
+            expectedRevision: revision,
+            reason: "pinnedTileReorder"
+        ) { profile in
+            profile.pinnedItems = candidateItems
+        }
+        guard applied else {
+            refreshPinnedTilesFromPreferences()
+            rebuildTiles()
+            diagnostics.record(.profiles, "pinnedTileReorderRejected", fields: [
+                "reason": "profileTransactionRejected",
+                "activeProfileToken": diagnostics.token(profileService.activeProfileID),
+                "expectedProfileToken": diagnostics.token(profileID),
+                "expectedRevision": revision,
+                "revision": profileService.stateRevision,
+            ])
+            return false
+        }
 
-        TileStore.logger.info("setPinnedTileOrder: applying reorder, reorderedItems count=\(reorderedItems.count)")
-        pinnedTiles = reorderedTiles
-        preferences.pinnedItems = reorderedItems
+        TileStore.logger.info("setPinnedTileOrder: applying reorder, reorderedItems count=\(ids.count)")
+        refreshPinnedTilesFromPreferences()
         rebuildTiles()
         diagnostics.record(.profiles, "pinnedTileReorderApplied", fields: [
-            "itemCount": reorderedItems.count,
+            "itemCount": ids.count,
             "orderTokens": ids.map(diagnostics.token),
             "activeProfileToken": diagnostics.token(ProfileService.shared.activeProfileID),
         ])
+        return true
     }
 
     @discardableResult
@@ -506,129 +584,468 @@ final class TileStore: ObservableObject {
     }
 
     @discardableResult
-    func pinApp(bundleIdentifier: String, at destinationIndex: Int) -> Bool {
-        guard !bundleIdentifier.isEmpty else {
+    func pinApp(
+        bundleIdentifier: String,
+        at destinationIndex: Int,
+        expectedProfileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) -> Bool {
+        guard !bundleIdentifier.isEmpty,
+              bundleIdentifier != Self.finderBundleID else {
             return false
         }
 
-        // Dragging an app into the dock is an explicit "show this here"
-        // gesture, so reverse a prior "Hide in Docky" if one is in effect.
-        if preferences.isAppHiddenInDocky(bundleIdentifier: bundleIdentifier) {
-            preferences.setAppHiddenInDocky(bundleIdentifier: bundleIdentifier, isHidden: false)
+        let sourceTileID = Self.pinnedTileID(
+            for: .app(bundleIdentifier: bundleIdentifier)
+        )
+        let visibleIDs = pinnedTiles.map(\.id).filter {
+            $0 != sourceTileID
+        }
+        let expandedFolderIDsContainingSource = preferences.pinnedItems.compactMap {
+            item in
+            item.kind == .appFolder
+                && item.folderBundleIdentifiers.contains(
+                    bundleIdentifier
+                )
+                ? item.id
+                : nil
         }
 
-        // If the app currently lives inside a pinned app folder, lift it
-        // out first so the rest of the flow can place it as a standalone
-        // tile. Without this `isPinned` returns true (via folder
-        // membership) but no top-level `.app` tile exists, and pinApp
-        // bails out, the drop snaps back to Finder.
-        if let folderItem = preferences.pinnedItems.first(where: {
-            $0.kind == .appFolder && $0.folderBundleIdentifiers.contains(bundleIdentifier)
-        }) {
-            removeAppFromFolder(
-                tileID: Self.pinnedTileID(for: folderItem),
-                bundleIdentifier: bundleIdentifier
-            )
+        let originalItems = preferences.pinnedItems
+        guard let insertionIndex =
+                DockDropMutationPolicy
+                .authoritativeInsertionIndexAfterTransformingPrefix(
+                    authoritative: originalItems,
+                    visibleIDs: visibleIDs,
+                    visibleDestinationIndex:
+                        destinationIndex,
+                    id: Self.pinnedTileID(for:),
+                    transformPrefix: {
+                        Self.removingApps(
+                            [bundleIdentifier],
+                            from: $0
+                        )
+                    }
+                )
+        else {
+            return false
         }
+        var candidateItems = Self.removingApps(
+            [bundleIdentifier],
+            from: originalItems
+        )
+        candidateItems.insert(
+            .app(bundleIdentifier: bundleIdentifier),
+            at: min(insertionIndex, candidateItems.count)
+        )
 
-        if !isPinned(bundleIdentifier: bundleIdentifier) {
-            guard setPinnedApp(bundleIdentifier: bundleIdentifier, pinned: true) else {
-                return false
+        let profileService = ProfileService.shared
+        let profileID =
+            expectedProfileID
+            ?? profileService.activeProfileID
+        let revision =
+            expectedRevision
+            ?? profileService.stateRevision
+        let applied =
+            profileService.applyActiveProfileTransaction(
+                expectedProfileID: profileID,
+                expectedRevision: revision,
+                reason: "pinAppDrop"
+            ) { profile in
+                profile.pinnedItems = candidateItems
+                profile.hiddenAppBundleIdentifiers.removeAll {
+                    $0 == bundleIdentifier
+                }
             }
-        }
-
-        guard let pinnedTile = pinnedTiles.first(where: { self.bundleIdentifier(of: $0) == bundleIdentifier }) else {
+        guard applied else {
+            refreshPinnedTilesFromPreferences()
+            rebuildTiles()
             return false
         }
 
-        var reorderedIDs = pinnedTiles.map(\.id)
-        reorderedIDs.removeAll { $0 == pinnedTile.id }
-        let clampedDestinationIndex = min(max(destinationIndex, 0), reorderedIDs.count)
-        reorderedIDs.insert(pinnedTile.id, at: clampedDestinationIndex)
-        setPinnedTileOrder(ids: reorderedIDs)
+        expandedInlineAppFolderIDs.subtract(
+            expandedFolderIDsContainingSource
+        )
+        refreshPinnedTilesFromPreferences()
+        rebuildTiles()
         return true
     }
 
     @discardableResult
-    func groupApp(bundleIdentifier: String, intoTileID targetTileID: String) -> Bool {
-        groupApps(bundleIdentifiers: [bundleIdentifier], intoTileID: targetTileID)
+    func groupApp(
+        bundleIdentifier: String,
+        intoTileID targetTileID: String,
+        expectedProfileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) -> Bool {
+        groupApps(
+            bundleIdentifiers: [bundleIdentifier],
+            intoTileID: targetTileID,
+            expectedProfileID: expectedProfileID,
+            expectedRevision: expectedRevision
+        )
     }
 
     @discardableResult
-    func groupApps(bundleIdentifiers: [String], intoTileID targetTileID: String) -> Bool {
-        guard let targetIndex = preferences.pinnedItems.firstIndex(where: { Self.pinnedTileID(for: $0) == targetTileID }) else {
+    func groupApps(
+        bundleIdentifiers: [String],
+        intoTileID targetTileID: String,
+        expectedProfileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) -> Bool {
+        let diagnostics = DiagnosticsTrace.shared
+        let normalizedBundleIdentifiers = normalizedGroupedAppBundleIdentifiers(bundleIdentifiers)
+        guard !normalizedBundleIdentifiers.isEmpty else {
+            diagnostics.record(.profiles, "appFolderDropRejected", fields: [
+                "reason": "emptySource",
+                "targetTileToken": diagnostics.token(targetTileID),
+            ])
             return false
         }
 
-        let targetItem = preferences.pinnedItems[targetIndex]
-        let normalizedBundleIdentifiers = normalizedGroupedAppBundleIdentifiers(bundleIdentifiers)
+        let originalItems = preferences.pinnedItems
+        let pinnedTargetIndex = originalItems.firstIndex {
+            Self.pinnedTileID(for: $0) == targetTileID
+        }
+        let pinnedTarget =
+            pinnedTargetIndex.map { originalItems[$0] }
+        let runningTargetBundleIdentifier: String? = {
+            guard pinnedTarget == nil,
+                  targetTileID != DockBadgeService.handoffTileID,
+                  !targetTileID.hasPrefix("folder-running:"),
+                  let targetTile = tiles.first(where: {
+                      $0.id == targetTileID
+                  }),
+                  case .app(let app) = targetTile.content,
+                  !app.bundleIdentifier.isEmpty,
+                  app.bundleIdentifier != Self.finderBundleID,
+                  !isPinned(
+                      bundleIdentifier:
+                          app.bundleIdentifier
+                  ) else {
+                return nil
+            }
+            return app.bundleIdentifier
+        }()
+        let groupTarget: DockAppGroupTarget? = {
+            if let pinnedTarget {
+                switch pinnedTarget.kind {
+                case .app:
+                    guard let bundleIdentifier =
+                            pinnedTarget.bundleIdentifier
+                    else {
+                        return nil
+                    }
+                    return .pinnedApp(
+                        itemID: pinnedTarget.id,
+                        bundleIdentifier:
+                            bundleIdentifier
+                    )
+                case .appFolder:
+                    return .pinnedFolder(
+                        itemID: pinnedTarget.id,
+                        bundleIdentifiers:
+                            pinnedTarget
+                            .folderBundleIdentifiers
+                    )
+                case .launchpad, .startMenu, .widget,
+                     .smartStack, .spacer,
+                     .flexibleSpacer, .divider:
+                    return nil
+                }
+            }
+            return runningTargetBundleIdentifier.map {
+                .runningApp(bundleIdentifier: $0)
+            }
+        }()
+        guard let groupTarget,
+              let groupingPlan =
+                DockAppGroupLayoutPolicy.plan(
+                    sourceBundleIdentifiers:
+                        normalizedBundleIdentifiers,
+                    target: groupTarget,
+                    finderBundleIdentifier:
+                        Self.finderBundleID
+                )
+        else {
+            diagnostics.record(.profiles, "appFolderDropRejected", fields: [
+                "reason": "targetUnavailableOrNoChange",
+                "targetTileToken": diagnostics.token(targetTileID),
+            ])
+            return false
+        }
 
-        switch targetItem.kind {
-        case .app:
-            guard let targetBundleIdentifier = targetItem.bundleIdentifier else {
+        var candidateItems: [PinnedTileItem]
+        var groupedBundleIdentifiers: [String]
+        var createdFolder:
+            (
+                item: PinnedTileItem,
+                name: String,
+                apps: [AppTile]
+            )?
+
+        if let targetIndex = pinnedTargetIndex,
+           let targetItem = pinnedTarget {
+            switch targetItem.kind {
+            case .app:
+                guard targetItem.bundleIdentifier != nil else {
+                    return false
+                }
+                let sourceBundleIdentifiers =
+                    groupingPlan
+                    .bundleIdentifiersToDetach
+                guard !sourceBundleIdentifiers.isEmpty else {
+                    return false
+                }
+                groupedBundleIdentifiers =
+                    groupingPlan
+                    .folderBundleIdentifiers
+                let folderApps =
+                    groupedBundleIdentifiers.compactMap {
+                        makeAppTile(bundleIdentifier: $0)
+                    }
+                let seededFolderName =
+                    appFolderSeedName(for: folderApps)
+                let folder = PinnedTileItem.appFolder(
+                    displayName: seededFolderName,
+                    bundleIdentifiers:
+                        groupedBundleIdentifiers,
+                    displayMode: .grid,
+                    contentViewMode: .grid
+                )
+
+                let prefix = Array(
+                    originalItems.prefix(targetIndex)
+                )
+                let insertionIndex = Self.removingApps(
+                    sourceBundleIdentifiers,
+                    from: prefix
+                ).count
+                candidateItems = Self.removingApps(
+                    sourceBundleIdentifiers,
+                    from: originalItems
+                )
+                candidateItems.removeAll {
+                    Self.pinnedTileID(for: $0)
+                        == targetTileID
+                }
+                candidateItems.insert(
+                    folder,
+                    at: min(
+                        insertionIndex,
+                        candidateItems.count
+                    )
+                )
+                createdFolder = (
+                    folder,
+                    seededFolderName,
+                    folderApps
+                )
+            case .appFolder:
+                let sourceBundleIdentifiers =
+                    groupingPlan
+                    .bundleIdentifiersToDetach
+                guard !sourceBundleIdentifiers.isEmpty else {
+                    return false
+                }
+                groupedBundleIdentifiers =
+                    groupingPlan
+                    .folderBundleIdentifiers
+                candidateItems = Self.removingApps(
+                    sourceBundleIdentifiers,
+                    from: originalItems,
+                    preservingItemID: targetItem.id
+                )
+                guard let folderIndex =
+                        candidateItems.firstIndex(where: {
+                            Self.pinnedTileID(for: $0)
+                                == targetTileID
+                        })
+                else {
+                    return false
+                }
+                candidateItems[folderIndex] = .appFolder(
+                    id: targetItem.id,
+                    displayName:
+                        targetItem.folderDisplayName
+                        ?? "Folder",
+                    bundleIdentifiers:
+                        groupedBundleIdentifiers,
+                    displayMode:
+                        targetItem.appFolderDisplayMode
+                        ?? .grid,
+                    contentViewMode:
+                        targetItem.folderContentViewMode
+                        ?? .grid
+                )
+            case .launchpad, .startMenu, .widget,
+                 .smartStack, .spacer,
+                 .flexibleSpacer, .divider:
                 return false
             }
-
-            let sourceBundleIdentifiers = normalizedBundleIdentifiers.filter { $0 != targetBundleIdentifier }
+        } else if let targetBundleIdentifier =
+                    runningTargetBundleIdentifier {
+            let sourceBundleIdentifiers =
+                normalizedBundleIdentifiers.filter {
+                    $0 != targetBundleIdentifier
+                }
             guard !sourceBundleIdentifiers.isEmpty else {
                 return false
             }
+            groupedBundleIdentifiers =
+                groupingPlan
+                .folderBundleIdentifiers
 
-            let folderBundleIdentifiers = [targetBundleIdentifier] + sourceBundleIdentifiers
-            let folderApps = folderBundleIdentifiers.compactMap {
-                makeAppTile(bundleIdentifier: $0)
+            // If at least one source is already pinned, the source's first
+            // authoritative slot is the only persistent anchor. With two
+            // running apps there is no such slot, so append the new folder to
+            // the pinned section, immediately before the running divider.
+            let sourceSet = Set(sourceBundleIdentifiers)
+            let sourceAnchorIndex =
+                originalItems.firstIndex {
+                    Self.bundleIdentifiers(
+                        in: $0
+                    ).contains(where: sourceSet.contains)
+                }
+            let insertionIndex: Int
+            if let sourceAnchorIndex {
+                insertionIndex = Self.removingApps(
+                    sourceBundleIdentifiers,
+                    from: Array(
+                        originalItems.prefix(
+                            sourceAnchorIndex
+                        )
+                    )
+                ).count
+            } else {
+                insertionIndex = Int.max
             }
-            let seededFolderName = appFolderSeedName(for: folderApps)
-            let createdFolder = PinnedTileItem.appFolder(
+
+            let folderApps =
+                groupedBundleIdentifiers.compactMap {
+                    makeAppTile(bundleIdentifier: $0)
+                }
+            let seededFolderName =
+                appFolderSeedName(for: folderApps)
+            let folder = PinnedTileItem.appFolder(
                 displayName: seededFolderName,
-                bundleIdentifiers: folderBundleIdentifiers,
+                bundleIdentifiers:
+                    groupedBundleIdentifiers,
                 displayMode: .grid,
                 contentViewMode: .grid
             )
-
-            var updatedItems = removingGroupedApps(sourceBundleIdentifiers, replacingTargetTileID: targetTileID)
-            let insertionIndex = min(
-                groupedAppInsertionIndex(before: targetIndex, removing: sourceBundleIdentifiers),
-                updatedItems.count
+            candidateItems = Self.removingApps(
+                groupingPlan
+                    .bundleIdentifiersToDetach,
+                from: originalItems
             )
-            updatedItems.insert(createdFolder, at: insertionIndex)
-            preferences.pinnedItems = updatedItems
-            refreshPinnedTilesFromPreferences()
-            rebuildTiles()
-            suggestAppFolderNameIfNeeded(
-                folderID: createdFolder.id,
-                expectedDisplayName: seededFolderName,
-                apps: folderApps
+            candidateItems.insert(
+                folder,
+                at: min(
+                    insertionIndex,
+                    candidateItems.count
+                )
             )
-            return true
-        case .appFolder:
-            let sourceBundleIdentifiers = normalizedBundleIdentifiers.filter {
-                !targetItem.folderBundleIdentifiers.contains($0)
-            }
-            guard !sourceBundleIdentifiers.isEmpty else {
-                return false
-            }
-
-            var updatedItems = removingGroupedApps(sourceBundleIdentifiers)
-            guard let folderIndex = updatedItems.firstIndex(where: { Self.pinnedTileID(for: $0) == targetTileID }) else {
-                return false
-            }
-
-            let folderItem = updatedItems[folderIndex]
-            updatedItems[folderIndex] = .appFolder(
-                id: folderItem.id,
-                displayName: folderItem.folderDisplayName ?? "Folder",
-                bundleIdentifiers: folderItem.folderBundleIdentifiers + sourceBundleIdentifiers,
-                displayMode: folderItem.appFolderDisplayMode ?? .grid,
-                contentViewMode: folderItem.folderContentViewMode ?? .grid
+            createdFolder = (
+                folder,
+                seededFolderName,
+                folderApps
             )
-            preferences.pinnedItems = updatedItems
-            refreshPinnedTilesFromPreferences()
-            rebuildTiles()
-            return true
-        case .launchpad, .startMenu, .widget, .smartStack, .spacer, .flexibleSpacer, .divider:
+        } else {
+            diagnostics.record(.profiles, "appFolderDropRejected", fields: [
+                "reason": "targetUnavailable",
+                "targetTileToken": diagnostics.token(targetTileID),
+            ])
             return false
         }
+
+        guard Self.hasValidAppMembership(
+            candidateItems
+        ) else {
+            diagnostics.record(.profiles, "appFolderDropRejected", fields: [
+                "reason": "invalidCandidate",
+                "targetTileToken": diagnostics.token(targetTileID),
+            ])
+            return false
+        }
+
+        let selectedBundleIdentifierSet = Set(
+            groupingPlan
+                .bundleIdentifiersToDetach
+        )
+        let affectedFolderIDs: Set<String> = Set(
+            originalItems.compactMap { item in
+                guard item.kind == .appFolder,
+                      item.folderBundleIdentifiers.contains(where: {
+                          selectedBundleIdentifierSet.contains($0)
+                      })
+                else {
+                    return nil
+                }
+                return item.id
+            }
+        )
+        let profileService = ProfileService.shared
+        let profileID =
+            expectedProfileID
+            ?? profileService.activeProfileID
+        let revision =
+            expectedRevision
+            ?? profileService.stateRevision
+        // Existing target-folder members retain their visibility state.
+        // Only membership actively detached by this gesture is promoted back
+        // to a visible pinned surface.
+        let detachedSet = Set(
+            groupingPlan.bundleIdentifiersToDetach
+        )
+        let applied =
+            profileService.applyActiveProfileTransaction(
+                expectedProfileID: profileID,
+                expectedRevision: revision,
+                reason: "appFolderDrop"
+            ) { profile in
+                profile.pinnedItems = candidateItems
+                profile.hiddenAppBundleIdentifiers.removeAll {
+                    detachedSet.contains($0)
+                }
+            }
+        guard applied else {
+            refreshPinnedTilesFromPreferences()
+            rebuildTiles()
+            diagnostics.record(.profiles, "appFolderDropRejected", fields: [
+                "reason": "profileTransactionRejected",
+                "targetTileToken": diagnostics.token(targetTileID),
+                "expectedProfileToken": diagnostics.token(profileID),
+                "expectedRevision": revision,
+                "revision": profileService.stateRevision,
+            ])
+            return false
+        }
+
+        expandedInlineAppFolderIDs.subtract(
+            affectedFolderIDs
+        )
+        refreshPinnedTilesFromPreferences()
+        rebuildTiles()
+        diagnostics.record(.profiles, "appFolderDropApplied", fields: [
+            "targetTileToken": diagnostics.token(targetTileID),
+            "bundleCount": groupedBundleIdentifiers.count,
+            "profileToken": diagnostics.token(profileID),
+            "revision": profileService.stateRevision,
+        ])
+        if let createdFolder {
+            suggestAppFolderNameIfNeeded(
+                folderID: createdFolder.item.id,
+                expectedDisplayName: createdFolder.name,
+                expectedBundleIdentifiers:
+                    groupedBundleIdentifiers,
+                expectedProfileID: profileID,
+                expectedRevision:
+                    profileService.stateRevision,
+                apps: createdFolder.apps
+            )
+        }
+        return true
     }
 
     func ungroupAppFolder(tileID: String) {
@@ -1004,11 +1421,17 @@ final class TileStore: ObservableObject {
         preferences.appWidgetDisplays = displays
     }
 
-    func insertPinnedItem(kind: PinnedTileItemKind, at destinationIndex: Int) {
+    @discardableResult
+    func insertPinnedItem(
+        kind: PinnedTileItemKind,
+        at destinationIndex: Int,
+        expectedProfileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) -> Bool {
         let item: PinnedTileItem
         switch kind {
         case .app, .appFolder, .widget:
-            return
+            return false
         case .launchpad:
             item = .launchpad()
         case .startMenu:
@@ -1023,17 +1446,72 @@ final class TileStore: ObservableObject {
             item = .divider()
         }
 
-        insertPinnedItem(item, at: destinationIndex)
+        return insertPinnedItem(
+            item,
+            at: destinationIndex,
+            expectedProfileID: expectedProfileID,
+            expectedRevision: expectedRevision
+        )
     }
 
-    func insertPinnedItem(_ item: PinnedTileItem, at destinationIndex: Int) {
+    @discardableResult
+    func insertPinnedItem(
+        _ item: PinnedTileItem,
+        at destinationIndex: Int,
+        expectedProfileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) -> Bool {
+        let visibleTargetIDs = pinnedTiles.map(\.id)
+        let profileService = ProfileService.shared
+        let profileID =
+            expectedProfileID
+            ?? profileService.activeProfileID
+        let revision =
+            expectedRevision
+            ?? profileService.stateRevision
+        var didPrepareMutation = false
+        let applied =
+            profileService.applyActiveProfileTransaction(
+                expectedProfileID: profileID,
+                expectedRevision: revision,
+                reason: "insertPinnedItem"
+            ) { profile in
+                let destinationID =
+                    Self.pinnedTileID(for: item)
+                guard !profile.pinnedItems.contains(where: {
+                    Self.pinnedTileID(for: $0)
+                        == destinationID
+                }),
+                      let authoritativeIndex =
+                        DockDropMutationPolicy
+                        .authoritativeInsertionIndex(
+                            authoritative:
+                                profile.pinnedItems,
+                            visibleIDs:
+                                visibleTargetIDs,
+                            visibleDestinationIndex:
+                                destinationIndex,
+                            id:
+                                Self.pinnedTileID(for:)
+                        )
+                else {
+                    return
+                }
+                profile.pinnedItems.insert(
+                    item,
+                    at: authoritativeIndex
+                )
+                didPrepareMutation = true
+            }
+        guard applied, didPrepareMutation else {
+            refreshPinnedTilesFromPreferences()
+            rebuildTiles()
+            return false
+        }
 
-        var pinnedItems = preferences.pinnedItems
-        let clampedDestinationIndex = min(max(destinationIndex, 0), pinnedItems.count)
-        pinnedItems.insert(item, at: clampedDestinationIndex)
-        preferences.pinnedItems = pinnedItems
         refreshPinnedTilesFromPreferences()
         rebuildTiles()
+        return true
     }
 
     func smartOrganizePinnedItems() {
@@ -1043,45 +1521,341 @@ final class TileStore: ObservableObject {
         // should hide or disable the entry point via the same gate.
         guard FeatureGate.shared.isAvailable(.foundationModelsSmartOrganize),
               #available(macOS 26.0, *) else { return }
+        let profileService = ProfileService.shared
+        let expectedProfileID =
+            profileService.activeProfileID
+        let expectedRevision =
+            profileService.stateRevision
         let existingItems = preferences.pinnedItems
         Task { @MainActor [weak self] in
             guard let self else { return }
             let organizedItems = await PinnedDockSmartOrganizerService.shared.organize(items: existingItems)
-            guard organizedItems != self.preferences.pinnedItems else {
+            guard organizedItems != existingItems else {
                 return
             }
 
-            self.preferences.pinnedItems = organizedItems
+            var didPrepareMutation = false
+            let applied =
+                profileService
+                .applyActiveProfileTransaction(
+                    expectedProfileID:
+                        expectedProfileID,
+                    expectedRevision:
+                        expectedRevision,
+                    reason:
+                        "smartOrganizePinnedItems"
+                ) { profile in
+                    guard profile.pinnedItems
+                            == existingItems else {
+                        return
+                    }
+                    profile.pinnedItems =
+                        organizedItems
+                    didPrepareMutation = true
+                }
+            guard applied, didPrepareMutation else {
+                self.refreshPinnedTilesFromPreferences()
+                self.rebuildTiles()
+                return
+            }
+
             self.refreshPinnedTilesFromPreferences()
             self.rebuildTiles()
         }
     }
 
-    func setTrailingTileOrder(ids: [String]) {
+    @discardableResult
+    func setTrailingTileOrder(
+        ids: [String],
+        expectedProfileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) -> Bool {
         guard ids.count == trailingTiles.count else {
-            return
+            return false
         }
 
-        let itemsByID = Dictionary(uniqueKeysWithValues: preferences.trailingItems.map { (Self.trailingTileID(for: $0), $0) })
-        let reorderedItems = ids.compactMap { itemsByID[$0] }
-        guard reorderedItems.count == preferences.trailingItems.count else {
-            return
+        let visibleIDs = trailingTiles.map(\.id)
+        guard Set(ids).count == ids.count,
+              Set(visibleIDs).count == visibleIDs.count,
+              Set(ids) == Set(visibleIDs) else {
+            return false
         }
 
-        preferences.trailingItems = reorderedItems
+        var authoritativeItems = preferences.trailingItems
+        if !authoritativeItems.contains(where: {
+            $0.kind == .trash
+        }) {
+            authoritativeItems.append(.trash())
+        }
+        guard let reorderedItems =
+                DockDropMutationPolicy
+                .reorderingVisibleSubset(
+                    authoritative:
+                        authoritativeItems,
+                    requestedVisibleIDs: ids,
+                    id: Self.trailingTileID(for:)
+                )
+        else {
+            return false
+        }
+
+        let profileService = ProfileService.shared
+        let profileID =
+            expectedProfileID
+            ?? profileService.activeProfileID
+        let revision =
+            expectedRevision
+            ?? profileService.stateRevision
+        let applied =
+            profileService.applyActiveProfileTransaction(
+                expectedProfileID: profileID,
+                expectedRevision: revision,
+                reason: "trailingTileReorder"
+            ) { profile in
+                profile.trailingItems = reorderedItems
+            }
+        guard applied else {
+            refreshTrailingTilesFromPreferences()
+            rebuildTiles()
+            return false
+        }
+
         refreshTrailingTilesFromPreferences()
         rebuildTiles()
+        return true
     }
 
-    func insertTrailingItem(_ item: TrailingTileItem, at destinationIndex: Int) {
-        var trailingItems = preferences.trailingItems
+    /// Moves a persisted tile between sections as one compare-and-swap
+    /// profile transaction. This prevents a rejected destination insert from
+    /// leaving the source deleted.
+    @discardableResult
+    func movePinnedItemToTrailing(
+        tileID: String,
+        convertedItem: TrailingTileItem,
+        at visibleDestinationIndex: Int,
+        expectedProfileID: String,
+        expectedRevision: UInt64
+    ) -> Bool {
+        let visibleTargetIDs = trailingTiles.map(\.id)
+        let profileService = ProfileService.shared
+        var didPrepareMutation = false
+        let applied =
+            profileService.applyActiveProfileTransaction(
+                expectedProfileID: expectedProfileID,
+                expectedRevision: expectedRevision,
+                reason: "movePinnedItemToTrailing"
+            ) { profile in
+                guard let sourceIndex =
+                        profile.pinnedItems.firstIndex(where: {
+                            Self.pinnedTileID(for: $0)
+                                == tileID
+                        })
+                else {
+                    return
+                }
+
+                var trailingItems = profile.trailingItems
+                if !trailingItems.contains(where: {
+                    $0.kind == .trash
+                }) {
+                    trailingItems.append(.trash())
+                }
+                let destinationID =
+                    Self.trailingTileID(
+                        for: convertedItem
+                    )
+                guard !trailingItems.contains(where: {
+                    Self.trailingTileID(for: $0)
+                        == destinationID
+                }),
+                      let destinationIndex =
+                        DockDropMutationPolicy
+                        .authoritativeInsertionIndex(
+                            authoritative:
+                                trailingItems,
+                            visibleIDs:
+                                visibleTargetIDs,
+                            visibleDestinationIndex:
+                                visibleDestinationIndex,
+                            id: {
+                                Self.trailingTileID(
+                                    for: $0
+                                )
+                            }
+                        )
+                else {
+                    return
+                }
+
+                profile.pinnedItems.remove(
+                    at: sourceIndex
+                )
+                trailingItems.insert(
+                    convertedItem,
+                    at: destinationIndex
+                )
+                profile.trailingItems = trailingItems
+                didPrepareMutation = true
+            }
+        guard applied, didPrepareMutation else {
+            refreshPinnedTilesFromPreferences()
+            refreshTrailingTilesFromPreferences()
+            rebuildTiles()
+            return false
+        }
+
+        refreshPinnedTilesFromPreferences()
+        refreshTrailingTilesFromPreferences()
+        rebuildTiles()
+        return true
+    }
+
+    /// Reverse of `movePinnedItemToTrailing`, with the same atomicity and
+    /// stale-drag guard.
+    @discardableResult
+    func moveTrailingItemToPinned(
+        tileID: String,
+        convertedItem: PinnedTileItem,
+        at visibleDestinationIndex: Int,
+        expectedProfileID: String,
+        expectedRevision: UInt64
+    ) -> Bool {
+        let visibleTargetIDs = pinnedTiles.map(\.id)
+        let profileService = ProfileService.shared
+        var didPrepareMutation = false
+        let applied =
+            profileService.applyActiveProfileTransaction(
+                expectedProfileID: expectedProfileID,
+                expectedRevision: expectedRevision,
+                reason: "moveTrailingItemToPinned"
+            ) { profile in
+                guard let sourceIndex =
+                        profile.trailingItems.firstIndex(where: {
+                            Self.trailingTileID(for: $0)
+                                == tileID
+                        })
+                else {
+                    return
+                }
+
+                let destinationID =
+                    Self.pinnedTileID(
+                        for: convertedItem
+                    )
+                guard !profile.pinnedItems.contains(where: {
+                    Self.pinnedTileID(for: $0)
+                        == destinationID
+                }),
+                      let destinationIndex =
+                        DockDropMutationPolicy
+                        .authoritativeInsertionIndex(
+                            authoritative:
+                                profile.pinnedItems,
+                            visibleIDs:
+                                visibleTargetIDs,
+                            visibleDestinationIndex:
+                                visibleDestinationIndex,
+                            id:
+                                Self.pinnedTileID(for:)
+                        )
+                else {
+                    return
+                }
+
+                profile.trailingItems.remove(
+                    at: sourceIndex
+                )
+                profile.pinnedItems.insert(
+                    convertedItem,
+                    at: destinationIndex
+                )
+                didPrepareMutation = true
+            }
+        guard applied, didPrepareMutation else {
+            refreshPinnedTilesFromPreferences()
+            refreshTrailingTilesFromPreferences()
+            rebuildTiles()
+            return false
+        }
+
+        refreshPinnedTilesFromPreferences()
+        refreshTrailingTilesFromPreferences()
+        rebuildTiles()
+        return true
+    }
+
+    @discardableResult
+    func insertTrailingItem(
+        _ item: TrailingTileItem,
+        at destinationIndex: Int,
+        expectedProfileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) -> Bool {
+        let visibleTargetIDs = trailingTiles.map(\.id)
+        let profileService = ProfileService.shared
+        let profileID =
+            expectedProfileID
+            ?? profileService.activeProfileID
+        let revision =
+            expectedRevision
+            ?? profileService.stateRevision
+        var didPrepareMutation = false
         logTrailingItems("Before insertTrailingItem")
-        let clampedDestinationIndex = min(max(destinationIndex, 0), trailingItems.count)
-        trailingItems.insert(item, at: clampedDestinationIndex)
-        preferences.trailingItems = trailingItems
+        let applied =
+            profileService.applyActiveProfileTransaction(
+                expectedProfileID: profileID,
+                expectedRevision: revision,
+                reason: "insertTrailingItem"
+            ) { profile in
+                var authoritativeItems =
+                    profile.trailingItems
+                if !authoritativeItems.contains(where: {
+                    $0.kind == .trash
+                }) {
+                    authoritativeItems.append(.trash())
+                }
+                let destinationID =
+                    Self.trailingTileID(for: item)
+                guard !authoritativeItems.contains(where: {
+                    Self.trailingTileID(for: $0)
+                        == destinationID
+                }),
+                      let authoritativeIndex =
+                        DockDropMutationPolicy
+                        .authoritativeInsertionIndex(
+                            authoritative:
+                                authoritativeItems,
+                            visibleIDs:
+                                visibleTargetIDs,
+                            visibleDestinationIndex:
+                                destinationIndex,
+                            id: {
+                                Self.trailingTileID(
+                                    for: $0
+                                )
+                            }
+                        )
+                else {
+                    return
+                }
+                authoritativeItems.insert(
+                    item,
+                    at: authoritativeIndex
+                )
+                profile.trailingItems =
+                    authoritativeItems
+                didPrepareMutation = true
+            }
+        guard applied, didPrepareMutation else {
+            refreshTrailingTilesFromPreferences()
+            rebuildTiles()
+            return false
+        }
+
         logTrailingItems("After insertTrailingItem")
         refreshTrailingTilesFromPreferences()
         rebuildTiles()
+        return true
     }
 
     func makePinnedItem(from tile: Tile) -> PinnedTileItem? {
@@ -1106,7 +1880,9 @@ final class TileStore: ObservableObject {
                     widgetKind: widgetKind,
                     widgetOwnerBundleIdentifier: ownerBundleIdentifier,
                     widgetSpan: item.widgetSpan,
-                    hiddenWidgetOwnerBundleIdentifiers: []
+                    hiddenWidgetOwnerBundleIdentifiers:
+                        item.hiddenWidgetOwnerBundleIdentifiers,
+                    widgetSettings: item.widgetSettings
                 )
             case .smartStack:
                 return PinnedTileItem(
@@ -1196,7 +1972,9 @@ final class TileStore: ObservableObject {
                     widgetKind: widgetKind,
                     widgetOwnerBundleIdentifier: ownerBundleIdentifier,
                     widgetSpan: item.widgetSpan,
-                    hiddenWidgetOwnerBundleIdentifiers: []
+                    hiddenWidgetOwnerBundleIdentifiers:
+                        item.hiddenWidgetOwnerBundleIdentifiers,
+                    widgetSettings: item.widgetSettings
                 )
             case .smartStack:
                 return TrailingTileItem(
@@ -1739,30 +2517,88 @@ final class TileStore: ObservableObject {
         return folder.url.standardizedFileURL == normalizedFolderURL
     }
 
-    func removePinnedItem(tileID: String) {
-        var pinnedItems = preferences.pinnedItems
-        let originalCount = pinnedItems.count
-        pinnedItems.removeAll { Self.pinnedTileID(for: $0) == tileID }
-        guard pinnedItems.count != originalCount else {
-            return
+    @discardableResult
+    func removePinnedItem(
+        tileID: String,
+        expectedProfileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) -> Bool {
+        let profileService = ProfileService.shared
+        let profileID =
+            expectedProfileID
+            ?? profileService.activeProfileID
+        let revision =
+            expectedRevision
+            ?? profileService.stateRevision
+        var didPrepareMutation = false
+        let applied =
+            profileService.applyActiveProfileTransaction(
+                expectedProfileID: profileID,
+                expectedRevision: revision,
+                reason: "removePinnedItem"
+            ) { profile in
+                let originalCount =
+                    profile.pinnedItems.count
+                profile.pinnedItems.removeAll {
+                    Self.pinnedTileID(for: $0)
+                        == tileID
+                }
+                didPrepareMutation =
+                    profile.pinnedItems.count
+                    != originalCount
+            }
+        guard applied, didPrepareMutation else {
+            refreshPinnedTilesFromPreferences()
+            rebuildTiles()
+            return false
         }
-        preferences.pinnedItems = pinnedItems
+
         refreshPinnedTilesFromPreferences()
         rebuildTiles()
+        return true
     }
 
-    func removeTrailingItem(tileID: String) {
-        var trailingItems = preferences.trailingItems
+    @discardableResult
+    func removeTrailingItem(
+        tileID: String,
+        expectedProfileID: String? = nil,
+        expectedRevision: UInt64? = nil
+    ) -> Bool {
+        let profileService = ProfileService.shared
+        let profileID =
+            expectedProfileID
+            ?? profileService.activeProfileID
+        let revision =
+            expectedRevision
+            ?? profileService.stateRevision
+        var didPrepareMutation = false
         logTrailingItems("Before removeTrailingItem")
-        let originalCount = trailingItems.count
-        trailingItems.removeAll { Self.trailingTileID(for: $0) == tileID }
-        guard trailingItems.count != originalCount else {
-            return
+        let applied =
+            profileService.applyActiveProfileTransaction(
+                expectedProfileID: profileID,
+                expectedRevision: revision,
+                reason: "removeTrailingItem"
+            ) { profile in
+                let originalCount =
+                    profile.trailingItems.count
+                profile.trailingItems.removeAll {
+                    Self.trailingTileID(for: $0)
+                        == tileID
+                }
+                didPrepareMutation =
+                    profile.trailingItems.count
+                    != originalCount
+            }
+        guard applied, didPrepareMutation else {
+            refreshTrailingTilesFromPreferences()
+            rebuildTiles()
+            return false
         }
-        preferences.trailingItems = trailingItems
+
         logTrailingItems("After removeTrailingItem")
         refreshTrailingTilesFromPreferences()
         rebuildTiles()
+        return true
     }
 
     private static let finderBundleID = "com.apple.finder"
@@ -1867,17 +2703,158 @@ final class TileStore: ObservableObject {
         return nil
     }
 
-    private func seedPinnedPreferencesIfNeeded(from refreshed: [Tile]) {
-        guard preferences.pinnedItems.isEmpty else {
+    private func applySystemDockPreferenceSync(
+        _ snapshot: SystemDockSnapshot,
+        request: SystemDockPreferenceSyncRequest
+    ) -> Bool {
+        let importedPinnedItems =
+            snapshot.pinnedTiles.compactMap(Self.pinnedItem(from:))
+        let importedTrailingItems =
+            snapshot.otherTiles.compactMap(Self.trailingItem(from:))
+                + [.trash()]
+        let availableFolderIDs =
+            Set(snapshot.otherTiles.map(\.id))
+        let profileService = ProfileService.shared
+        let applied =
+            profileService.applyActiveProfileTransaction(
+                credentials:
+                    request.credentials,
+                reason:
+                    request.reason
+            ) { profile in
+                Self.synchronizeSystemDockPreferences(
+                    profile: &profile,
+                    importedPinnedItems:
+                        importedPinnedItems,
+                    importedTrailingItems:
+                        importedTrailingItems,
+                    availableFolderIDs:
+                        availableFolderIDs
+                )
+            }
+
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(
+            .profiles,
+            applied
+                ? "systemDockProfileSyncApplied"
+                : "systemDockProfileSyncRejected",
+            fields: [
+                "reason": request.reason,
+                "expectedProfileToken":
+                    diagnostics.token(
+                        request.credentials.profileID
+                    ),
+                "activeProfileToken":
+                    diagnostics.token(
+                        profileService.activeProfileID
+                    ),
+                "expectedRevision":
+                    request.credentials.revision,
+                "revision":
+                    profileService.stateRevision,
+                "marksSystemImportComplete":
+                    request.marksSystemImportComplete,
+            ]
+        )
+        return applied
+    }
+
+    private static func synchronizeSystemDockPreferences(
+        profile: inout DockProfile,
+        importedPinnedItems: [PinnedTileItem],
+        importedTrailingItems: [TrailingTileItem],
+        availableFolderIDs: Set<String>
+    ) {
+        if profile.pinnedItems.isEmpty,
+           !importedPinnedItems.isEmpty {
+            profile.pinnedItems = importedPinnedItems
+        }
+
+        if !profile.pinnedItems.isEmpty {
+            let importedAdditions =
+                importedPinnedItems
+                .filter {
+                    $0.kind != .app
+                        || $0.bundleIdentifier
+                            != Self.finderBundleID
+                }
+                .filter { importedItem in
+                    !profile.pinnedItems.contains {
+                        existingItem in
+                        Self.matchesImportedPinnedItem(
+                            existingItem,
+                            importedItem
+                        )
+                    }
+                }
+            if !importedAdditions.isEmpty {
+                profile.pinnedItems.append(
+                    contentsOf: importedAdditions
+                )
+            }
+        }
+
+        guard !importedTrailingItems.isEmpty else {
+            profile.trailingItems = []
             return
         }
 
-        let pinnedItems = refreshed.compactMap(Self.pinnedItem(from:))
-        guard !pinnedItems.isEmpty else {
+        guard !profile.trailingItems.isEmpty else {
+            profile.trailingItems = importedTrailingItems
             return
         }
 
-        preferences.pinnedItems = pinnedItems
+        var mergedItems =
+            profile.trailingItems.filter { item in
+                switch item.kind {
+                case .folder:
+                    if let sourceTileID =
+                        item.sourceTileID {
+                        return availableFolderIDs.contains(
+                            sourceTileID
+                        )
+                    }
+                    return item.folderURL != nil
+                case .trash, .widget, .smartStack,
+                     .spacer, .flexibleSpacer,
+                     .divider:
+                    return true
+                }
+            }
+
+        if !mergedItems.contains(where: {
+            $0.kind == .trash
+        }) {
+            mergedItems.append(.trash())
+        }
+
+        let existingSystemSourceIDs =
+            Set(mergedItems.compactMap(\.sourceTileID))
+        let trailingAdditions =
+            importedTrailingItems.filter { item in
+                guard let sourceTileID =
+                    item.sourceTileID else {
+                    return item.kind == .trash
+                        && !mergedItems.contains(
+                            where: {
+                                $0.kind == .trash
+                            }
+                        )
+                }
+                return !existingSystemSourceIDs.contains(
+                    sourceTileID
+                )
+            }
+        if !trailingAdditions.isEmpty {
+            mergedItems.append(
+                contentsOf: trailingAdditions
+            )
+        }
+
+        if mergedItems != profile.trailingItems {
+            profile.trailingItems = mergedItems
+        }
     }
 
     private func adoptSystemDockApplicationMetadata(_ tiles: [Tile]) {
@@ -1990,104 +2967,11 @@ final class TileStore: ObservableObject {
         )
     }
 
-    private func mergePinnedPreferencesAdditionsIfNeeded(from refreshed: [Tile]) {
-        guard !preferences.pinnedItems.isEmpty else {
-            return
-        }
-
-        let importedItems = refreshed
-            .compactMap(Self.pinnedItem(from:))
-            .filter { item in
-                item.kind != .app || item.bundleIdentifier != Self.finderBundleID
-            }
-        guard !importedItems.isEmpty else {
-            return
-        }
-
-        let existingItems = preferences.pinnedItems
-        let additions = importedItems.filter { importedItem in
-            !existingItems.contains { existingItem in
-                Self.matchesImportedPinnedItem(existingItem, importedItem)
-            }
-        }
-        guard !additions.isEmpty else {
-            return
-        }
-
-        preferences.pinnedItems = existingItems + additions
-    }
-
-    private func synchronizeAppWidgetDisplaysWithFolders() {
-        let folderBundleIdentifiers = Set(preferences.pinnedItems.flatMap { item in
-            item.kind == .appFolder ? item.folderBundleIdentifiers : []
-        })
-        guard !folderBundleIdentifiers.isEmpty else {
-            return
-        }
-
-        let filteredDisplays = preferences.appWidgetDisplays.filter {
-            !folderBundleIdentifiers.contains($0.bundleIdentifier)
-        }
-        guard filteredDisplays != preferences.appWidgetDisplays else {
-            return
-        }
-
-        preferences.appWidgetDisplays = filteredDisplays
-    }
-
-    private func refreshTrailingPreferencesIfNeeded() {
-        let systemItems = systemOtherTiles.compactMap(Self.trailingItem(from:)) + [.trash()]
-        guard !systemItems.isEmpty else {
-            preferences.trailingItems = []
-            logTrailingItems("After refreshTrailingPreferencesIfNeeded cleared")
-            return
-        }
-
-        guard !preferences.trailingItems.isEmpty else {
-            preferences.trailingItems = systemItems
-            logTrailingItems("After refreshTrailingPreferencesIfNeeded seeded")
-            return
-        }
-
-        let availableFolderIDs = Set(systemOtherTiles.map(\.id))
-        var mergedItems: [TrailingTileItem] = preferences.trailingItems.filter { item in
-            switch item.kind {
-            case .folder:
-                if let sourceTileID = item.sourceTileID {
-                    return availableFolderIDs.contains(sourceTileID)
-                }
-                return item.folderURL != nil
-            case .trash, .widget, .smartStack, .spacer, .flexibleSpacer, .divider:
-                return true
-            }
-        }
-
-        if !mergedItems.contains(where: { $0.kind == .trash }) {
-            mergedItems.append(.trash())
-        }
-
-        let existingSystemSourceIDs = Set(mergedItems.compactMap(\.sourceTileID))
-        let additions = systemItems.filter { item in
-            guard let sourceTileID = item.sourceTileID else {
-                return item.kind == .trash && !mergedItems.contains(where: { $0.kind == .trash })
-            }
-
-            return !existingSystemSourceIDs.contains(sourceTileID)
-        }
-        if !additions.isEmpty {
-            mergedItems.append(contentsOf: additions)
-        }
-
-        guard mergedItems != preferences.trailingItems else {
-            return
-        }
-
-        preferences.trailingItems = mergedItems
-        logTrailingItems("After refreshTrailingPreferencesIfNeeded merged")
-    }
-
     private func logTrailingItems(_ message: String) {
-        let summary = preferences.trailingItems.map(Self.trailingItemDebugDescription(_:))
+        let summary =
+            preferences.trailingItems.map(
+                Self.trailingItemDebugDescription(_:)
+            )
         NSLog("[Docky] \(message): \(summary)")
     }
 
@@ -2127,7 +3011,14 @@ final class TileStore: ObservableObject {
         trailingTiles = visibleItems.compactMap(trailingTile(for:))
     }
 
-    private func suggestAppFolderNameIfNeeded(folderID: String, expectedDisplayName: String, apps: [AppTile]) {
+    private func suggestAppFolderNameIfNeeded(
+        folderID: String,
+        expectedDisplayName: String,
+        expectedBundleIdentifiers: [String],
+        expectedProfileID: String,
+        expectedRevision: UInt64,
+        apps: [AppTile]
+    ) {
         guard apps.count >= 2 else {
             return
         }
@@ -2145,20 +3036,78 @@ final class TileStore: ObservableObject {
                 return
             }
 
-            guard let itemIndex = self.preferences.pinnedItems.firstIndex(where: { $0.id == folderID }) else {
+            let normalizedSuggestedName =
+                self.normalizeAppFolderDisplayName(
+                    suggestedName
+                )
+            var didPrepareRename = false
+            let applied =
+                ProfileService.shared
+                .applyActiveProfileTransaction(
+                    expectedProfileID:
+                        expectedProfileID,
+                    expectedRevision:
+                        expectedRevision,
+                    reason:
+                        "suggestAppFolderName"
+                ) { profile in
+                    guard let itemIndex =
+                            profile.pinnedItems
+                            .firstIndex(where: {
+                                $0.id == folderID
+                            })
+                    else {
+                        return
+                    }
+
+                    let existingItem =
+                        profile.pinnedItems[
+                            itemIndex
+                        ]
+                    guard existingItem.kind
+                            == .appFolder,
+                          (
+                            existingItem
+                                .folderDisplayName
+                                ?? "Folder"
+                          )
+                            == expectedDisplayName,
+                          existingItem
+                            .folderBundleIdentifiers
+                            == expectedBundleIdentifiers,
+                          existingItem
+                            .folderDisplayName
+                            != normalizedSuggestedName
+                    else {
+                        return
+                    }
+
+                    profile.pinnedItems[
+                        itemIndex
+                    ] = .appFolder(
+                        id: existingItem.id,
+                        displayName:
+                            normalizedSuggestedName,
+                        bundleIdentifiers:
+                            existingItem
+                            .folderBundleIdentifiers,
+                        displayMode:
+                            existingItem
+                            .appFolderDisplayMode
+                            ?? .grid,
+                        contentViewMode:
+                            existingItem
+                            .folderContentViewMode
+                            ?? .grid
+                    )
+                    didPrepareRename = true
+                }
+            guard applied, didPrepareRename else {
                 return
             }
 
-            let existingItem = self.preferences.pinnedItems[itemIndex]
-            guard existingItem.kind == .appFolder,
-                  (existingItem.folderDisplayName ?? "Folder") == expectedDisplayName else {
-                return
-            }
-
-            self.renameAppFolder(
-                tileID: Self.pinnedTileID(for: existingItem),
-                displayName: suggestedName
-            )
+            self.refreshPinnedTilesFromPreferences()
+            self.rebuildTiles()
         }
     }
 
@@ -2179,40 +3128,34 @@ final class TileStore: ObservableObject {
         }
     }
 
-    private func groupedAppInsertionIndex(before targetIndex: Int, removing bundleIdentifiers: [String]) -> Int {
-        let removedBundleIdentifiers = Set(bundleIdentifiers)
-
-        return preferences.pinnedItems.prefix(targetIndex).reduce(into: 0) { count, item in
-            switch item.kind {
-            case .app:
-                if let bundleIdentifier = item.bundleIdentifier,
-                   removedBundleIdentifiers.contains(bundleIdentifier) {
-                    return
-                }
-                count += 1
-            case .appFolder:
-                let remainingBundleIdentifiers = item.folderBundleIdentifiers.filter {
-                    !removedBundleIdentifiers.contains($0)
-                }
-                if remainingBundleIdentifiers.isEmpty {
-                    return
-                }
-                count += 1
-            case .launchpad, .startMenu, .widget, .smartStack, .spacer, .flexibleSpacer, .divider:
-                count += 1
-            }
+    private static func bundleIdentifiers(
+        in item: PinnedTileItem
+    ) -> [String] {
+        switch item.kind {
+        case .app:
+            return item.bundleIdentifier.map { [$0] } ?? []
+        case .appFolder:
+            return item.folderBundleIdentifiers
+        case .launchpad, .startMenu, .widget, .smartStack,
+             .spacer, .flexibleSpacer, .divider:
+            return []
         }
     }
 
-    private func removingGroupedApps(
+    /// Removes app membership from an authoritative pinned layout without
+    /// publishing intermediate preference states. Folders are normalized in
+    /// the candidate: empty folders disappear and one-member folders become
+    /// a standalone app.
+    private static func removingApps(
         _ bundleIdentifiers: [String],
-        replacingTargetTileID targetTileID: String? = nil
+        from items: [PinnedTileItem],
+        preservingItemID: String? = nil
     ) -> [PinnedTileItem] {
         let removedBundleIdentifiers = Set(bundleIdentifiers)
 
-        return preferences.pinnedItems.compactMap { item in
-            if let targetTileID, Self.pinnedTileID(for: item) == targetTileID {
-                return nil
+        return items.compactMap { item in
+            if item.id == preservingItemID {
+                return item
             }
 
             switch item.kind {
@@ -2229,7 +3172,6 @@ final class TileStore: ObservableObject {
                     return item
                 }
 
-                expandedInlineAppFolderIDs.remove(item.id)
                 switch remainingBundleIdentifiers.count {
                 case 0:
                     return nil
@@ -2248,6 +3190,51 @@ final class TileStore: ObservableObject {
                 return item
             }
         }
+    }
+
+    private static func hasValidAppMembership(
+        _ items: [PinnedTileItem]
+    ) -> Bool {
+        var itemIDs: Set<String> = []
+        var bundleIdentifiers: Set<String> = []
+
+        for item in items {
+            guard itemIDs.insert(item.id).inserted else {
+                return false
+            }
+            switch item.kind {
+            case .app:
+                guard let bundleIdentifier = item.bundleIdentifier,
+                      !bundleIdentifier.isEmpty,
+                      bundleIdentifier != finderBundleID,
+                      bundleIdentifiers.insert(
+                          bundleIdentifier
+                      ).inserted else {
+                    return false
+                }
+            case .appFolder:
+                let members =
+                    item.folderBundleIdentifiers.filter {
+                        !$0.isEmpty && $0 != finderBundleID
+                    }
+                guard members.count >= 2,
+                      Set(members).count == members.count else {
+                    return false
+                }
+                for bundleIdentifier in members {
+                    guard bundleIdentifiers.insert(
+                        bundleIdentifier
+                    ).inserted else {
+                        return false
+                    }
+                }
+            case .launchpad, .startMenu, .widget,
+                 .smartStack, .spacer,
+                 .flexibleSpacer, .divider:
+                continue
+            }
+        }
+        return true
     }
 
     private func trailingItem(forTileID tileID: String) -> TrailingTileItem? {
@@ -2879,11 +3866,15 @@ final class TileStore: ObservableObject {
         }
     }
 
-    private static func pinnedTileID(for item: PinnedTileItem) -> String {
+    nonisolated private static func pinnedTileID(
+        for item: PinnedTileItem
+    ) -> String {
         "pinned:\(item.id)"
     }
 
-    private static func trailingTileID(for item: TrailingTileItem) -> String {
+    nonisolated private static func trailingTileID(
+        for item: TrailingTileItem
+    ) -> String {
         "trailing:\(item.id)"
     }
 
@@ -3136,6 +4127,12 @@ final class TileStore: ObservableObject {
 private struct SystemDockSnapshot: @unchecked Sendable {
     let pinnedTiles: [Tile]
     let otherTiles: [Tile]
+}
+
+private struct SystemDockPreferenceSyncRequest {
+    let credentials: ProfileMutationCredentials
+    let marksSystemImportComplete: Bool
+    let reason: String
 }
 
 private struct ResolvedApplicationMetadata: Sendable {

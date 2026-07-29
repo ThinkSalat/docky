@@ -22,7 +22,10 @@ struct LaunchpadSettingsView: View {
             if !hidesAvailabilitySection {
                 Section("Availability") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Enable Launchpad", isOn: $preferences.enablesLaunchpadOverlay)
+                        Toggle(
+                            "Enable Launchpad",
+                            isOn: launchpadEnabledBinding
+                        )
                             .font(.headline)
 
                         Text("Turn Docky's Launchpad overlay on or off without removing its shortcut or layout preferences.")
@@ -52,7 +55,7 @@ struct LaunchpadSettingsView: View {
                             isRecording: $isRecordingShortcut,
                             resetShortcut: nil
                         ) { shortcut in
-                            preferences.launchpadShortcut = shortcut
+                            preferences.setLaunchpadShortcut(shortcut)
                         }
                         .disabled(!preferences.enablesLaunchpadOverlay)
                     }
@@ -60,6 +63,17 @@ struct LaunchpadSettingsView: View {
                     Text("Leave this unset if you only want to open Launchpad from the Docky tile or context menu.")
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    if let error =
+                        preferences.launchpadShortcutErrorMessage
+                    {
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .fixedSize(
+                                horizontal: false,
+                                vertical: true
+                            )
+                    }
                 }
                 .padding(.vertical, 4)
             }
@@ -238,6 +252,13 @@ struct LaunchpadSettingsView: View {
         Binding(
             get: { preferences.launchpadOverlayTransparency },
             set: { preferences.launchpadOverlayTransparency = min(max($0, 0), 1) }
+        )
+    }
+
+    private var launchpadEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { preferences.enablesLaunchpadOverlay },
+            set: { preferences.setLaunchpadOverlayEnabled($0) }
         )
     }
 

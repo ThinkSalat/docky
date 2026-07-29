@@ -59,7 +59,11 @@ struct MainWindowView: View {
     }
 
     private var isTrackingMagnification: Bool {
-        dockSettings.magnification && magnification.pointerLocation != nil
+        TileHoverEffectsRuntimePolicy.allowsMagnification(
+            isEnabled: preferences.tileHoverEffectsEnabled,
+            configuredEnabled: dockSettings.effectiveMagnification
+        )
+            && magnification.pointerLocation != nil
     }
 
     private var dockEdgeAlignment: Alignment {
@@ -303,7 +307,9 @@ struct MainWindowView: View {
     }
 
     private var maximumCornerRadius: CGFloat {
-        let iconHeight = layoutService.scaled(dockSettings.displayTileSize)
+        let iconHeight = layoutService.scaled(
+            dockSettings.effectiveTileSize
+        )
         return (iconHeight + layoutService.scaled(preferences.effectiveTileVerticalPadding) * 2) / 2
     }
 
@@ -317,7 +323,7 @@ struct MainWindowView: View {
         // total below the closed-form constant.
         let usesFullAxis = preferences.effectiveWindowAxisSizing == .fullAxis
         let growth = chromeMetrics.axisGrowth
-        guard dockSettings.magnification,
+        guard dockSettings.effectiveMagnification,
               !usesFullAxis else {
             return surfaces
         }
@@ -450,11 +456,31 @@ final class ClickThroughHostingView: NSHostingView<MainWindowView> {
                 urls.map(\.path).joined(separator: ", "),
                 pasteboardTypes.joined(separator: ", ")
             )
-            DockDragService.shared.begin(kind: kind, at: location)
+            guard DockDragService.shared.begin(
+                kind: kind,
+                at: location,
+                sequenceNumber:
+                    sender.draggingSequenceNumber
+            ) else {
+                return []
+            }
+            guard DockDragService.shared
+                    .hasCurrentInteractionCredentials(
+                        sequenceNumber:
+                            sender.draggingSequenceNumber
+                    )
+            else {
+                DockDragService.shared
+                    .invalidateCurrentInteraction(
+                        sequenceNumber:
+                            sender.draggingSequenceNumber
+                    )
+                return []
+            }
             updateSystemDragImageVisibility(in: sender)
             return .copy
         }
-        if DockEditModeService.shared.paletteDrag != nil {
+        if validatedPaletteDrag(from: sender) != nil {
             NSLog(
                 "[Docky] drag entered: kind=palette urls=%@ pasteboardTypes=%@",
                 urls.map(\.path).joined(separator: ", "),
@@ -487,11 +513,24 @@ final class ClickThroughHostingView: NSHostingView<MainWindowView> {
     override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
         let location = convert(sender.draggingLocation, from: nil)
         if DockDragService.shared.kind != nil {
+            guard DockDragService.shared
+                    .hasCurrentInteractionCredentials(
+                        sequenceNumber:
+                            sender.draggingSequenceNumber
+                    )
+            else {
+                DockDragService.shared
+                    .invalidateCurrentInteraction(
+                        sequenceNumber:
+                            sender.draggingSequenceNumber
+                    )
+                return []
+            }
             DockDragService.shared.updateCursor(location)
             updateSystemDragImageVisibility(in: sender)
             return .copy
         }
-        if DockEditModeService.shared.paletteDrag != nil {
+        if validatedPaletteDrag(from: sender) != nil {
             DockDragService.shared.cursorLocation = location
             updateSystemDragImageVisibility(in: sender)
             return .copy
@@ -510,15 +549,22 @@ final class ClickThroughHostingView: NSHostingView<MainWindowView> {
         DockDragService.shared.destinationIndex = nil
         DockDragService.shared.destinationSection = nil
         DockDragService.shared.documentTargetTileID = nil
-        // Keep paletteDrag alive so re-entry works — the SwiftUI .onDrag-initiated
-        // drag is still in flight outside the window, and the palette item can't be
-        // recovered from the pasteboard (which only carries the variant ID).
+        // Keep paletteDrag alive so re-entry works. The pasteboard carries an
+        // opaque token, while the item and its source revision remain in the
+        // token-matched session until mouse-up.
         DockEditModeService.shared.paletteDropDestination = nil
         restoreSystemDragImage()
     }
 
     override func draggingEnded(_ sender: any NSDraggingInfo) {
+        if let pasteboardToken =
+                readPalettePasteboardToken(from: sender) {
+            DockEditModeService.shared.endPaletteDrag(
+                matching: pasteboardToken
+            )
+        }
         DockDragService.shared.clear()
+        restoreSystemDragImage()
     }
 
     /// Hide the system drag preview when our own insertion preview is active, so the
@@ -558,6 +604,22 @@ final class ClickThroughHostingView: NSHostingView<MainWindowView> {
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         defer { restoreSystemDragImage() }
         if let kind = DockDragService.shared.kind {
+            guard let interactionCredentials =
+                    DockDragService.shared
+                    .interactionCredentials,
+                  DockDragService.shared
+                    .hasCurrentInteractionCredentials(
+                        sequenceNumber:
+                            sender.draggingSequenceNumber
+                    )
+            else {
+                DockDragService.shared
+                    .invalidateCurrentInteraction(
+                        sequenceNumber:
+                            sender.draggingSequenceNumber
+                    )
+                return false
+            }
             let destinationIndex = DockDragService.shared.destinationIndex
             let targetTileID = DockDragService.shared.documentTargetTileID
             NSLog(
@@ -566,20 +628,23 @@ final class ClickThroughHostingView: NSHostingView<MainWindowView> {
                 destinationIndex.map(String.init) ?? "nil",
                 targetTileID ?? "nil"
             )
-            let sourceFolderTileID = DockDragService.shared.sourceFolderTileID
-            let sourceFolderBundleIdentifier = DockDragService.shared.sourceFolderBundleIdentifier
             defer { DockDragService.shared.clear() }
             switch kind {
             case .app(_, let tile):
                 guard let index = destinationIndex else { return false }
-                if let sourceFolderTileID,
-                   sourceFolderBundleIdentifier == tile.bundleIdentifier {
-                    TileStore.shared.removeAppFromFolder(
-                        tileID: sourceFolderTileID,
-                        bundleIdentifier: tile.bundleIdentifier
-                    )
-                }
-                return TileStore.shared.pinApp(bundleIdentifier: tile.bundleIdentifier, at: index)
+                // `pinApp` relocates folder membership, hidden state, and the
+                // pinned insertion in one profile transaction. Removing the
+                // folder child first could otherwise strand it if the later
+                // pin commit were rejected.
+                return TileStore.shared.pinApp(
+                    bundleIdentifier:
+                        tile.bundleIdentifier,
+                    at: index,
+                    expectedProfileID:
+                        interactionCredentials.profileID,
+                    expectedRevision:
+                        interactionCredentials.revision
+                )
             case .folder(let url, let tile):
                 if let targetTileID,
                    let bundleIdentifier = TileStore.shared.tiles
@@ -592,11 +657,14 @@ final class ClickThroughHostingView: NSHostingView<MainWindowView> {
                     return true
                 }
                 guard let index = destinationIndex else { return false }
-                TileStore.shared.insertTrailingItem(
+                return TileStore.shared.insertTrailingItem(
                     .folder(url: url, displayName: tile.displayName),
-                    at: index
+                    at: index,
+                    expectedProfileID:
+                        interactionCredentials.profileID,
+                    expectedRevision:
+                        interactionCredentials.revision
                 )
-                return true
             case .document(let urls):
                 guard let targetTileID,
                       let bundleIdentifier = TileStore.shared.tiles
@@ -611,21 +679,45 @@ final class ClickThroughHostingView: NSHostingView<MainWindowView> {
                 return true
             }
         }
-        if let paletteDrag = DockEditModeService.shared.paletteDrag,
+        if let paletteDrag =
+                validatedPaletteDrag(from: sender),
            let destination = DockEditModeService.shared.paletteDropDestination {
             defer {
-                DockEditModeService.shared.endPaletteDrag()
+                DockEditModeService.shared.endPaletteDrag(
+                    matching:
+                        paletteDrag.pasteboardToken
+                )
                 DockDragService.shared.cursorLocation = nil
+            }
+            let profileService = ProfileService.shared
+            guard paletteDrag.expectedProfileID
+                    == profileService.activeProfileID,
+                  paletteDrag.expectedRevision
+                    == profileService.stateRevision
+            else {
+                return false
             }
             switch destination.section {
             case .pinned:
                 guard let item = TileContainerView.makePinnedItem(from: paletteDrag) else { return false }
-                TileStore.shared.insertPinnedItem(item, at: destination.index)
-                return true
+                return TileStore.shared.insertPinnedItem(
+                    item,
+                    at: destination.index,
+                    expectedProfileID:
+                        paletteDrag.expectedProfileID,
+                    expectedRevision:
+                        paletteDrag.expectedRevision
+                )
             case .trailing:
                 guard let item = TileContainerView.makeTrailingItem(from: paletteDrag) else { return false }
-                TileStore.shared.insertTrailingItem(item, at: destination.index)
-                return true
+                return TileStore.shared.insertTrailingItem(
+                    item,
+                    at: destination.index,
+                    expectedProfileID:
+                        paletteDrag.expectedProfileID,
+                    expectedRevision:
+                        paletteDrag.expectedRevision
+                )
             }
         }
         return false
@@ -634,5 +726,48 @@ final class ClickThroughHostingView: NSHostingView<MainWindowView> {
     private func readURLs(from sender: any NSDraggingInfo) -> [URL] {
         let pasteboard = sender.draggingPasteboard
         return (pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL]) ?? []
+    }
+
+    private func readPalettePasteboardToken(
+        from sender: any NSDraggingInfo
+    ) -> String? {
+        sender.draggingPasteboard.string(
+            forType: .string
+        )
+    }
+
+    private func validatedPaletteDrag(
+        from sender: any NSDraggingInfo
+    ) -> DockEditPaletteDrag? {
+        let editMode =
+            DockEditModeService.shared
+        let payload =
+            readPalettePasteboardToken(from: sender)
+        guard let paletteDrag =
+                editMode.paletteDrag else {
+            return nil
+        }
+        guard editMode.hasCurrentPalettePayload(
+            payload
+        ) else {
+            editMode.endPaletteDrag(
+                matching:
+                    paletteDrag.pasteboardToken
+            )
+            return nil
+        }
+        let profileService = ProfileService.shared
+        guard paletteDrag.expectedProfileID
+                == profileService.activeProfileID,
+              paletteDrag.expectedRevision
+                == profileService.stateRevision
+        else {
+            editMode.endPaletteDrag(
+                matching:
+                    paletteDrag.pasteboardToken
+            )
+            return nil
+        }
+        return paletteDrag
     }
 }

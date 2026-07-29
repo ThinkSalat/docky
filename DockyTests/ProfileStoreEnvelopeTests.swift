@@ -7,7 +7,166 @@ final class ProfileStoreEnvelopeTests: XCTestCase {
         let name: String
     }
 
+    private struct ContentFixtureProfile:
+        Codable,
+        Equatable,
+        Identifiable {
+        let id: String
+        let name: String
+        let pinned: [String]
+        let trailing: [String]
+        let widgets: [String]
+        let hidden: [String]
+    }
+
+    private struct RepairFixtureProfile:
+        Codable,
+        Equatable,
+        Identifiable,
+        ProfileStoreLegacyExactSpaceRepairable {
+        let id: String
+        let name: String
+        let symbolName: String
+        let dateCreated: Date
+        let hidden: [String]
+        var triggers: [ProfileTrigger]
+    }
+
     private typealias Document = ProfileStoreEnvelope<FixtureProfile>
+    private typealias ContentDocument =
+        ProfileStoreEnvelope<ContentFixtureProfile>
+
+    func testRepeatedManualActivationEmitsIntentWithoutDurableOrLayoutMutation() {
+        let disposition =
+            ManualActivationDispositionPolicy.resolve(
+                runtimeAlreadyActive: true,
+                durableAlreadySelected: true
+            )
+
+        XCTAssertTrue(disposition.shouldEmitIntentNotification)
+        XCTAssertFalse(disposition.shouldPersistDefault)
+        XCTAssertFalse(disposition.shouldApplyLayout)
+        XCTAssertTrue(disposition.isVisuallyAndDurablyIdempotent)
+    }
+
+    func testManualActivationSideEffectsRemainIndependent() {
+        XCTAssertEqual(
+            ManualActivationDispositionPolicy.resolve(
+                runtimeAlreadyActive: true,
+                durableAlreadySelected: false
+            ),
+            ManualActivationDisposition(
+                shouldEmitIntentNotification: true,
+                shouldPersistDefault: true,
+                shouldApplyLayout: false
+            )
+        )
+        XCTAssertEqual(
+            ManualActivationDispositionPolicy.resolve(
+                runtimeAlreadyActive: false,
+                durableAlreadySelected: true
+            ),
+            ManualActivationDisposition(
+                shouldEmitIntentNotification: true,
+                shouldPersistDefault: false,
+                shouldApplyLayout: true
+            )
+        )
+    }
+
+    func testSchemaOneLoadsOnlyThroughMigrationBoundary() throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "schemaVersion": 1,
+              "revision": 7,
+              "activeProfileID": "default",
+              "profiles": [
+                {"id": "default", "name": "Default"}
+              ]
+            }
+            """.data(using: .utf8)
+        )
+        let document = try JSONDecoder().decode(
+            Document.self,
+            from: data
+        )
+
+        XCTAssertEqual(document.schemaVersion, 1)
+        XCTAssertEqual(document.spaceAssignments, [])
+        XCTAssertNoThrow(try Document.validateForLoad(document))
+        XCTAssertThrowsError(try Document.validate(document))
+    }
+
+    func testSchemaTwoRequiresSpaceAssignmentsField() throws {
+        let data = try XCTUnwrap(
+            """
+            {
+              "schemaVersion": 2,
+              "revision": 7,
+              "activeProfileID": "default",
+              "profiles": [
+                {"id": "default", "name": "Default"}
+              ]
+            }
+            """.data(using: .utf8)
+        )
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(Document.self, from: data)
+        ) { error in
+            guard case DecodingError.keyNotFound(let key, _) = error else {
+                return XCTFail(
+                    "Expected missing spaceAssignments, got \(error)"
+                )
+            }
+            XCTAssertEqual(key.stringValue, "spaceAssignments")
+        }
+    }
+
+    func testSpaceAssignmentMustBeUniqueAndReferenceAProfile() {
+        let profile = FixtureProfile(id: "default", name: "Default")
+        let identity = MissionControlSpaceIdentity(
+            displayUUID: "DISPLAY-A",
+            spaceUUID: "SPACE-A"
+        )!
+
+        assertValidationError(
+            in: Document(
+                revision: 1,
+                activeProfileID: profile.id,
+                profiles: [profile],
+                spaceAssignments: [
+                    SpaceProfileAssignment(
+                        identity: identity,
+                        profileID: profile.id
+                    ),
+                    SpaceProfileAssignment(
+                        identity: identity,
+                        profileID: profile.id
+                    ),
+                ]
+            ),
+            equals: .duplicateSpaceAssignment(
+                identity.storageKey
+            )
+        )
+
+        assertValidationError(
+            in: Document(
+                revision: 1,
+                activeProfileID: profile.id,
+                profiles: [profile],
+                spaceAssignments: [
+                    SpaceProfileAssignment(
+                        identity: identity,
+                        profileID: "missing"
+                    ),
+                ]
+            ),
+            equals: .spaceAssignmentProfileMissing("missing")
+        )
+    }
 
     func testValidDocumentRoundTripsAndValidates() throws {
         let document = Document(
@@ -26,6 +185,571 @@ final class ProfileStoreEnvelopeTests: XCTestCase {
 
         XCTAssertEqual(decoded, document)
         XCTAssertNoThrow(try Document.validate(decoded))
+    }
+
+    func testSpaceMutationPreservesEveryProfileContentField() throws {
+        let root = MissionControlSpaceIdentity(
+            displayUUID: "shared",
+            spaceUUID: ""
+        )!
+        let music = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "MUSIC"
+        )!
+        let profiles = [
+            ContentFixtureProfile(
+                id: "main",
+                name: "Main",
+                pinned: ["Safari", "Mail"],
+                trailing: ["Downloads"],
+                widgets: ["Weather"],
+                hidden: ["Calendar"]
+            ),
+            ContentFixtureProfile(
+                id: "music",
+                name: "WhatsApp + Spotify",
+                pinned: ["WhatsApp", "Spotify"],
+                trailing: [],
+                widgets: ["Now Playing"],
+                hidden: []
+            ),
+        ]
+        let original = ContentDocument(
+            revision: 8,
+            activeProfileID: "main",
+            profiles: profiles,
+            spaceAssignments: [
+                SpaceProfileAssignment(
+                    identity: root,
+                    profileID: "main"
+                ),
+            ]
+        )
+
+        let assigned = try XCTUnwrap(
+            ProfileStoreDocumentMutationPolicy.assigningSpace(
+                music,
+                to: "music",
+                in: original
+            )
+        )
+        XCTAssertEqual(assigned.profiles, profiles)
+        XCTAssertEqual(assigned.activeProfileID, "main")
+        XCTAssertEqual(assigned.revision, 8)
+        XCTAssertEqual(
+            assigned.spaceAssignments,
+            original.spaceAssignments + [
+                SpaceProfileAssignment(
+                    identity: music,
+                    profileID: "music"
+                ),
+            ]
+        )
+
+        let removed =
+            ProfileStoreDocumentMutationPolicy
+            .removingSpaceAssignment(
+                music,
+                from: "music",
+                in: assigned
+            )
+        XCTAssertEqual(removed, original)
+    }
+
+    func testProfileDeletionPreservesEveryUnrelatedValue() throws {
+        let main = ContentFixtureProfile(
+            id: "main",
+            name: "Main",
+            pinned: ["Safari"],
+            trailing: ["Downloads"],
+            widgets: ["Weather"],
+            hidden: ["Mail"]
+        )
+        let music = ContentFixtureProfile(
+            id: "music",
+            name: "WhatsApp + Spotify",
+            pinned: ["WhatsApp", "Spotify"],
+            trailing: [],
+            widgets: ["Now Playing"],
+            hidden: []
+        )
+        let third = ContentFixtureProfile(
+            id: "third",
+            name: "Work",
+            pinned: ["Xcode"],
+            trailing: ["Projects"],
+            widgets: [],
+            hidden: ["Messages"]
+        )
+        let root = MissionControlSpaceIdentity(
+            displayUUID: "shared",
+            spaceUUID: ""
+        )!
+        let musicSpace = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "MUSIC"
+        )!
+        let workSpace = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "WORK"
+        )!
+        let original = ContentDocument(
+            revision: 12,
+            activeProfileID: "music",
+            profiles: [main, music, third],
+            spaceAssignments: [
+                SpaceProfileAssignment(
+                    identity: root,
+                    profileID: "main"
+                ),
+                SpaceProfileAssignment(
+                    identity: musicSpace,
+                    profileID: "music"
+                ),
+                SpaceProfileAssignment(
+                    identity: workSpace,
+                    profileID: "third"
+                ),
+            ]
+        )
+
+        let deleted = try XCTUnwrap(
+            ProfileStoreDocumentMutationPolicy.deletingProfile(
+                "music",
+                from: original
+            )
+        )
+
+        XCTAssertEqual(deleted.profiles, [main, third])
+        XCTAssertEqual(deleted.activeProfileID, "main")
+        XCTAssertEqual(deleted.revision, 12)
+        XCTAssertEqual(
+            deleted.spaceAssignments,
+            [
+                original.spaceAssignments[0],
+                original.spaceAssignments[2],
+            ]
+        )
+    }
+
+    func testRuntimeDeletionFallbackUsesDurableDefaultNotArrayOrder()
+        throws {
+        let candidate = Document(
+            revision: 13,
+            activeProfileID: "main",
+            profiles: [
+                FixtureProfile(id: "gaming", name: "Gaming"),
+                FixtureProfile(id: "main", name: "Main"),
+            ]
+        )
+
+        XCTAssertEqual(
+            ProfileStoreDocumentMutationPolicy
+                .runtimeProfileIDAfterDeleting(
+                    "whatsapp",
+                    previousRuntimeProfileID: "whatsapp",
+                    from: candidate
+                ),
+            "main"
+        )
+        XCTAssertEqual(
+            ProfileStoreDocumentMutationPolicy
+                .runtimeProfileIDAfterDeleting(
+                    "whatsapp",
+                    previousRuntimeProfileID: "gaming",
+                    from: candidate
+                ),
+            "gaming"
+        )
+    }
+
+    func testLegacyExactRepairIsOneContentPreservingCandidate()
+        throws {
+        let currentSpace = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "CURRENT"
+        )!
+        let unrelatedSpace = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "UNRELATED"
+        )!
+        let gaming = RepairFixtureProfile(
+            id: "gaming",
+            name: "Gaming",
+            symbolName: "gamecontroller.fill",
+            dateCreated: Date(timeIntervalSince1970: 10),
+            hidden: ["com.example.hidden"],
+            triggers: []
+        )
+        let legacy = ProfileTrigger.exactSpace(
+            ExactSpaceTrigger(id: "legacy", spaceID: 413)
+        )
+        let retained = ProfileTrigger.frontmostApp(
+            FrontmostAppTrigger(
+                id: "retained",
+                bundleIdentifier: "net.whatsapp.WhatsApp"
+            )
+        )
+        let music = RepairFixtureProfile(
+            id: "music",
+            name: "WhatsApp + Spotify",
+            symbolName: "music.note",
+            dateCreated: Date(timeIntervalSince1970: 20),
+            hidden: [
+                "com.example.preserved",
+            ],
+            triggers: [legacy, retained]
+        )
+        let original = ProfileStoreEnvelope<RepairFixtureProfile>(
+            revision: 22,
+            activeProfileID: "gaming",
+            profiles: [gaming, music],
+            spaceAssignments: [
+                SpaceProfileAssignment(
+                    identity: currentSpace,
+                    profileID: "gaming"
+                ),
+                SpaceProfileAssignment(
+                    identity: unrelatedSpace,
+                    profileID: "gaming"
+                ),
+            ]
+        )
+
+        let repaired = try XCTUnwrap(
+            ProfileStoreDocumentMutationPolicy
+                .repairingLegacyExactSpaceBinding(
+                    profileID: "music",
+                    triggerID: "legacy",
+                    assigning: currentSpace,
+                    expectedOwnerProfileID: "gaming",
+                    in: original
+                )
+        )
+
+        XCTAssertEqual(repaired.revision, original.revision)
+        XCTAssertEqual(
+            repaired.activeProfileID,
+            original.activeProfileID
+        )
+        XCTAssertEqual(repaired.profiles[0], gaming)
+        var expectedMusic = music
+        expectedMusic.triggers = [retained]
+        XCTAssertEqual(repaired.profiles[1], expectedMusic)
+        XCTAssertEqual(
+            SpaceProfileAssignmentPolicy.profileID(
+                for: currentSpace,
+                in: repaired.spaceAssignments
+            ),
+            "music"
+        )
+        XCTAssertEqual(
+            SpaceProfileAssignmentPolicy.profileID(
+                for: unrelatedSpace,
+                in: repaired.spaceAssignments
+            ),
+            "gaming"
+        )
+
+        XCTAssertNil(
+            ProfileStoreDocumentMutationPolicy
+                .repairingLegacyExactSpaceBinding(
+                    profileID: "music",
+                    triggerID: "legacy",
+                    assigning: currentSpace,
+                    expectedOwnerProfileID: nil,
+                    in: original
+                ),
+            "A stale expected owner must reject the whole mutation."
+        )
+        XCTAssertNil(
+            ProfileStoreDocumentMutationPolicy
+                .repairingLegacyExactSpaceBinding(
+                    profileID: "music",
+                    triggerID: "retained",
+                    assigning: currentSpace,
+                    expectedOwnerProfileID: "gaming",
+                    in: original
+                ),
+            "A non-exact trigger must never be consumed as a repair row."
+        )
+    }
+
+    func testSavedLegacyRepairRejectsAReplacementIdentity() {
+        let savedSpace = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "SAVED"
+        )!
+        let otherSpace = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "OTHER"
+        )!
+        let profile = RepairFixtureProfile(
+            id: "music",
+            name: "Music",
+            symbolName: "music.note",
+            dateCreated: Date(timeIntervalSince1970: 1),
+            hidden: [],
+            triggers: [
+                .exactSpace(
+                    ExactSpaceTrigger(
+                        id: "saved",
+                        identity: savedSpace
+                    )
+                ),
+            ]
+        )
+        let document =
+            ProfileStoreEnvelope<RepairFixtureProfile>(
+            revision: 1,
+            activeProfileID: profile.id,
+            profiles: [profile]
+        )
+
+        XCTAssertNil(
+            ProfileStoreDocumentMutationPolicy
+                .repairingLegacyExactSpaceBinding(
+                    profileID: profile.id,
+                    triggerID: "saved",
+                    assigning: otherSpace,
+                    expectedOwnerProfileID: nil,
+                    in: document
+                )
+        )
+    }
+
+    func testSchemaOneAssignmentMergePreservesExistingValues()
+        throws {
+        let existingIdentity = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "EXISTING"
+        )!
+        let migratedIdentity = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "MIGRATED"
+        )!
+        let existing = SpaceProfileAssignment(
+            identity: existingIdentity,
+            profileID: "main"
+        )
+        let migrated = SpaceProfileAssignment(
+            identity: migratedIdentity,
+            profileID: "music"
+        )
+
+        XCTAssertEqual(
+            try ProfileStoreSchemaMigrationPolicy
+                .mergingSpaceAssignments(
+                    existing: [existing],
+                    migrated: [migrated, existing]
+                ),
+            [existing, migrated]
+        )
+    }
+
+    func testSchemaOneAssignmentMergeRejectsConflictingOwners() {
+        let identity = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "SAME"
+        )!
+
+        XCTAssertThrowsError(
+            try ProfileStoreSchemaMigrationPolicy
+                .mergingSpaceAssignments(
+                    existing: [
+                        SpaceProfileAssignment(
+                            identity: identity,
+                            profileID: "gaming"
+                        ),
+                    ],
+                    migrated: [
+                        SpaceProfileAssignment(
+                            identity: identity,
+                            profileID: "music"
+                        ),
+                    ]
+                )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProfileStoreValidationError,
+                .conflictingSpaceAssignmentMigration(
+                    identity.storageKey
+                )
+            )
+        }
+    }
+
+    func testFullRecoverySnapshotRetainsSchemaRevisionAndAssignments()
+        throws {
+        let identity = MissionControlSpaceIdentity(
+            displayUUID: "ignored",
+            spaceUUID: "MUSIC"
+        )!
+        let document = Document(
+            revision: 44,
+            activeProfileID: "music",
+            profiles: [
+                FixtureProfile(id: "main", name: "Main"),
+                FixtureProfile(
+                    id: "music",
+                    name: "WhatsApp + Spotify"
+                ),
+            ],
+            spaceAssignments: [
+                SpaceProfileAssignment(
+                    identity: identity,
+                    profileID: "music"
+                ),
+            ]
+        )
+
+        let data = try ProfileStoreRecoverySnapshotCodec.encode(
+            document
+        )
+        let recovered = try ProfileStoreRecoverySnapshotCodec.decode(
+            data,
+            as: FixtureProfile.self
+        )
+
+        XCTAssertEqual(recovered, document)
+        XCTAssertEqual(recovered.schemaVersion, 2)
+        XCTAssertEqual(recovered.revision, 44)
+        XCTAssertEqual(recovered.spaceAssignments.count, 1)
+    }
+
+    func testRecoverySnapshotEncodingHasStableSortedKeys() throws {
+        let document = Document(
+            revision: 44,
+            activeProfileID: "main",
+            profiles: [
+                FixtureProfile(id: "main", name: "Main"),
+            ]
+        )
+
+        let first = try ProfileStoreRecoverySnapshotCodec.encode(
+            document
+        )
+        let second = try ProfileStoreRecoverySnapshotCodec.encode(
+            document
+        )
+        XCTAssertEqual(first, second)
+
+        let json = try XCTUnwrap(
+            String(data: first, encoding: .utf8)
+        )
+        let orderedKeys = [
+            "\"activeProfileID\"",
+            "\"profiles\"",
+            "\"revision\"",
+            "\"schemaVersion\"",
+            "\"spaceAssignments\"",
+        ]
+        var lowerBound = json.startIndex
+        for key in orderedKeys {
+            let range = try XCTUnwrap(
+                json.range(
+                    of: key,
+                    range: lowerBound..<json.endIndex
+                )
+            )
+            lowerBound = range.upperBound
+        }
+    }
+
+    func testProfileMetadataRequiresSafeNamesAndUniqueTriggerIDs() {
+        XCTAssertNoThrow(
+            try ProfileStoreProfileMetadataPolicy.validate([
+                ProfileStoreProfileMetadata(
+                    profileID: "main",
+                    name: "Main",
+                    triggerIDs: ["main-trigger"]
+                ),
+                ProfileStoreProfileMetadata(
+                    profileID: "music",
+                    name: "WhatsApp + Spotify",
+                    triggerIDs: ["music-trigger"]
+                ),
+            ])
+        )
+
+        let invalidCases: [(
+            [ProfileStoreProfileMetadata],
+            ProfileStoreValidationError
+        )] = [
+            (
+                [
+                    ProfileStoreProfileMetadata(
+                        profileID: "blank",
+                        name: " \n ",
+                        triggerIDs: []
+                    ),
+                ],
+                .emptyProfileName("blank")
+            ),
+            (
+                [
+                    ProfileStoreProfileMetadata(
+                        profileID: "spaced",
+                        name: " Main ",
+                        triggerIDs: []
+                    ),
+                ],
+                .profileNameNotTrimmed("spaced")
+            ),
+            (
+                [
+                    ProfileStoreProfileMetadata(
+                        profileID: "one",
+                        name: "Résumé",
+                        triggerIDs: []
+                    ),
+                    ProfileStoreProfileMetadata(
+                        profileID: "two",
+                        name: "RESUME",
+                        triggerIDs: []
+                    ),
+                ],
+                .duplicateProfileName("RESUME")
+            ),
+            (
+                [
+                    ProfileStoreProfileMetadata(
+                        profileID: "one",
+                        name: "One",
+                        triggerIDs: ["same"]
+                    ),
+                    ProfileStoreProfileMetadata(
+                        profileID: "two",
+                        name: "Two",
+                        triggerIDs: ["same"]
+                    ),
+                ],
+                .duplicateTriggerID("same")
+            ),
+            (
+                [
+                    ProfileStoreProfileMetadata(
+                        profileID: "empty-trigger",
+                        name: "Empty trigger",
+                        triggerIDs: [""]
+                    ),
+                ],
+                .emptyTriggerID("empty-trigger")
+            ),
+        ]
+
+        for (profiles, expectedError) in invalidCases {
+            XCTAssertThrowsError(
+                try ProfileStoreProfileMetadataPolicy.validate(
+                    profiles
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? ProfileStoreValidationError,
+                    expectedError
+                )
+            }
+        }
     }
 
     func testFutureSchemaIsRejectedBeforeVersionSpecificPayload() throws {
@@ -269,6 +993,49 @@ final class ProfileStoreEnvelopeTests: XCTestCase {
         )
     }
 
+    func testProfileServiceWiresIdempotentManualIntentDisposition()
+        throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Docky/Services/ProfileService.swift"
+            ),
+            encoding: .utf8
+        )
+        let branchStart = try XCTUnwrap(
+            source.range(
+                of:
+                    "if let manualDisposition,\n" +
+                    "           manualDisposition.isVisuallyAndDurablyIdempotent"
+            )
+        )
+        let activationStart = try XCTUnwrap(
+            source.range(
+                of:
+                    "diagnostics.record(.profiles, \"profileActivationBegan\"",
+                range: branchStart.upperBound..<source.endIndex
+            )
+        )
+        let idempotentBranch = source[
+            branchStart.lowerBound..<activationStart.lowerBound
+        ]
+
+        XCTAssertTrue(
+            idempotentBranch.contains(
+                "manualDisposition.shouldEmitIntentNotification"
+            )
+        )
+        XCTAssertTrue(
+            idempotentBranch.contains("postActivationChange(")
+        )
+        XCTAssertFalse(idempotentBranch.contains("commit("))
+        XCTAssertFalse(
+            idempotentBranch.contains("activateRuntimeProfile(")
+        )
+    }
+
     func testProfileBackedEditsAvoidMainActorJSONCompatibilityWrites() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -326,6 +1093,62 @@ final class ProfileStoreEnvelopeTests: XCTestCase {
                 "persistenceCoordinator.flush()\n" +
                 "        legacySnapshotCoordinator.flush()"
             )
+        )
+    }
+
+    func testUserDefaultsRecoverySnapshotStoresTheWholeDocument()
+        throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Docky/Services/ProfileService.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(
+            source.contains(
+                "\"docky.profileStoreSnapshotV2\""
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "ProfileStoreRecoverySnapshotCodec.encode("
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "ProfileStoreRecoverySnapshotCodec.decode("
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "defaults.data(forKey: LegacyKeys.fullDocument)"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "defaults.data(forKey: LegacyKeys.profiles)"
+            )
+        )
+        let fullSnapshot = try XCTUnwrap(
+            source.range(
+                of:
+                    "if let fullSnapshotObject = defaults.object("
+            )
+        )
+        let profilesOnly = try XCTUnwrap(
+            source.range(
+                of:
+                    "guard let legacyData = defaults.data(forKey: LegacyKeys.profiles)"
+            )
+        )
+        XCTAssertLessThan(
+            fullSnapshot.lowerBound,
+            profilesOnly.lowerBound,
+            "Full schema-2 recovery must take precedence over the lossy profiles-only snapshot."
         )
     }
 

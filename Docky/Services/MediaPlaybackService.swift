@@ -5,6 +5,7 @@
 
 import AppKit
 import Combine
+import Darwin
 import Foundation
 import OSLog
 
@@ -139,6 +140,17 @@ final class MediaPlaybackService: ObservableObject {
 
     func refresh() {
         mediaRemote.start()
+    }
+
+    var requiresShutdown: Bool {
+        mediaRemote.requiresShutdown
+    }
+
+    /// Begins an idempotent, bounded helper shutdown. Completion is always
+    /// delivered on the main queue, while all process waiting happens on a
+    /// utility queue.
+    func shutdown(completion: (() -> Void)? = nil) {
+        mediaRemote.shutdown(completion: completion)
     }
 
     func togglePlayPause(for bundleIdentifier: String) async {
@@ -643,6 +655,15 @@ private final class MediaRemoteBridge {
         helper.startIfNeeded()
     }
 
+    var requiresShutdown: Bool {
+        helper.requiresShutdown
+    }
+
+    func shutdown(completion: (() -> Void)? = nil) {
+        cancelFavoriteLookup()
+        helper.shutdown(completion: completion)
+    }
+
     func sendCommand(_ command: Command) {
         _ = sendRemoteCommand?(command.rawValue, nil)
     }
@@ -899,66 +920,222 @@ private final class MediaRemoteHelperProcess {
 
     var onSnapshot: ((MediaRemoteSnapshot?) -> Void)?
 
+    private let stateLock = NSLock()
+    private let terminationQueue = DispatchQueue(
+        label: "gt.quintero.Docky.media-remote-termination",
+        qos: .utility
+    )
+    private var lifecycle = MediaRemoteProcessLifecycleState()
     private var process: Process?
     private var outputPipe: Pipe?
     private var bufferedOutput = Data()
+    private var orphanCleanupWasScheduled = false
+    private var shutdownWorkIsRunning = false
+    private var shutdownDidFinish = false
+    private var shutdownCompletions: [() -> Void] = []
+
+    var requiresShutdown: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return process != nil || shutdownWorkIsRunning
+    }
 
     func startIfNeeded() {
-        guard process?.isRunning != true else {
+        stateLock.lock()
+        let running = process?.isRunning == true
+        let shutdownWasRequested = lifecycle.shutdownWasRequested
+        stateLock.unlock()
+
+        guard !shutdownWasRequested else {
+            Self.logger.debug(
+                "startIfNeeded skipped; helper shutdown was requested"
+            )
+            return
+        }
+        guard !running else {
             Self.logger.debug("startIfNeeded skipped; helper already running")
             return
         }
 
         Self.logger.debug("startIfNeeded beginning helper launch")
-        stop()
+        detachInactiveProcess()
 
-        guard let launch = resolveLaunchConfiguration() else {
+        guard let command = resolveLaunchConfiguration() else {
             Self.logger.error("Failed to resolve helper launch configuration")
             return
         }
+        scheduleOrphanCleanupIfNeeded(command: command)
 
-        Self.logger.debug("Launching helper executable: \(launch.executablePath, privacy: .public)")
+        Self.logger.debug(
+            "Launching helper executable: \(command.executablePath, privacy: .public)"
+        )
 
         let process = Process()
         let outputPipe = Pipe()
-        self.outputPipe = outputPipe
-        process.executableURL = URL(fileURLWithPath: launch.executablePath)
-        process.arguments = launch.arguments
+        process.executableURL = URL(
+            fileURLWithPath: command.executablePath
+        )
+        process.arguments = Array(command.arguments.dropFirst())
         process.standardOutput = outputPipe
-        process.standardError = Pipe()
-        process.terminationHandler = { [weak self] _ in
+        process.standardError = FileHandle.nullDevice
+
+        stateLock.lock()
+        guard let generation = lifecycle.beginLaunch() else {
+            stateLock.unlock()
+            Self.logger.debug(
+                "Helper launch cancelled because shutdown began"
+            )
+            return
+        }
+        self.outputPipe = outputPipe
+        stateLock.unlock()
+
+        process.terminationHandler = { [weak self] terminatedProcess in
             Self.logger.debug("Helper terminated")
             DispatchQueue.main.async {
-                self?.handleTermination()
+                self?.handleTermination(
+                    process: terminatedProcess,
+                    generation: generation
+                )
             }
         }
 
-        installOutputReader()
+        installOutputReader(generation: generation)
 
         do {
             try process.run()
+            stateLock.lock()
             self.process = process
+            stateLock.unlock()
             Self.logger.debug("Helper process launched successfully")
         } catch {
             Self.logger.error("Helper process failed to launch: \(error.localizedDescription, privacy: .public)")
-            stop()
+            handleFailedLaunch(generation: generation)
         }
     }
 
-    private func stop() {
-        Self.logger.debug("Stopping helper process")
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        bufferedOutput.removeAll(keepingCapacity: false)
-        outputPipe = nil
+    /// Idempotently detaches the helper, then performs all bounded waiting on
+    /// a utility queue. AppDelegate delays final termination until completion,
+    /// so the child is reaped before Docky exits without blocking the UI.
+    func shutdown(completion: (() -> Void)? = nil) {
+        var processToStop: Process?
+        var pipeToClose: Pipe?
 
-        if let process, process.isRunning {
-            process.terminate()
+        stateLock.lock()
+        if let completion {
+            shutdownCompletions.append(completion)
+        }
+        if shutdownDidFinish {
+            let completions = shutdownCompletions
+            shutdownCompletions.removeAll()
+            stateLock.unlock()
+            deliverShutdownCompletions(completions)
+            return
+        }
+        if shutdownWorkIsRunning {
+            stateLock.unlock()
+            return
         }
 
+        _ = lifecycle.beginShutdown()
+        shutdownWorkIsRunning = true
+        processToStop = process
         process = nil
+        pipeToClose = outputPipe
+        outputPipe = nil
+        bufferedOutput.removeAll(keepingCapacity: false)
+        stateLock.unlock()
+
+        pipeToClose?.fileHandleForReading.readabilityHandler = nil
+        try? pipeToClose?.fileHandleForReading.close()
+        processToStop?.terminationHandler = nil
+
+        guard let processToStop else {
+            finishShutdown(outcome: .alreadyExited)
+            return
+        }
+
+        terminationQueue.async { [weak self] in
+            let outcome = MediaRemoteProcessTerminator.terminate(
+                using: MediaRemoteTerminationOperations(
+                    isRunning: {
+                        processToStop.isRunning
+                    },
+                    requestTermination: {
+                        if processToStop.isRunning {
+                            processToStop.terminate()
+                        }
+                    },
+                    forceTermination: {
+                        guard processToStop.isRunning else {
+                            return
+                        }
+                        _ = Darwin.kill(
+                            processToStop.processIdentifier,
+                            SIGKILL
+                        )
+                    },
+                    reap: {
+                        processToStop.waitUntilExit()
+                    },
+                    pause: {
+                        Thread.sleep(forTimeInterval: $0)
+                    }
+                )
+            )
+            DispatchQueue.main.async {
+                self?.finishShutdown(outcome: outcome)
+            }
+        }
     }
 
-    private func installOutputReader() {
+    private func finishShutdown(
+        outcome: MediaRemoteTerminationOutcome
+    ) {
+        Self.logger.debug(
+            "Helper shutdown completed with outcome: \(String(describing: outcome), privacy: .public)"
+        )
+
+        stateLock.lock()
+        shutdownWorkIsRunning = false
+        shutdownDidFinish = true
+        let completions = shutdownCompletions
+        shutdownCompletions.removeAll()
+        stateLock.unlock()
+        deliverShutdownCompletions(completions)
+    }
+
+    private func deliverShutdownCompletions(
+        _ completions: [() -> Void]
+    ) {
+        guard !completions.isEmpty else {
+            return
+        }
+        DispatchQueue.main.async {
+            completions.forEach { $0() }
+        }
+    }
+
+    private func detachInactiveProcess() {
+        var pipeToClose: Pipe?
+
+        stateLock.lock()
+        if process?.isRunning == true {
+            stateLock.unlock()
+            return
+        }
+        process?.terminationHandler = nil
+        process = nil
+        pipeToClose = outputPipe
+        outputPipe = nil
+        bufferedOutput.removeAll(keepingCapacity: false)
+        stateLock.unlock()
+
+        pipeToClose?.fileHandleForReading.readabilityHandler = nil
+        try? pipeToClose?.fileHandleForReading.close()
+    }
+
+    private func installOutputReader(generation: UInt64) {
         guard let outputPipe else {
             Self.logger.error("installOutputReader called without output pipe")
             return
@@ -966,13 +1143,28 @@ private final class MediaRemoteHelperProcess {
 
         Self.logger.debug("Installing output reader")
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.drainOutput(from: handle)
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                return
+            }
+            DispatchQueue.main.async {
+                self?.drainOutput(
+                    data,
+                    generation: generation
+                )
+            }
         }
     }
 
-    private func drainOutput(from handle: FileHandle) {
-        let data = handle.availableData
-        guard !data.isEmpty else {
+    private func drainOutput(
+        _ data: Data,
+        generation: UInt64
+    ) {
+        stateLock.lock()
+        let ownsOutput = lifecycle.activeGeneration == generation
+            && !lifecycle.shutdownWasRequested
+        stateLock.unlock()
+        guard ownsOutput else {
             return
         }
 
@@ -1005,27 +1197,322 @@ private final class MediaRemoteHelperProcess {
         }
     }
 
-    private func handleTermination() {
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        outputPipe = nil
+    private func handleTermination(
+        process terminatedProcess: Process,
+        generation: UInt64
+    ) {
+        var pipeToClose: Pipe?
+
+        stateLock.lock()
+        guard process === terminatedProcess,
+              lifecycle.acceptTermination(
+                generation: generation
+              ) else {
+            stateLock.unlock()
+            Self.logger.debug(
+                "Ignoring stale helper termination callback"
+            )
+            return
+        }
         process = nil
+        pipeToClose = outputPipe
+        outputPipe = nil
+        bufferedOutput.removeAll(keepingCapacity: false)
+        stateLock.unlock()
+
+        pipeToClose?.fileHandleForReading.readabilityHandler = nil
+        try? pipeToClose?.fileHandleForReading.close()
     }
 
-    private func resolveLaunchConfiguration() -> HelperLaunchConfiguration? {
+    private func handleFailedLaunch(generation: UInt64) {
+        var pipeToClose: Pipe?
+
+        stateLock.lock()
+        _ = lifecycle.acceptTermination(generation: generation)
+        process = nil
+        pipeToClose = outputPipe
+        outputPipe = nil
+        bufferedOutput.removeAll(keepingCapacity: false)
+        stateLock.unlock()
+
+        pipeToClose?.fileHandleForReading.readabilityHandler = nil
+        try? pipeToClose?.fileHandleForReading.close()
+    }
+
+    private func scheduleOrphanCleanupIfNeeded(
+        command: MediaRemoteAdapterCommand
+    ) {
+        stateLock.lock()
+        guard !orphanCleanupWasScheduled else {
+            stateLock.unlock()
+            return
+        }
+        orphanCleanupWasScheduled = true
+        stateLock.unlock()
+
+        MediaRemoteOrphanProcessCleaner.clean(command: command)
+    }
+
+    private func resolveLaunchConfiguration() -> MediaRemoteAdapterCommand? {
         guard let scriptURL = Bundle.main.url(forResource: "mediaremote-adapter", withExtension: "pl"),
               let frameworkPath = Bundle.main.privateFrameworksPath?.appending("/MediaRemoteAdapter.framework") else {
             return nil
         }
 
         Self.logger.debug("Using bundled MediaRemote adapter")
-        return HelperLaunchConfiguration(
+        return MediaRemoteAdapterCommand(
             executablePath: "/usr/bin/perl",
-            arguments: [scriptURL.path, frameworkPath, "stream"]
+            scriptPath: scriptURL.path,
+            frameworkPath: frameworkPath
         )
     }
 }
 
-private struct HelperLaunchConfiguration {
-    let executablePath: String
-    let arguments: [String]
+/// Removes adapters left behind by a previous crashed or abruptly killed
+/// Docky instance. Matching and every signal are based on a fresh kernel
+/// snapshot of the complete argv and PPID; no name-based or wildcard process
+/// killing is used.
+private enum MediaRemoteOrphanProcessCleaner {
+    private static let logger = Logger(
+        subsystem: "gt.quintero.Docky",
+        category: "MediaRemoteHelper"
+    )
+    private static let queue = DispatchQueue(
+        label: "gt.quintero.Docky.media-remote-orphan-cleanup",
+        qos: .utility
+    )
+
+    static func clean(command: MediaRemoteAdapterCommand) {
+        queue.async {
+            let candidatePIDs = MediaRemoteProcessInspector
+                .allProcessIdentifiers()
+                .filter { processIdentifier in
+                    guard let snapshot = MediaRemoteProcessInspector
+                        .snapshot(
+                            processIdentifier: processIdentifier
+                        ) else {
+                        return false
+                    }
+                    return MediaRemoteOrphanProcessPolicy.matchesOrphan(
+                        snapshot,
+                        command: command
+                    )
+                }
+
+            guard !candidatePIDs.isEmpty else {
+                return
+            }
+
+            var pending = Set<Int32>()
+            for processIdentifier in candidatePIDs {
+                guard let freshSnapshot = MediaRemoteProcessInspector
+                    .snapshot(processIdentifier: processIdentifier),
+                      MediaRemoteOrphanProcessPolicy.matchesOrphan(
+                        freshSnapshot,
+                        command: command
+                      ) else {
+                    continue
+                }
+                if Darwin.kill(processIdentifier, SIGTERM) == 0 {
+                    pending.insert(processIdentifier)
+                }
+            }
+
+            for _ in 0..<25 where !pending.isEmpty {
+                Thread.sleep(forTimeInterval: 0.01)
+                pending = pending.filter { processIdentifier in
+                    guard let freshSnapshot = MediaRemoteProcessInspector
+                        .snapshot(
+                            processIdentifier: processIdentifier
+                        ) else {
+                        return false
+                    }
+                    return MediaRemoteOrphanProcessPolicy.matchesOrphan(
+                        freshSnapshot,
+                        command: command
+                    )
+                }
+            }
+
+            var forceKilled = 0
+            for processIdentifier in pending {
+                // Revalidate immediately before escalation so PID reuse can
+                // never redirect SIGKILL to an unrelated process.
+                guard let freshSnapshot = MediaRemoteProcessInspector
+                    .snapshot(processIdentifier: processIdentifier),
+                      MediaRemoteOrphanProcessPolicy.matchesOrphan(
+                        freshSnapshot,
+                        command: command
+                      ) else {
+                    continue
+                }
+                if Darwin.kill(processIdentifier, SIGKILL) == 0 {
+                    forceKilled += 1
+                }
+            }
+
+            Self.logger.info(
+                "Cleaned stale MediaRemote helpers: candidates=\(candidatePIDs.count) forceKilled=\(forceKilled)"
+            )
+        }
+    }
+}
+
+private enum MediaRemoteProcessInspector {
+    static func allProcessIdentifiers() -> [Int32] {
+        let reportedCount = proc_listallpids(nil, 0)
+        guard reportedCount > 0 else {
+            return []
+        }
+
+        // Leave headroom for processes created between the sizing and fill
+        // calls. A truncated list is still safe; a later launch can retry.
+        var processIdentifiers = [Int32](
+            repeating: 0,
+            count: Int(reportedCount) + 64
+        )
+        let byteCount = Int32(
+            processIdentifiers.count * MemoryLayout<Int32>.stride
+        )
+        let populatedCount = proc_listallpids(
+            &processIdentifiers,
+            byteCount
+        )
+        guard populatedCount > 0 else {
+            return []
+        }
+        return Array(
+            processIdentifiers.prefix(Int(populatedCount))
+        ).filter { $0 > 1 }
+    }
+
+    static func snapshot(
+        processIdentifier: Int32
+    ) -> MediaRemoteProcessSnapshot? {
+        guard processIdentifier > 1,
+              let parentProcessIdentifier = parentProcessIdentifier(
+                for: processIdentifier
+              ),
+              let arguments = processArguments(
+                processIdentifier: processIdentifier
+              ) else {
+            return nil
+        }
+
+        return MediaRemoteProcessSnapshot(
+            processIdentifier: processIdentifier,
+            parentProcessIdentifier: parentProcessIdentifier,
+            executablePath: arguments.executablePath,
+            arguments: arguments.values
+        )
+    }
+
+    private static func parentProcessIdentifier(
+        for processIdentifier: Int32
+    ) -> Int32? {
+        var info = proc_bsdinfo()
+        let copiedBytes = proc_pidinfo(
+            processIdentifier,
+            PROC_PIDTBSDINFO,
+            0,
+            &info,
+            Int32(MemoryLayout<proc_bsdinfo>.size)
+        )
+        guard copiedBytes == MemoryLayout<proc_bsdinfo>.size else {
+            return nil
+        }
+        return Int32(info.pbi_ppid)
+    }
+
+    private static func processArguments(
+        processIdentifier: Int32
+    ) -> (executablePath: String, values: [String])? {
+        var mib: [Int32] = [
+            CTL_KERN,
+            KERN_PROCARGS2,
+            processIdentifier,
+        ]
+        var byteCount = 0
+        guard sysctl(
+            &mib,
+            UInt32(mib.count),
+            nil,
+            &byteCount,
+            nil,
+            0
+        ) == 0,
+        byteCount > MemoryLayout<Int32>.size else {
+            return nil
+        }
+
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        guard sysctl(
+            &mib,
+            UInt32(mib.count),
+            &bytes,
+            &byteCount,
+            nil,
+            0
+        ) == 0 else {
+            return nil
+        }
+        if byteCount < bytes.count {
+            bytes.removeSubrange(byteCount...)
+        }
+        return parseProcessArguments(bytes)
+    }
+
+    private static func parseProcessArguments(
+        _ bytes: [UInt8]
+    ) -> (executablePath: String, values: [String])? {
+        guard bytes.count > MemoryLayout<Int32>.size else {
+            return nil
+        }
+        let argumentCount = bytes.withUnsafeBytes {
+            $0.loadUnaligned(as: Int32.self)
+        }
+        guard argumentCount > 0 else {
+            return nil
+        }
+
+        var cursor = MemoryLayout<Int32>.size
+        guard let executablePath = nextString(
+            in: bytes,
+            cursor: &cursor
+        ) else {
+            return nil
+        }
+        while cursor < bytes.count, bytes[cursor] == 0 {
+            cursor += 1
+        }
+
+        var arguments: [String] = []
+        arguments.reserveCapacity(Int(argumentCount))
+        for _ in 0..<argumentCount {
+            guard let argument = nextString(
+                in: bytes,
+                cursor: &cursor
+            ) else {
+                return nil
+            }
+            arguments.append(argument)
+        }
+        return (executablePath, arguments)
+    }
+
+    private static func nextString(
+        in bytes: [UInt8],
+        cursor: inout Int
+    ) -> String? {
+        guard cursor < bytes.count,
+              let terminator = bytes[cursor...].firstIndex(of: 0) else {
+            return nil
+        }
+        let value = String(
+            decoding: bytes[cursor..<terminator],
+            as: UTF8.self
+        )
+        cursor = terminator + 1
+        return value
+    }
 }

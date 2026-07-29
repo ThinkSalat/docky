@@ -23,8 +23,12 @@ final class WindowSwitcherService: ObservableObject {
     @Published private(set) var isContextMenuPresented = false
     @Published private(set) var focusedPreview: FocusedWindowPreview?
 
+    private let hotKeyBackend: GlobalHotKeyBackend
     private var hotKeyRef: EventHotKeyRef?
+    private var orphanedHotKeyRefs: [EventHotKeyRef] = []
+    private var registeredShortcut: KeyboardShortcut?
     private var hotKeyHandlerRef: EventHandlerRef?
+    private var hotKeyHandlerInstallationError: String?
     private var localKeyMonitor: Any?
     private var localFlagsMonitor: Any?
     private var globalFlagsMonitor: Any?
@@ -61,9 +65,16 @@ final class WindowSwitcherService: ObservableObject {
         activePreviewMode == .instantFocus
     }
 
-    private init() {
+    init(hotKeyBackend: GlobalHotKeyBackend = .live) {
+        self.hotKeyBackend = hotKeyBackend
         installHotKeyHandlerIfNeeded()
-        registerHotKey(shortcut: DockyPreferences.shared.windowSwitcherShortcut)
+        let initialResult = replaceHotKey(
+            with: DockyPreferences.shared.windowSwitcherShortcut
+        )
+        DockyPreferences.shared
+            .recordWindowSwitcherHotKeyRegistrationResult(
+                initialResult
+            )
         installEventMonitors()
         subscribeToPreferences()
         observeWindowPreviews()
@@ -263,22 +274,6 @@ final class WindowSwitcherService: ObservableObject {
     }
 
     private func subscribeToPreferences() {
-        observeChanges { [weak self] in
-            let shortcut = DockyPreferences.shared.windowSwitcherShortcut
-            self?.registerHotKey(shortcut: shortcut)
-        }
-        .store(in: &cancellables)
-
-        observeChanges { [weak self] in
-            let isEnabled = DockyPreferences.shared.enablesWindowSwitcher
-            guard let self else { return }
-            self.registerHotKey(shortcut: DockyPreferences.shared.windowSwitcherShortcut)
-            if !isEnabled {
-                self.dismiss()
-            }
-        }
-        .store(in: &cancellables)
-
         observeChanges { [weak self] in
             _ = DockyPreferences.shared.showsWindowSwitcherFocusPreview
             _ = DockyPreferences.shared.windowSwitcherPreviewMode
@@ -606,7 +601,7 @@ final class WindowSwitcherService: ObservableObject {
             return noErr
         }
 
-        InstallEventHandler(
+        let status = InstallEventHandler(
             GetApplicationEventTarget(),
             callback,
             1,
@@ -614,44 +609,349 @@ final class WindowSwitcherService: ObservableObject {
             Unmanaged.passUnretained(self).toOpaque(),
             &hotKeyHandlerRef
         )
-    }
-
-    private func registerHotKey(shortcut: KeyboardShortcut) {
-        unregisterHotKey()
-
-        guard DockyPreferences.shared.enablesWindowSwitcher,
-              shortcut.isValid else {
+        guard status == noErr, hotKeyHandlerRef != nil else {
+            hotKeyHandlerRef = nil
+            hotKeyHandlerInstallationError =
+                "Window Switcher could not install its global shortcut "
+                + "event handler (OSStatus \(status))."
             return
         }
+        hotKeyHandlerInstallationError = nil
+    }
 
-        RegisterEventHotKey(
-            UInt32(shortcut.keyCode),
-            shortcut.carbonModifierFlags,
-            forwardHotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &hotKeyRef
-        )
-
-        RegisterEventHotKey(
-            UInt32(shortcut.keyCode),
-            shortcut.carbonModifierFlags | UInt32(shiftKey),
-            reverseHotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &reverseHotKeyRef
+    @discardableResult
+    func replaceHotKey(
+        with shortcut: KeyboardShortcut
+    ) -> GlobalHotKeyRegistrationResult {
+        reconcileHotKey(
+            isEnabled:
+                DockyPreferences.shared.enablesWindowSwitcher,
+            shortcut: shortcut,
+            validatesRequestedShortcut: true
         )
     }
 
-    private func unregisterHotKey() {
+    @discardableResult
+    func setEnabled(
+        _ isEnabled: Bool,
+        shortcut: KeyboardShortcut
+    ) -> GlobalHotKeyRegistrationResult {
+        reconcileHotKey(
+            isEnabled: isEnabled,
+            shortcut: shortcut,
+            validatesRequestedShortcut: isEnabled
+        )
+    }
+
+    private func reconcileHotKey(
+        isEnabled: Bool,
+        shortcut: KeyboardShortcut,
+        validatesRequestedShortcut: Bool
+    ) -> GlobalHotKeyRegistrationResult {
+        if hotKeyHandlerRef == nil {
+            installHotKeyHandlerIfNeeded()
+        }
+        if let hotKeyHandlerInstallationError {
+            return .failed(hotKeyHandlerInstallationError)
+        }
+
+        if let recoveryError = healTrackedRegistrationIfNeeded() {
+            return .failed(recoveryError)
+        }
+
+        if let cleanupError = retryOrphanCleanup() {
+            return .failed(cleanupError)
+        }
+
+        if validatesRequestedShortcut {
+            switch WindowSwitcherBaseShortcutPolicy.validate(
+                isConfigured: shortcut.isValid,
+                containsShift:
+                    shortcut.modifierFlags.contains(.shift)
+            ) {
+            case .accepted, .inactive:
+                break
+            case .rejected(let message):
+                return .failed(message)
+            }
+        }
+
+        guard isEnabled, shortcut.isValid else {
+            if let cleanupError = unregisterHotKey() {
+                let rollbackDetail: String
+                if let rollbackError =
+                    healTrackedRegistrationIfNeeded()
+                {
+                    rollbackDetail =
+                        " Restoring the previously confirmed shortcut "
+                        + "also failed: \(rollbackError)"
+                } else {
+                    rollbackDetail =
+                        " The previously confirmed shortcut was restored."
+                }
+                return .failed(cleanupError + rollbackDetail)
+            }
+            return .inactive
+        }
+
+        if registeredShortcut == shortcut,
+           hotKeyRef != nil,
+           reverseHotKeyRef != nil {
+            return .registered
+        }
+
+        let forwardCandidate = hotKeyBackend.register(
+            UInt32(shortcut.keyCode),
+            shortcut.carbonModifierFlags,
+            forwardHotKeyID
+        )
+        guard forwardCandidate.status == noErr,
+              let forwardCandidateRef =
+                  forwardCandidate.reference else {
+            return .failed(
+                hotKeyFailureMessage(
+                    direction: "forward",
+                    status: forwardCandidate.status
+                )
+            )
+        }
+
+        let reverseCandidate = hotKeyBackend.register(
+            UInt32(shortcut.keyCode),
+            shortcut.carbonModifierFlags | UInt32(shiftKey),
+            reverseHotKeyID
+        )
+        guard reverseCandidate.status == noErr,
+              let reverseCandidateRef =
+                  reverseCandidate.reference else {
+            let cleanupStatus =
+                hotKeyBackend.unregister(forwardCandidateRef)
+            var cleanupDetail = ""
+            if cleanupStatus != noErr {
+                orphanedHotKeyRefs.append(forwardCandidateRef)
+                cleanupDetail =
+                    " Cleanup of the forward candidate also failed "
+                    + "(OSStatus \(cleanupStatus)); Docky retained its "
+                    + "reference and will retry."
+            }
+            return .failed(
+                hotKeyFailureMessage(
+                    direction: "reverse",
+                    status: reverseCandidate.status
+                )
+                    + cleanupDetail
+            )
+        }
+
+        let previousForwardRef = hotKeyRef
+        let previousReverseRef = reverseHotKeyRef
+
+        if let previousForwardRef {
+            let status =
+                hotKeyBackend.unregister(previousForwardRef)
+            guard status == noErr else {
+                let cleanupDetail = cleanupCandidatePair(
+                    forwardCandidateRef,
+                    reverseCandidateRef
+                )
+                return .failed(
+                    "Window Switcher registered the candidate shortcuts "
+                        + "but could not remove the previous forward "
+                        + "shortcut (OSStatus \(status)). The saved "
+                        + "shortcut was not changed."
+                        + cleanupDetail
+                )
+            }
+            hotKeyRef = nil
+        }
+
+        if let previousReverseRef {
+            let status =
+                hotKeyBackend.unregister(previousReverseRef)
+            guard status == noErr else {
+                let cleanupDetail = cleanupCandidatePair(
+                    forwardCandidateRef,
+                    reverseCandidateRef
+                )
+                let rollbackDetail: String
+                if let rollbackError =
+                    healTrackedRegistrationIfNeeded()
+                {
+                    rollbackDetail =
+                        " Restoring the previous shortcut pair also failed: "
+                        + rollbackError
+                } else {
+                    rollbackDetail =
+                        " The previous shortcut pair was restored."
+                }
+                return .failed(
+                    "Window Switcher registered the candidate shortcuts "
+                        + "but could not remove the previous reverse "
+                        + "shortcut (OSStatus \(status)). The saved "
+                        + "shortcut was not changed."
+                        + cleanupDetail
+                        + rollbackDetail
+                )
+            }
+            reverseHotKeyRef = nil
+        }
+
+        hotKeyRef = forwardCandidateRef
+        reverseHotKeyRef = reverseCandidateRef
+        registeredShortcut = shortcut
+        return .registered
+    }
+
+    @discardableResult
+    private func unregisterHotKey() -> String? {
+        var failures: [String] = []
         if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
+            let status = hotKeyBackend.unregister(hotKeyRef)
+            if status == noErr {
+                self.hotKeyRef = nil
+            } else {
+                failures.append("forward OSStatus \(status)")
+            }
         }
 
         if let reverseHotKeyRef {
-            UnregisterEventHotKey(reverseHotKeyRef)
-            self.reverseHotKeyRef = nil
+            let status = hotKeyBackend.unregister(reverseHotKeyRef)
+            if status == noErr {
+                self.reverseHotKeyRef = nil
+            } else {
+                failures.append("reverse OSStatus \(status)")
+            }
         }
+
+        if let cleanupError = retryOrphanCleanup() {
+            failures.append(cleanupError)
+        }
+
+        guard failures.isEmpty else {
+            return "Window Switcher could not unregister every tracked "
+                + "global shortcut "
+                + "(\(failures.joined(separator: "; "))). References and "
+                + "confirmed shortcut metadata were retained for retry."
+        }
+
+        registeredShortcut = nil
+        return nil
+    }
+
+    private func cleanupCandidatePair(
+        _ forward: EventHotKeyRef,
+        _ reverse: EventHotKeyRef
+    ) -> String {
+        var failedStatuses: [OSStatus] = []
+        for reference in [forward, reverse] {
+            let status = hotKeyBackend.unregister(reference)
+            if status != noErr {
+                orphanedHotKeyRefs.append(reference)
+                failedStatuses.append(status)
+            }
+        }
+
+        guard !failedStatuses.isEmpty else {
+            return ""
+        }
+        return " Candidate rollback also failed "
+            + "(OSStatus "
+            + failedStatuses.map(String.init).joined(separator: ", ")
+            + "); Docky retained those references and will retry."
+    }
+
+    private func healTrackedRegistrationIfNeeded() -> String? {
+        guard let registeredShortcut else {
+            guard hotKeyRef == nil, reverseHotKeyRef == nil else {
+                return "Window Switcher retained a registration without "
+                    + "enough shortcut metadata to repair it safely."
+            }
+            return nil
+        }
+
+        guard hotKeyRef == nil || reverseHotKeyRef == nil else {
+            return nil
+        }
+
+        switch WindowSwitcherBaseShortcutPolicy.validate(
+            isConfigured: registeredShortcut.isValid,
+            containsShift:
+                registeredShortcut.modifierFlags.contains(.shift)
+        ) {
+        case .accepted:
+            break
+        case .inactive, .rejected:
+            return "Window Switcher cannot repair the previously saved "
+                + "shortcut because its forward and reverse chords are "
+                + "not distinct."
+        }
+
+        if hotKeyRef == nil {
+            let forward = hotKeyBackend.register(
+                UInt32(registeredShortcut.keyCode),
+                registeredShortcut.carbonModifierFlags,
+                forwardHotKeyID
+            )
+            guard forward.status == noErr,
+                  let forwardRef = forward.reference else {
+                return "Window Switcher could not restore the previous "
+                    + "forward shortcut (OSStatus \(forward.status)). "
+                    + "Its registration state was retained for retry."
+            }
+            hotKeyRef = forwardRef
+        }
+
+        if reverseHotKeyRef == nil {
+            let reverse = hotKeyBackend.register(
+                UInt32(registeredShortcut.keyCode),
+                registeredShortcut.carbonModifierFlags
+                    | UInt32(shiftKey),
+                reverseHotKeyID
+            )
+            guard reverse.status == noErr,
+                  let reverseRef = reverse.reference else {
+                return "Window Switcher could not restore the previous "
+                    + "reverse shortcut (OSStatus \(reverse.status)). "
+                    + "Its registration state was retained for retry."
+            }
+            reverseHotKeyRef = reverseRef
+        }
+
+        return nil
+    }
+
+    private func retryOrphanCleanup() -> String? {
+        guard !orphanedHotKeyRefs.isEmpty else {
+            return nil
+        }
+
+        var retained: [EventHotKeyRef] = []
+        var statuses: [OSStatus] = []
+        for reference in orphanedHotKeyRefs {
+            let status = hotKeyBackend.unregister(reference)
+            if status != noErr {
+                retained.append(reference)
+                statuses.append(status)
+            }
+        }
+        orphanedHotKeyRefs = retained
+
+        guard !statuses.isEmpty else {
+            return nil
+        }
+        return "Window Switcher could not clean up candidate global "
+            + "shortcuts (OSStatus "
+            + statuses.map(String.init).joined(separator: ", ")
+            + ")."
+    }
+
+    private func hotKeyFailureMessage(
+        direction: String,
+        status: OSStatus
+    ) -> String {
+        "Window Switcher could not register the \(direction) global "
+            + "shortcut (OSStatus \(status)). Another app or system "
+            + "shortcut may already be using it. The previous shortcut "
+            + "was kept."
     }
 }

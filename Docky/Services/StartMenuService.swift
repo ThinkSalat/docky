@@ -21,36 +21,84 @@ final class StartMenuService: ObservableObject {
 
     private var hotKeyRef: EventHotKeyRef?
     private var hotKeyHandlerRef: EventHandlerRef?
+    private var isEnabled = false
     /// 'STMN' as four ASCII bytes — disambiguates this hotkey from
     /// LaunchpadHotKeyService's 'DKYL'.
     private let hotKeyID = EventHotKeyID(signature: OSType(0x53544D4E), id: 1)
 
     private init() {
-        installHotKeyHandlerIfNeeded()
-        registerHotKey()
+        setEnabled(DockyPreferences.shared.enablesStartMenuOverlay)
     }
 
     deinit {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-        }
+        unregisterHotKey()
         if let hotKeyHandlerRef {
             RemoveEventHandler(hotKeyHandlerRef)
         }
     }
 
+    /// Reconciles the runtime with the authoritative preference.
+    ///
+    /// This method is intentionally idempotent: initialization and a
+    /// preference assignment may both request the same enabled state without
+    /// installing the Carbon hotkey more than once.
+    func setEnabled(_ enabled: Bool) {
+        let effects = StartMenuEnablementPolicy.effects(
+            currentEnabled: isEnabled,
+            isHotKeyRegistered: hotKeyRef != nil,
+            isPresented: isPresented,
+            requestedEnabled: enabled
+        )
+        isEnabled = enabled
+
+        switch effects.hotKeyAction {
+        case .none:
+            break
+        case .register:
+            registerHotKeyIfNeeded()
+        case .unregister:
+            unregisterHotKey()
+        }
+
+        if effects.presentationAction == .dismiss {
+            dismiss()
+        }
+    }
+
     func toggle() {
-        isPresented ? dismiss() : present()
+        applyPresentationCommand(.toggle)
     }
 
     func present() {
-        guard !isPresented else { return }
-        isPresented = true
+        applyPresentationCommand(.present)
     }
 
     func dismiss() {
         isPresented = false
         showsAllApps = false
+    }
+
+    private func applyPresentationCommand(
+        _ command: StartMenuEnablementPolicy.PresentationCommand
+    ) {
+        let preferenceEnabled =
+            DockyPreferences.shared.enablesStartMenuOverlay
+        if preferenceEnabled != isEnabled {
+            setEnabled(preferenceEnabled)
+        }
+
+        switch StartMenuEnablementPolicy.presentationAction(
+            for: command,
+            isEnabled: preferenceEnabled && isEnabled,
+            isPresented: isPresented
+        ) {
+        case .none:
+            break
+        case .present:
+            isPresented = true
+        case .dismiss:
+            dismiss()
+        }
     }
 
     private func installHotKeyHandlerIfNeeded() {
@@ -77,11 +125,19 @@ final class StartMenuService: ObservableObject {
                 &firedID
             )
 
-            guard status == noErr, firedID.signature == service.hotKeyID.signature else {
+            guard status == noErr,
+                  firedID.signature == service.hotKeyID.signature,
+                  firedID.id == service.hotKeyID.id else {
                 return OSStatus(eventNotHandledErr)
             }
 
-            Task { @MainActor in service.toggle() }
+            Task { @MainActor in
+                guard DockyPreferences.shared.enablesStartMenuOverlay else {
+                    service.setEnabled(false)
+                    return
+                }
+                service.toggle()
+            }
             return noErr
         }
 
@@ -95,18 +151,35 @@ final class StartMenuService: ObservableObject {
         )
     }
 
-    private func registerHotKey() {
+    private func registerHotKeyIfNeeded() {
+        guard isEnabled,
+              DockyPreferences.shared.enablesStartMenuOverlay,
+              hotKeyRef == nil else {
+            return
+        }
+
+        installHotKeyHandlerIfNeeded()
+
         // ⌃⌥S — picked because it's unlikely to collide with system
         // shortcuts and isn't already bound by Docky preferences.
         let keyCode = UInt32(kVK_ANSI_S)
         let modifiers = UInt32(controlKey | optionKey)
-        RegisterEventHotKey(
+        var registeredHotKey: EventHotKeyRef?
+        let status = RegisterEventHotKey(
             keyCode,
             modifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,
-            &hotKeyRef
+            &registeredHotKey
         )
+        guard status == noErr else { return }
+        hotKeyRef = registeredHotKey
+    }
+
+    private func unregisterHotKey() {
+        guard let hotKeyRef else { return }
+        UnregisterEventHotKey(hotKeyRef)
+        self.hotKeyRef = nil
     }
 }

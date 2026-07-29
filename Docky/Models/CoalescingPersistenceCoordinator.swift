@@ -20,7 +20,7 @@ nonisolated final class CoalescingPersistenceCoordinator<Value>:
         label: "com.docky.profile-persistence",
         qos: .utility
     )
-    private let persist: (Value) throws -> Int
+    private let persist: (Value, Value) throws -> Int
     private let onEvent: @MainActor (Event) -> Void
 
     private var durableValue: Value
@@ -32,12 +32,29 @@ nonisolated final class CoalescingPersistenceCoordinator<Value>:
 
     init(
         initialDurableValue: Value,
-        persist: @escaping (Value) throws -> Int,
+        persist: @escaping (
+            _ value: Value,
+            _ durablePredecessor: Value
+        ) throws -> Int,
         onEvent: @MainActor @escaping (Event) -> Void
     ) {
         durableValue = initialDurableValue
         self.persist = persist
         self.onEvent = onEvent
+    }
+
+    convenience init(
+        initialDurableValue: Value,
+        persist: @escaping (Value) throws -> Int,
+        onEvent: @MainActor @escaping (Event) -> Void
+    ) {
+        self.init(
+            initialDurableValue: initialDurableValue,
+            persist: { value, _ in
+                try persist(value)
+            },
+            onEvent: onEvent
+        )
     }
 
     /// Returns false after the first durable-write failure. Callers can then
@@ -69,6 +86,14 @@ nonisolated final class CoalescingPersistenceCoordinator<Value>:
         lock.withLock { terminalFailureDescription }
     }
 
+    /// The newest value that has actually reached durable storage.
+    ///
+    /// Runtime policies that need a persisted fact must not infer durability
+    /// from the owner's newer optimistic in-memory value.
+    var durableValueSnapshot: Value {
+        lock.withLock { durableValue }
+    }
+
     /// Waits for the in-flight write and the newest coalesced value, then
     /// synchronously delivers every resulting event. This is intended for
     /// orderly process termination, not interactive code paths.
@@ -82,8 +107,12 @@ nonisolated final class CoalescingPersistenceCoordinator<Value>:
 
     private func drain() {
         while let value = takePendingValue() {
+            let durablePredecessor = lock.withLock { durableValue }
             do {
-                let encodedBytes = try persist(value)
+                let encodedBytes = try persist(
+                    value,
+                    durablePredecessor
+                )
                 lock.withLock {
                     durableValue = value
                 }

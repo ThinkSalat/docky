@@ -20,10 +20,20 @@
 import Foundation
 import Darwin
 
+// Swift imports Darwin's `struct flock` under the same qualified name as the
+// BSD `flock(2)` function, so `Darwin.flock(...)` resolves to the struct in
+// Swift 6. Bind the stable libc symbol under an unambiguous Swift name.
+@_silgen_name("flock")
+nonisolated private func dockyFileLock(
+    _ descriptor: Int32,
+    _ operation: Int32
+) -> Int32
+
 nonisolated enum SecureOwnedStorageError: Error, LocalizedError {
     case invalidDirectoryURL(String)
     case invalidPathComponent(String)
     case invalidFileName(String)
+    case entryAlreadyExists(String)
     case unexpectedType(String)
     case unexpectedOwner(String)
     case unexpectedLinkCount(String)
@@ -38,6 +48,8 @@ nonisolated enum SecureOwnedStorageError: Error, LocalizedError {
             return "A secure-storage path component is invalid."
         case .invalidFileName:
             return "A secure-storage file name is invalid."
+        case .entryAlreadyExists:
+            return "A secure-storage entry already exists."
         case .unexpectedType:
             return "A secure-storage entry has an unexpected file type."
         case .unexpectedOwner:
@@ -61,6 +73,7 @@ nonisolated final class SecureOwnedDirectory: @unchecked Sendable {
 
     private let descriptor: Int32
     private let ownerUID: uid_t
+    private let transactionLock = NSLock()
 
     private init(url: URL, descriptor: Int32, ownerUID: uid_t) {
         self.url = url
@@ -137,6 +150,32 @@ nonisolated final class SecureOwnedDirectory: @unchecked Sendable {
     func entryExists(named name: String) throws -> Bool {
         try validateFileName(name)
         return try metadataIfPresent(named: name) != nil
+    }
+
+    /// Serializes a complete multi-file transaction across every Docky process
+    /// that has opened this directory. Locking the retained directory inode
+    /// avoids a replaceable lock-file path and covers primary, backup, archive,
+    /// and quarantine operations as one critical section.
+    func withExclusiveLock<Result>(
+        _ body: () throws -> Result
+    ) throws -> Result {
+        // flock locks belong to an open-file description, so a second thread
+        // using this exact retained descriptor could otherwise re-enter the
+        // lock. Pair it with a process-local mutex before taking the
+        // cross-process inode lock.
+        transactionLock.lock()
+        defer { transactionLock.unlock() }
+
+        while dockyFileLock(descriptor, LOCK_EX) != 0 {
+            guard errno == EINTR else {
+                throw Self.posixError(errno, path: url.path)
+            }
+        }
+        defer {
+            while dockyFileLock(descriptor, LOCK_UN) != 0,
+                  errno == EINTR {}
+        }
+        return try body()
     }
 
     func readRegularFile(
@@ -223,7 +262,8 @@ nonisolated final class SecureOwnedDirectory: @unchecked Sendable {
         named name: String,
         maximumBytes: Int,
         beforeSynchronize: ((URL) throws -> Void)? = nil,
-        afterRename: ((URL) throws -> Void)? = nil
+        afterRename: ((URL) throws -> Void)? = nil,
+        replaceExisting: Bool = true
     ) throws {
         try validateFileName(name)
         guard data.count <= maximumBytes else {
@@ -237,6 +277,9 @@ nonisolated final class SecureOwnedDirectory: @unchecked Sendable {
         // rather than letting renameat silently replace it.
         if let metadata = try metadataIfPresent(named: name) {
             try verifyRegularFileMetadata(metadata, name: name)
+            guard replaceExisting else {
+                throw SecureOwnedStorageError.entryAlreadyExists(name)
+            }
         }
 
         let temporaryName = ".\(name).\(UUID().uuidString).tmp"
@@ -282,15 +325,28 @@ nonisolated final class SecureOwnedDirectory: @unchecked Sendable {
         // name between validation and rename.
         if let metadata = try metadataIfPresent(named: name) {
             try verifyRegularFileMetadata(metadata, name: name)
+            guard replaceExisting else {
+                throw SecureOwnedStorageError.entryAlreadyExists(name)
+            }
         }
         let renameResult = temporaryName.withCString { sourceName in
             name.withCString { destinationName in
-                Darwin.renameat(
-                    descriptor,
-                    sourceName,
-                    descriptor,
-                    destinationName
-                )
+                if replaceExisting {
+                    Darwin.renameat(
+                        descriptor,
+                        sourceName,
+                        descriptor,
+                        destinationName
+                    )
+                } else {
+                    Darwin.renameatx_np(
+                        descriptor,
+                        sourceName,
+                        descriptor,
+                        destinationName,
+                        UInt32(RENAME_EXCL)
+                    )
+                }
             }
         }
         guard renameResult == 0 else {
@@ -870,10 +926,21 @@ nonisolated final class SecureBoundedLogStore: @unchecked Sendable {
     }
 }
 
-nonisolated struct AtomicJSONFileStore<Value: Codable> {
+nonisolated struct AtomicJSONFileStore<Value: Codable & Equatable> {
     enum Source: String, Equatable {
         case primary
         case backup
+    }
+
+    enum PrimaryExpectation {
+        /// Compatibility mode for callers that have not adopted stale-writer
+        /// detection yet.
+        case unchecked
+        /// The transaction is valid only if no primary exists.
+        case missing
+        /// The transaction is valid only if the on-disk primary still equals
+        /// the durable predecessor supplied by the persistence coordinator.
+        case value(Value)
     }
 
     struct LoadResult {
@@ -882,14 +949,17 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
         let recoveredPrimary: Bool
         let primaryFailureDescription: String?
         let primaryRepairFailureDescription: String?
+        let quarantinedPrimaryURL: URL?
     }
 
     enum StoreError: Error, LocalizedError {
         case noValidCopy(primary: String?, backup: String?)
         case primaryRecoveryRejected(String)
         case primaryReadFailed(String)
+        case backupReadFailed(String)
         case existingPrimaryInvalid(String)
         case primaryMissingWhileBackupExists
+        case primaryChangedSinceLoad
         case encodedValueFailedValidation(String)
         case documentTooLarge(maximumBytes: Int)
 
@@ -906,10 +976,14 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
                 return "The primary document cannot be replaced by its backup: \(reason)"
             case .primaryReadFailed(let reason):
                 return "The primary document could not be read and was left untouched: \(reason)"
+            case .backupReadFailed(let reason):
+                return "The backup document could not be read and was left untouched: \(reason)"
             case .existingPrimaryInvalid(let reason):
                 return "The existing primary document is invalid: \(reason)"
             case .primaryMissingWhileBackupExists:
                 return "The primary document is missing while a backup still exists."
+            case .primaryChangedSinceLoad:
+                return "The primary document changed after it was loaded; the stale write was rejected."
             case .encodedValueFailedValidation(let reason):
                 return "The encoded document failed its own validation: \(reason)"
             case .documentTooLarge(let maximumBytes):
@@ -920,6 +994,7 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
 
     let primaryURL: URL
     let backupURL: URL
+    let previousBackupURL: URL
 
     private static var defaultMaximumDocumentBytes: Int {
         16 * 1_024 * 1_024
@@ -935,6 +1010,7 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
     init(
         primaryURL: URL,
         backupURL: URL,
+        previousBackupURL: URL? = nil,
         fileManager: FileManager = .default,
         readData: ((URL) throws -> Data)? = nil,
         pathEntryExists: ((URL) throws -> Bool)? = nil,
@@ -945,11 +1021,24 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
         _ = fileManager
         self.primaryURL = primaryURL.standardizedFileURL
         self.backupURL = backupURL.standardizedFileURL
+        self.previousBackupURL = (
+            previousBackupURL
+                ?? Self.defaultPreviousBackupURL(for: self.backupURL)
+        ).standardizedFileURL
         let primaryDirectory =
             self.primaryURL.deletingLastPathComponent()
         let backupDirectory =
             self.backupURL.deletingLastPathComponent()
-        if primaryDirectory.path == backupDirectory.path {
+        let previousDirectory =
+            self.previousBackupURL.deletingLastPathComponent()
+        let names = Set([
+            self.primaryURL.lastPathComponent,
+            self.backupURL.lastPathComponent,
+            self.previousBackupURL.lastPathComponent,
+        ])
+        if primaryDirectory.path == backupDirectory.path,
+           primaryDirectory.path == previousDirectory.path,
+           names.count == 3 {
             directoryResult = Result {
                 try SecureOwnedDirectory.openOrCreate(at: primaryDirectory)
             }
@@ -975,6 +1064,7 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
         relativeDirectoryComponents: [String],
         primaryFileName: String,
         backupFileName: String,
+        previousBackupFileName: String? = nil,
         maximumDocumentBytes: Int = Self.defaultMaximumDocumentBytes
     ) {
         let directoryURL = relativeDirectoryComponents.reduce(
@@ -982,12 +1072,39 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
         ) {
             $0.appendingPathComponent($1, isDirectory: true)
         }
+        let resolvedPreviousBackupFileName =
+            previousBackupFileName
+                ?? Self.defaultPreviousBackupFileName(
+                    for: backupFileName
+                )
         primaryURL = directoryURL.appendingPathComponent(primaryFileName)
         backupURL = directoryURL.appendingPathComponent(backupFileName)
-        directoryResult = Result {
-            try SecureOwnedDirectory.applicationSupport(
-                at: applicationSupportURL,
-                descending: relativeDirectoryComponents
+        previousBackupURL = directoryURL.appendingPathComponent(
+            resolvedPreviousBackupFileName
+        )
+        let requestedFileNames = [
+            primaryFileName,
+            backupFileName,
+            resolvedPreviousBackupFileName,
+        ]
+        let distinctFileNames = Set([
+            primaryURL.lastPathComponent,
+            backupURL.lastPathComponent,
+            previousBackupURL.lastPathComponent,
+        ])
+        if requestedFileNames.allSatisfy(Self.isValidFileName),
+           distinctFileNames.count == 3 {
+            directoryResult = Result {
+                try SecureOwnedDirectory.applicationSupport(
+                    at: applicationSupportURL,
+                    descending: relativeDirectoryComponents
+                )
+            }
+        } else {
+            directoryResult = .failure(
+                SecureOwnedStorageError.invalidFileName(
+                    primaryFileName
+                )
             )
         }
         readDataOverride = nil
@@ -1000,6 +1117,19 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
     func load(
         validate: (Value) throws -> Void,
         canRecoverPrimaryFailure: (Error) -> Bool = { _ in true }
+    ) throws -> LoadResult? {
+        let directory = try directoryResult.get()
+        return try directory.withExclusiveLock {
+            try loadWhileLocked(
+                validate: validate,
+                canRecoverPrimaryFailure: canRecoverPrimaryFailure
+            )
+        }
+    }
+
+    private func loadWhileLocked(
+        validate: (Value) throws -> Void,
+        canRecoverPrimaryFailure: (Error) -> Bool
     ) throws -> LoadResult? {
         var primaryFailure: Error?
         let primaryData: Data?
@@ -1019,7 +1149,8 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
                     source: .primary,
                     recoveredPrimary: false,
                     primaryFailureDescription: nil,
-                    primaryRepairFailureDescription: nil
+                    primaryRepairFailureDescription: nil,
+                    quarantinedPrimaryURL: nil
                 )
             } catch {
                 guard canRecoverPrimaryFailure(error) else {
@@ -1041,8 +1172,16 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
             do {
                 let value = try decodedValue(from: backupData, validate: validate)
                 var repairFailure: Error?
+                var quarantinedPrimaryURL: URL?
                 do {
                     try ensureParentDirectory()
+                    if let primaryData {
+                        quarantinedPrimaryURL =
+                            try writeImmutableSnapshot(
+                                primaryData,
+                                role: "quarantine"
+                            )
+                    }
                     try atomicWrite(backupData, to: primaryURL)
                 } catch {
                     // The backup is still a valid authoritative value even
@@ -1057,7 +1196,8 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
                     recoveredPrimary: repairFailure == nil,
                     primaryFailureDescription: primaryFailure.map(Self.describe),
                     primaryRepairFailureDescription:
-                        repairFailure.map(Self.describe)
+                        repairFailure.map(Self.describe),
+                    quarantinedPrimaryURL: quarantinedPrimaryURL
                 )
             } catch {
                 backupFailure = error
@@ -1077,7 +1217,11 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
     @discardableResult
     func save(
         _ value: Value,
-        validate: (Value) throws -> Void
+        validate: (Value) throws -> Void,
+        validateExisting:
+            ((Value) throws -> Void)? = nil,
+        expectedPrimary: PrimaryExpectation = .unchecked,
+        archiveExistingGenerations: Bool = false
     ) throws -> Int {
         try validate(value)
 
@@ -1098,25 +1242,100 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
         }
 
         try ensureParentDirectory()
+        let directory = try directoryResult.get()
+        return try directory.withExclusiveLock {
+            try saveWhileLocked(
+                encoded,
+                validate: validate,
+                validateExisting: validateExisting,
+                expectedPrimary: expectedPrimary,
+                archiveExistingGenerations:
+                    archiveExistingGenerations
+            )
+        }
+    }
 
+    private func saveWhileLocked(
+        _ encoded: Data,
+        validate: (Value) throws -> Void,
+        validateExisting: ((Value) throws -> Void)?,
+        expectedPrimary: PrimaryExpectation,
+        archiveExistingGenerations: Bool
+    ) throws -> Int {
         let currentPrimary: Data?
         do {
             currentPrimary = try dataIfPresent(at: primaryURL)
         } catch {
             throw StoreError.primaryReadFailed(Self.describe(error))
         }
+        let currentValue: Value?
         if let currentPrimary {
             do {
-                _ = try decodedValue(from: currentPrimary, validate: validate)
+                if let validateExisting {
+                    currentValue = try decodedValue(
+                        from: currentPrimary,
+                        validate: validateExisting
+                    )
+                } else {
+                    currentValue = try decodedValue(
+                        from: currentPrimary,
+                        validate: validate
+                    )
+                }
             } catch {
                 throw StoreError.existingPrimaryInvalid(Self.describe(error))
             }
-            try atomicWrite(currentPrimary, to: backupURL)
-        } else if try entryExists(at: backupURL) {
+        } else {
+            currentValue = nil
+        }
+
+        switch expectedPrimary {
+        case .unchecked:
+            break
+        case .missing:
+            guard currentPrimary == nil else {
+                throw StoreError.primaryChangedSinceLoad
+            }
+        case .value(let expected):
+            guard currentValue == expected else {
+                throw StoreError.primaryChangedSinceLoad
+            }
+        }
+
+        let currentBackup: Data?
+        do {
+            currentBackup = try dataIfPresent(at: backupURL)
+        } catch {
+            throw StoreError.backupReadFailed(Self.describe(error))
+        }
+
+        if currentPrimary == nil, currentBackup != nil {
             // A missing primary with a surviving backup indicates an
             // interrupted or externally-modified store. Preserve it and
             // require an explicit load/recovery before accepting writes.
             throw StoreError.primaryMissingWhileBackupExists
+        }
+
+        if archiveExistingGenerations,
+           let currentPrimary {
+            try archiveGenerations(
+                primary: currentPrimary,
+                backup: currentBackup
+            )
+        }
+
+        if let currentPrimary {
+            // Keep the older backup in a third slot before rotating the
+            // current primary over it. If publishing the new primary fails,
+            // both durable predecessors remain available.
+            if let currentBackup,
+               currentBackup != currentPrimary {
+                try atomicWrite(
+                    currentBackup,
+                    to: previousBackupURL
+                )
+            }
+            try atomicWrite(currentPrimary, to: backupURL)
         } else {
             // Seed a complete recovery copy before publishing the first
             // primary. A crash between these two atomic renames is recovered
@@ -1178,14 +1397,91 @@ nonisolated struct AtomicJSONFileStore<Value: Codable> {
         _ = try directoryResult.get()
     }
 
-    private func atomicWrite(_ data: Data, to url: URL) throws {
+    private func archiveGenerations(
+        primary: Data,
+        backup: Data?
+    ) throws {
+        let transactionID = UUID().uuidString.lowercased()
+        _ = try writeImmutableSnapshot(
+            primary,
+            role: "migration-archive.primary",
+            transactionID: transactionID
+        )
+        if let backup {
+            _ = try writeImmutableSnapshot(
+                backup,
+                role: "migration-archive.backup",
+                transactionID: transactionID
+            )
+        }
+    }
+
+    @discardableResult
+    private func writeImmutableSnapshot(
+        _ data: Data,
+        role: String,
+        transactionID: String = UUID().uuidString.lowercased()
+    ) throws -> URL {
+        let snapshotURL = primaryURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                ".atomic-json.\(role).\(transactionID).json"
+            )
+        try atomicWrite(
+            data,
+            to: snapshotURL,
+            replaceExisting: false
+        )
+        return snapshotURL
+    }
+
+    private func atomicWrite(
+        _ data: Data,
+        to url: URL,
+        replaceExisting: Bool = true
+    ) throws {
         try directoryResult.get().writeRegularFileAtomically(
             data,
             named: url.lastPathComponent,
             maximumBytes: maximumDocumentBytes,
             beforeSynchronize: synchronizeFileBeforeRename,
-            afterRename: synchronizeDirectoryAfterRename
+            afterRename: synchronizeDirectoryAfterRename,
+            replaceExisting: replaceExisting
         )
+    }
+
+    nonisolated private static func defaultPreviousBackupURL(
+        for backupURL: URL
+    ) -> URL {
+        backupURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                defaultPreviousBackupFileName(
+                    for: backupURL.lastPathComponent
+                )
+            )
+    }
+
+    nonisolated private static func defaultPreviousBackupFileName(
+        for backupFileName: String
+    ) -> String {
+        let fileURL = URL(fileURLWithPath: backupFileName)
+        let fileExtension = fileURL.pathExtension
+        let stem = fileURL.deletingPathExtension().lastPathComponent
+        guard !fileExtension.isEmpty else {
+            return "\(stem).previous"
+        }
+        return "\(stem).previous.\(fileExtension)"
+    }
+
+    nonisolated private static func isValidFileName(
+        _ name: String
+    ) -> Bool {
+        !name.isEmpty
+            && name != "."
+            && name != ".."
+            && !name.contains("/")
+            && !name.contains("\0")
     }
 
     nonisolated private static func isNoSuchFile(_ error: Error) -> Bool {

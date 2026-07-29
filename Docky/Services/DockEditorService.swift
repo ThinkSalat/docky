@@ -31,6 +31,9 @@ final class DockEditorService {
             return false
         }
 
+        let profileMutationCredentials =
+            ProfileService.shared
+            .captureMutationCredentials()
         let updated = await worker.perform {
             Self.updateDockPlist { plist in
                 guard var apps =
@@ -69,7 +72,9 @@ final class DockEditorService {
         }
 
         restartDock()
-        TileStore.shared.refreshAfterDockyEditedSystemDock()
+        TileStore.shared.refreshAfterDockyEditedSystemDock(
+            credentials: profileMutationCredentials
+        )
         return true
     }
 
@@ -79,6 +84,9 @@ final class DockEditorService {
             return false
         }
 
+        let profileMutationCredentials =
+            ProfileService.shared
+            .captureMutationCredentials()
         let updated = await worker.perform {
             Self.updateDockPlist { plist in
                 guard let apps =
@@ -113,7 +121,9 @@ final class DockEditorService {
         }
 
         restartDock()
-        TileStore.shared.refreshAfterDockyEditedSystemDock()
+        TileStore.shared.refreshAfterDockyEditedSystemDock(
+            credentials: profileMutationCredentials
+        )
         return true
     }
 

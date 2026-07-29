@@ -46,11 +46,15 @@ struct ProfileSwitcherButtonView: View {
 
     /// Cross-axis ball thickness — circle diameter on vertical docks,
     /// pill height on horizontal docks. Always 50% of the tile size.
-    private var ballSize: CGFloat { dockSettings.displayTileSize * 0.5 }
+    private var ballSize: CGFloat {
+        dockSettings.effectiveTileSize * 0.5
+    }
 
     /// Cross-axis hover extent. 44pt by default, shrinking with the dock
     /// when tiles are smaller. Always larger-or-equal to `ballSize`.
-    private var hoverZoneSize: CGFloat { min(dockSettings.displayTileSize, 44) }
+    private var hoverZoneSize: CGFloat {
+        min(dockSettings.effectiveTileSize, 44)
+    }
 
     /// Font used for profile names on horizontal docks. Matched to
     /// SwiftUI's `.headline` (semibold by default) so the measured
@@ -140,7 +144,9 @@ struct ProfileSwitcherButtonView: View {
     }
     
     private var maximumCornerRadius: CGFloat {
-        let iconHeight = layoutService.scaled(dockSettings.displayTileSize)
+        let iconHeight = layoutService.scaled(
+            dockSettings.effectiveTileSize
+        )
         return (iconHeight + layoutService.scaled(preferences.effectiveTileVerticalPadding) * 2) / 2
     }
     

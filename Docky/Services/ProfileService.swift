@@ -7,17 +7,44 @@
 //  the older UserDefaults keys remain compatibility snapshots only.
 //
 
+import AppKit
 import Foundation
 import Observation
 
-enum ProfileActivationSource: String {
+extension Notification.Name {
+    static let profileActivationDidChange =
+        Notification.Name(
+            "Docky.profileActivationDidChange"
+        )
+    static let profileSpaceAssignmentsDidChange =
+        Notification.Name(
+            "Docky.profileSpaceAssignmentsDidChange"
+        )
+}
+
+nonisolated enum ProfileActivationSource: String, Equatable, Sendable {
     case manual
     case trigger
     case launchReapply
     case deleteFallback
+    case rollback
+}
+
+nonisolated struct ProfileActivationChange: Equatable, Sendable {
+    let source: ProfileActivationSource
+    let previousProfileID: String
+    let newProfileID: String
+}
+
+nonisolated struct ProfileSpaceAssignmentChange: Equatable, Sendable {
+    let identity: MissionControlSpaceIdentity
+    let oldProfileID: String?
+    let newProfileID: String?
 }
 
 typealias ProfileStoreDocument = ProfileStoreEnvelope<DockProfile>
+
+extension DockProfile: ProfileStoreLegacyExactSpaceRepairable {}
 
 @Observable
 final class ProfileService {
@@ -31,6 +58,28 @@ final class ProfileService {
     /// Identifier of the currently-active profile.
     private(set) var activeProfileID: String
 
+    /// Durable/default profile used at launch and whenever no automation owns
+    /// the current context. This may differ from the runtime-active profile.
+    var defaultProfileID: String {
+        persistedActiveProfileID
+    }
+
+    /// The manual/default selection stored in the profile document. Automatic
+    /// trigger activation changes `activeProfileID` only; keeping the durable
+    /// selection separate prevents Space navigation from rotating profile
+    /// backups or incrementing the document revision.
+    private var persistedActiveProfileID: String
+
+    /// Tracks whether the effective runtime profile is derived automation.
+    /// On a durable-write rollback, a valid derived profile can remain visible
+    /// even though the manual/default selection returns to its durable value.
+    @ObservationIgnored
+    private var runtimeActivationSource: ProfileActivationSource
+
+    /// Globally unique exact-Space ownership. Profile content is never copied
+    /// or mutated when this table changes.
+    private(set) var spaceAssignments: [SpaceProfileAssignment]
+
     /// Set when existing persistence material could not be recovered safely.
     /// In this state Docky preserves the files and rejects profile mutations
     /// instead of overwriting potentially newer or recoverable data.
@@ -43,20 +92,54 @@ final class ProfileService {
         profiles.first(where: { $0.id == activeProfileID })
     }
 
+    var hasLegacyExactSpaceTriggers: Bool {
+        profiles.contains { profile in
+            profile.triggers.contains {
+                guard case .exactSpace(let trigger) = $0 else {
+                    return false
+                }
+                return trigger.identity == nil
+            }
+        }
+    }
+
     private weak var preferences: DockyPreferences?
     private let defaults: UserDefaults
     private let decoder = JSONDecoder()
     private let store: AtomicJSONFileStore<ProfileStoreDocument>
     private var revision: UInt64
+
+    /// Monotonic generation of the authoritative profile document.
+    ///
+    /// Long-lived interactions such as drag-and-drop capture this value at
+    /// gesture start and use it as a compare-and-swap guard at commit. This
+    /// prevents a drop from applying stale tile identities or indices after
+    /// another settings/profile mutation changed the same layout.
+    var stateRevision: UInt64 {
+        revision
+    }
+
+    func captureMutationCredentials()
+        -> ProfileMutationCredentials {
+        ProfileMutationCredentials(
+            profileID: activeProfileID,
+            revision: revision
+        )
+    }
+
     private var didCompleteBootstrap = false
     @ObservationIgnored
     private lazy var persistenceCoordinator =
         CoalescingPersistenceCoordinator(
             initialDurableValue: currentDocument,
-            persist: { [store] document in
+            persist: {
+                [store] document,
+                durablePredecessor in
                 try store.save(
                     document,
-                    validate: Self.validateDocument
+                    validate: Self.validateDocument,
+                    expectedPrimary:
+                        .value(durablePredecessor)
                 )
             },
             onEvent: { [weak self] event in
@@ -69,13 +152,37 @@ final class ProfileService {
             initialDurableValue: currentDocument,
             persist: { [defaults] document in
                 let encoder = JSONEncoder()
-                let data = try encoder.encode(document.profiles)
-                defaults.set(data, forKey: LegacyKeys.profiles)
-                defaults.set(
-                    document.activeProfileID,
-                    forKey: LegacyKeys.activeProfileID
+                encoder.outputFormatting = [.sortedKeys]
+                let documentData =
+                    try ProfileStoreRecoverySnapshotCodec.encode(
+                        document
+                    )
+                let profilesData = try encoder.encode(
+                    document.profiles
                 )
-                return data.count
+                if defaults.data(forKey: LegacyKeys.fullDocument)
+                    != documentData {
+                    defaults.set(
+                        documentData,
+                        forKey: LegacyKeys.fullDocument
+                    )
+                }
+                if defaults.data(forKey: LegacyKeys.profiles)
+                    != profilesData {
+                    defaults.set(
+                        profilesData,
+                        forKey: LegacyKeys.profiles
+                    )
+                }
+                if defaults.string(
+                    forKey: LegacyKeys.activeProfileID
+                ) != document.activeProfileID {
+                    defaults.set(
+                        document.activeProfileID,
+                        forKey: LegacyKeys.activeProfileID
+                    )
+                }
+                return documentData.count + profilesData.count
             },
             onEvent: { [weak self] event in
                 self?.handleLegacySnapshotEvent(event)
@@ -83,6 +190,8 @@ final class ProfileService {
         )
 
     private enum LegacyKeys {
+        static let fullDocument =
+            "docky.profileStoreSnapshotV2"
         static let profiles = "docky.profiles"
         static let activeProfileID = "docky.activeProfileID"
     }
@@ -103,10 +212,15 @@ final class ProfileService {
         self.defaults = defaults
         self.store = Self.makeDefaultStore(fileManager: fileManager)
 
+        let rootDisplayScopeOverride =
+            NSScreen.screensHaveSeparateSpaces
+            ? nil
+            : MissionControlSpaceIdentity.sharedDisplayScope
         let legacy = Self.makeLegacyCandidate(
             preferences: preferences,
             defaults: defaults,
-            decoder: decoder
+            decoder: decoder,
+            rootDisplayScopeOverride: rootDisplayScopeOverride
         )
 
         var initialDocument = legacy.document
@@ -119,7 +233,7 @@ final class ProfileService {
 
         do {
             if let loaded = try store.load(
-                validate: Self.validateDocument,
+                validate: Self.validateDocumentForLoad,
                 canRecoverPrimaryFailure: { error in
                     guard let validationError = error as? ProfileStoreValidationError else {
                         return true
@@ -136,13 +250,32 @@ final class ProfileService {
                     persistenceError =
                         "The backup was loaded, but the primary could not be repaired: \(repairFailure)"
                 }
+                if initialDocument.schemaVersion
+                    < ProfileStoreDocument.currentSchemaVersion {
+                    initialDocument = try Self.migrateSchema1Document(
+                        initialDocument,
+                        rootDisplayScopeOverride:
+                            rootDisplayScopeOverride
+                    )
+                    encodedBytes = try store.save(
+                        initialDocument,
+                        validate: Self.validateDocument,
+                        validateExisting:
+                            Self.validateDocumentForLoad,
+                        expectedPrimary: .value(loaded.value),
+                        archiveExistingGenerations: true
+                    )
+                    loadSource += "+schema1Migration"
+                    migrated = true
+                }
             } else if let legacyFailure = legacy.failure {
                 blocked = true
                 persistenceError = Self.describe(legacyFailure)
             } else {
                 encodedBytes = try store.save(
                     legacy.document,
-                    validate: Self.validateDocument
+                    validate: Self.validateDocument,
+                    expectedPrimary: .missing
                 )
                 migrated = true
             }
@@ -157,6 +290,9 @@ final class ProfileService {
 
         profiles = initialDocument.profiles
         activeProfileID = initialDocument.activeProfileID
+        persistedActiveProfileID = initialDocument.activeProfileID
+        runtimeActivationSource = .launchReapply
+        spaceAssignments = initialDocument.spaceAssignments
         revision = initialDocument.revision
         persistenceIsBlocked = blocked
         lastPersistenceError = persistenceError
@@ -168,6 +304,7 @@ final class ProfileService {
                 "activeProfileToken": diagnostics.token(activeProfileID),
                 "storedActiveWasValid": legacy.storedActiveWasValid,
                 "profileCount": profiles.count,
+                "spaceAssignmentCount": spaceAssignments.count,
                 "pinnedItemCount": activeProfile?.pinnedItems.count ?? 0,
                 "trailingItemCount": activeProfile?.trailingItems.count ?? 0,
                 "schemaVersion": ProfileStoreDocument.currentSchemaVersion,
@@ -178,6 +315,7 @@ final class ProfileService {
             diagnostics.record(.profiles, "profilesLoaded", fields: [
                 "loadSource": loadSource,
                 "profileCount": profiles.count,
+                "spaceAssignmentCount": spaceAssignments.count,
                 "activeProfileToken": diagnostics.token(activeProfileID),
                 "storedActiveWasValid": legacy.storedActiveWasValid,
                 "schemaVersion": initialDocument.schemaVersion,
@@ -228,6 +366,7 @@ final class ProfileService {
 
         DiagnosticsTrace.shared.record(.profiles, "profileBootstrapCompleted", fields: [
             "profileCount": profiles.count,
+            "spaceAssignmentCount": spaceAssignments.count,
             "activeProfileToken": DiagnosticsTrace.shared.token(activeProfileID),
             "revision": revision,
             "persistenceBlocked": persistenceIsBlocked,
@@ -240,14 +379,6 @@ final class ProfileService {
         source: ProfileActivationSource = .manual
     ) -> Bool {
         let diagnostics = DiagnosticsTrace.shared
-        guard activeProfileID != id else {
-            diagnostics.record(.profiles, "profileActivationSkipped", fields: [
-                "reason": "alreadyActive",
-                "source": source.rawValue,
-                "profileToken": diagnostics.token(id),
-            ])
-            return true
-        }
         guard let profile = profiles.first(where: { $0.id == id }) else {
             diagnostics.record(.profiles, "profileActivationSkipped", fields: [
                 "reason": "profileNotFound",
@@ -258,6 +389,57 @@ final class ProfileService {
         }
 
         let previousID = activeProfileID
+        let runtimeAlreadyActive = previousID == id
+        let durableAlreadySelected = persistedActiveProfileID == id
+        let manualDisposition =
+            source == .manual
+            ? ManualActivationDispositionPolicy.resolve(
+                runtimeAlreadyActive: runtimeAlreadyActive,
+                durableAlreadySelected: durableAlreadySelected
+            )
+            : nil
+
+        if source == .trigger {
+            guard !runtimeAlreadyActive else {
+                diagnostics.record(
+                    .profiles,
+                    "profileActivationSkipped",
+                    fields: [
+                        "reason": "alreadyActive",
+                        "source": source.rawValue,
+                        "profileToken": diagnostics.token(id),
+                    ]
+                )
+                return true
+            }
+            return activateRuntimeProfile(
+                profile,
+                source: source,
+                previousID: previousID
+            )
+        }
+
+        if let manualDisposition,
+           manualDisposition.isVisuallyAndDurablyIdempotent {
+            // This is an explicit user intent even when it is visually and
+            // durably idempotent. Runtime policy uses the notification to
+            // reassert a manual override for the current Space residency.
+            runtimeActivationSource = .manual
+            if manualDisposition.shouldEmitIntentNotification {
+                postActivationChange(
+                    source: .manual,
+                    previousProfileID: previousID,
+                    newProfileID: id
+                )
+            }
+            diagnostics.record(.profiles, "profileActivationSkipped", fields: [
+                "reason": "alreadyActiveAndPersisted",
+                "source": source.rawValue,
+                "profileToken": diagnostics.token(id),
+            ])
+            return true
+        }
+
         diagnostics.record(.profiles, "profileActivationBegan", fields: [
             "source": source.rawValue,
             "previousProfileToken": diagnostics.token(previousID),
@@ -268,24 +450,65 @@ final class ProfileService {
             "hiddenAppCount": profile.hiddenAppBundleIdentifiers.count,
         ])
 
-        guard commit(profiles: profiles, activeProfileID: id, reason: "activation") else {
-            diagnostics.record(.profiles, "profileActivationFailed", fields: [
-                "source": source.rawValue,
-                "previousProfileToken": diagnostics.token(previousID),
-                "profileToken": diagnostics.token(id),
-                "error":
-                    DiagnosticPrivacy.redactedTextDescriptor(
-                        lastPersistenceError
-                    ),
-            ])
-            return false
+        if manualDisposition?.shouldPersistDefault == true {
+            guard commit(
+                profiles: profiles,
+                persistedActiveProfileID: id,
+                reason: "manualActivation"
+            ) else {
+                diagnostics.record(
+                    .profiles,
+                    "profileActivationFailed",
+                    fields: [
+                        "source": source.rawValue,
+                        "previousProfileToken":
+                            diagnostics.token(previousID),
+                        "profileToken": diagnostics.token(id),
+                        "error":
+                            DiagnosticPrivacy.redactedTextDescriptor(
+                                lastPersistenceError
+                            ),
+                    ]
+                )
+                return false
+            }
         }
 
-        preferences?.applyProfile(profile)
+        return activateRuntimeProfile(
+            profile,
+            source: source,
+            previousID: previousID,
+            applyProfile:
+                manualDisposition?.shouldApplyLayout
+                ?? !runtimeAlreadyActive
+        )
+    }
+
+    @discardableResult
+    private func activateRuntimeProfile(
+        _ profile: DockProfile,
+        source: ProfileActivationSource,
+        previousID: String,
+        applyProfile: Bool = true
+    ) -> Bool {
+        activeProfileID = profile.id
+        runtimeActivationSource = source
+        if applyProfile {
+            preferences?.applyProfile(profile)
+        }
+        postActivationChange(
+            source: source,
+            previousProfileID: previousID,
+            newProfileID: profile.id
+        )
+
+        let diagnostics = DiagnosticsTrace.shared
         diagnostics.record(.profiles, "profileActivationCompleted", fields: [
             "source": source.rawValue,
             "previousProfileToken": diagnostics.token(previousID),
-            "profileToken": diagnostics.token(id),
+            "profileToken": diagnostics.token(profile.id),
+            "persistedProfileToken":
+                diagnostics.token(persistedActiveProfileID),
             "revision": revision,
         ])
         return true
@@ -347,7 +570,6 @@ final class ProfileService {
 
         guard commit(
             profiles: candidateProfiles,
-            activeProfileID: activeProfileID,
             reason: "activeProfileMutation"
         ) else {
             return false
@@ -369,14 +591,129 @@ final class ProfileService {
         return true
     }
 
+    /// Commits one complete active-profile mutation guarded by the profile
+    /// identity and document revision captured when an interaction began.
+    ///
+    /// Unlike assigning several `DockyPreferences` properties in sequence,
+    /// this publishes one candidate document or nothing. After acceptance the
+    /// compatibility preference snapshot is updated from that same committed
+    /// profile while `applyProfile` suppresses mirror-back writes.
+    @discardableResult
+    func applyActiveProfileTransaction(
+        expectedProfileID: String,
+        expectedRevision: UInt64,
+        reason: String,
+        mutate: (inout DockProfile) -> Void
+    ) -> Bool {
+        applyActiveProfileTransaction(
+            credentials:
+                ProfileMutationCredentials(
+                    profileID: expectedProfileID,
+                    revision: expectedRevision
+                ),
+            reason: reason,
+            mutate: mutate
+        )
+    }
+
+    /// Credential-based form used by work that spans an `await`. The
+    /// credentials must be captured before the asynchronous operation starts.
+    @discardableResult
+    func applyActiveProfileTransaction(
+        credentials: ProfileMutationCredentials,
+        reason: String,
+        mutate: (inout DockProfile) -> Void
+    ) -> Bool {
+        let diagnostics = DiagnosticsTrace.shared
+        let expectedProfileID = credentials.profileID
+        let expectedRevision = credentials.revision
+        switch credentials.validation(
+            activeProfileID: activeProfileID,
+            currentRevision: revision
+        ) {
+        case .profileChanged:
+            diagnostics.record(.profiles, "activeProfileTransactionRejected", fields: [
+                "reason": "profileChanged",
+                "expectedProfileToken": diagnostics.token(expectedProfileID),
+                "activeProfileToken": diagnostics.token(activeProfileID),
+                "expectedRevision": expectedRevision,
+                "revision": revision,
+            ])
+            return false
+        case .revisionChanged:
+            diagnostics.record(.profiles, "activeProfileTransactionRejected", fields: [
+                "reason": "revisionChanged",
+                "profileToken": diagnostics.token(activeProfileID),
+                "expectedRevision": expectedRevision,
+                "revision": revision,
+            ])
+            return false
+        case .current:
+            break
+        }
+        guard let index = profiles.firstIndex(where: { $0.id == expectedProfileID }) else {
+            recordMutationFailure(
+                reason: "activeProfileUnavailable",
+                profileID: expectedProfileID
+            )
+            return false
+        }
+
+        let before = profiles[index]
+        var candidateProfiles = profiles
+        mutate(&candidateProfiles[index])
+        let after = candidateProfiles[index]
+        guard after != before else {
+            diagnostics.record(.profiles, "activeProfileTransactionNoChange", fields: [
+                "reason": reason,
+                "profileToken": diagnostics.token(expectedProfileID),
+                "revision": revision,
+            ])
+            return true
+        }
+
+        guard commit(
+            profiles: candidateProfiles,
+            reason: reason
+        ) else {
+            diagnostics.record(.profiles, "activeProfileTransactionRejected", fields: [
+                "reason": "commitFailed",
+                "mutationReason": reason,
+                "profileToken": diagnostics.token(expectedProfileID),
+                "expectedRevision": expectedRevision,
+                "revision": revision,
+                "error":
+                    DiagnosticPrivacy.redactedTextDescriptor(
+                        lastPersistenceError
+                    ),
+            ])
+            return false
+        }
+
+        preferences?.applyProfile(after)
+        diagnostics.record(.profiles, "activeProfileTransactionApplied", fields: [
+            "reason": reason,
+            "profileToken": diagnostics.token(expectedProfileID),
+            "pinnedItemCountBefore": before.pinnedItems.count,
+            "pinnedItemCount": after.pinnedItems.count,
+            "trailingItemCountBefore": before.trailingItems.count,
+            "trailingItemCount": after.trailingItems.count,
+            "revision": revision,
+        ])
+        return true
+    }
+
     @discardableResult
     func createProfile(
         name: String,
         symbolName: String = "circle.grid.3x3.fill",
         basedOn: DockProfile? = nil
     ) -> DockProfile? {
+        let canonicalName = name.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
         let profile = DockProfile(
-            name: name,
+            name: canonicalName,
             symbolName: symbolName,
             pinnedItems: basedOn?.pinnedItems ?? [],
             trailingItems: basedOn?.trailingItems ?? [],
@@ -388,7 +725,6 @@ final class ProfileService {
         candidateProfiles.append(profile)
         guard commit(
             profiles: candidateProfiles,
-            activeProfileID: activeProfileID,
             reason: "createProfile"
         ) else {
             return nil
@@ -398,8 +734,11 @@ final class ProfileService {
 
     @discardableResult
     func renameProfile(id: String, to newName: String) -> Bool {
-        mutateProfile(id: id, reason: "renameProfile") {
-            $0.name = newName
+        let canonicalName = newName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return mutateProfile(id: id, reason: "renameProfile") {
+            $0.name = canonicalName
         }
     }
 
@@ -415,6 +754,202 @@ final class ProfileService {
         mutateProfile(id: profileID, reason: "addTrigger") {
             $0.triggers.append(trigger)
         }
+    }
+
+    func profileIDAssigned(
+        to identity: MissionControlSpaceIdentity?
+    ) -> String? {
+        SpaceProfileAssignmentPolicy.profileID(
+            for: identity,
+            in: spaceAssignments
+        )
+    }
+
+    /// Resolves exact ownership only from the document that has actually
+    /// reached durable storage. A pending unrelated edit is allowed, but the
+    /// current owner and target profile must still match their durable values.
+    /// A load/repair or write failure makes the fallback document
+    /// non-authoritative and disables immediate activation.
+    func durableSpaceAssignmentState(
+        for identity: MissionControlSpaceIdentity?
+    ) -> ProfileDurableSpaceAssignmentState {
+        let durableDocument =
+            persistenceCoordinator.durableValueSnapshot
+        let assignedProfileID =
+            SpaceProfileAssignmentPolicy.profileID(
+                for: identity,
+                in: durableDocument.spaceAssignments
+            )
+        let validProfileID = assignedProfileID.flatMap { profileID in
+            durableDocument.profiles.contains(where: {
+                $0.id == profileID
+            })
+                ? profileID
+                : nil
+        }
+        let currentAssignedProfileID =
+            SpaceProfileAssignmentPolicy.profileID(
+                for: identity,
+                in: spaceAssignments
+            )
+        let durableProfile = validProfileID.flatMap { profileID in
+            durableDocument.profiles.first(where: {
+                $0.id == profileID
+            })
+        }
+        let currentProfile = validProfileID.flatMap { profileID in
+            profiles.first(where: {
+                $0.id == profileID
+            })
+        }
+        return ProfileDurableSpaceAssignmentState(
+            profileID: validProfileID,
+            currentOwnerMatchesDurable:
+                currentAssignedProfileID == validProfileID,
+            targetProfileMatchesDurable:
+                durableProfile != nil
+                && currentProfile == durableProfile,
+            persistenceIsAuthoritative:
+                !persistenceIsBlocked,
+            currentRevision: revision,
+            durableRevision: durableDocument.revision
+        )
+    }
+
+    func spaceAssignments(
+        for profileID: String
+    ) -> [SpaceProfileAssignment] {
+        spaceAssignments.filter { $0.profileID == profileID }
+    }
+
+    /// Assigns only the supplied Space. Existing ownership for that Space is
+    /// replaced atomically; every other assignment and all profile content are
+    /// preserved byte-for-byte by the candidate model.
+    @discardableResult
+    func assignSpace(
+        _ identity: MissionControlSpaceIdentity,
+        to profileID: String
+    ) -> Bool {
+        guard profiles.contains(where: { $0.id == profileID }) else {
+            recordMutationFailure(
+                reason: "spaceAssignmentProfileNotFound",
+                profileID: profileID
+            )
+            return false
+        }
+        let oldProfileID = profileIDAssigned(to: identity)
+        guard let candidateDocument =
+            ProfileStoreDocumentMutationPolicy.assigningSpace(
+                identity,
+                to: profileID,
+                in: currentDocument
+            )
+        else {
+            return false
+        }
+        guard candidateDocument.spaceAssignments
+                != spaceAssignments
+        else {
+            return true
+        }
+        let didCommit = commit(
+            profiles: candidateDocument.profiles,
+            persistedActiveProfileID:
+                candidateDocument.activeProfileID,
+            spaceAssignments:
+                candidateDocument.spaceAssignments,
+            reason: "assignSpace"
+        )
+        if didCommit {
+            postSpaceAssignmentChange(
+                identity: identity,
+                oldProfileID: oldProfileID,
+                newProfileID: profileID
+            )
+        }
+        return didCommit
+    }
+
+    @discardableResult
+    func removeSpaceAssignment(
+        _ identity: MissionControlSpaceIdentity,
+        from profileID: String
+    ) -> Bool {
+        let oldProfileID = profileIDAssigned(to: identity)
+        let candidateDocument =
+            ProfileStoreDocumentMutationPolicy
+            .removingSpaceAssignment(
+                identity,
+                from: profileID,
+                in: currentDocument
+            )
+        guard candidateDocument.spaceAssignments
+                != spaceAssignments
+        else {
+            return true
+        }
+        let didCommit = commit(
+            profiles: candidateDocument.profiles,
+            persistedActiveProfileID:
+                candidateDocument.activeProfileID,
+            spaceAssignments:
+                candidateDocument.spaceAssignments,
+            reason: "removeSpaceAssignment"
+        )
+        if didCommit {
+            postSpaceAssignmentChange(
+                identity: identity,
+                oldProfileID: oldProfileID,
+                newProfileID: nil
+            )
+        }
+        return didCommit
+    }
+
+    /// Converts one inert legacy exact-Space trigger into global ownership and
+    /// removes that trigger in the same document commit. The expected owner is
+    /// a compare-and-swap guard captured by the confirmation UI.
+    @discardableResult
+    func repairLegacyExactSpaceBinding(
+        triggerID: String,
+        in profileID: String,
+        assigning identity: MissionControlSpaceIdentity,
+        expectedOwnerProfileID: String?
+    ) -> Bool {
+        guard let candidateDocument =
+            ProfileStoreDocumentMutationPolicy
+            .repairingLegacyExactSpaceBinding(
+                profileID: profileID,
+                triggerID: triggerID,
+                assigning: identity,
+                expectedOwnerProfileID:
+                    expectedOwnerProfileID,
+                in: currentDocument
+            )
+        else {
+            recordMutationFailure(
+                reason: "legacyExactSpaceRepairRejected",
+                profileID: profileID
+            )
+            return false
+        }
+
+        let didCommit = commit(
+            profiles: candidateDocument.profiles,
+            persistedActiveProfileID:
+                candidateDocument.activeProfileID,
+            spaceAssignments:
+                candidateDocument.spaceAssignments,
+            reason: "repairLegacyExactSpaceBinding"
+        )
+        if didCommit {
+            postSpaceAssignmentChange(
+                identity: identity,
+                oldProfileID: expectedOwnerProfileID,
+                newProfileID: profileID
+            )
+        }
+        return didCommit
     }
 
     @discardableResult
@@ -436,30 +971,64 @@ final class ProfileService {
 
     @discardableResult
     func deleteProfile(id: String) -> Bool {
-        guard profiles.count > 1 else { return false }
-        guard profiles.contains(where: { $0.id == id }) else { return false }
+        guard let candidateDocument =
+            ProfileStoreDocumentMutationPolicy.deletingProfile(
+                id,
+                from: currentDocument
+            )
+        else {
+            return false
+        }
 
-        let wasActive = activeProfileID == id
-        let candidateProfiles = profiles.filter { $0.id != id }
-        let candidateActiveID = wasActive
-            ? candidateProfiles[0].id
-            : activeProfileID
+        let previousRuntimeID = activeProfileID
+        let wasRuntimeActive = previousRuntimeID == id
+        let candidateProfiles = candidateDocument.profiles
+        guard let candidateRuntimeID =
+            ProfileStoreDocumentMutationPolicy
+            .runtimeProfileIDAfterDeleting(
+                id,
+                previousRuntimeProfileID:
+                    previousRuntimeID,
+                from: candidateDocument
+            )
+        else {
+            recordMutationFailure(
+                reason: "deleteProfileRuntimeFallbackUnavailable",
+                profileID: id
+            )
+            return false
+        }
+        let removedAssignments = spaceAssignments.filter {
+            $0.profileID == id
+        }
 
         guard commit(
             profiles: candidateProfiles,
-            activeProfileID: candidateActiveID,
+            persistedActiveProfileID:
+                candidateDocument.activeProfileID,
+            spaceAssignments:
+                candidateDocument.spaceAssignments,
             reason: "deleteProfile"
         ) else {
             return false
         }
 
-        if wasActive, let fallback = candidateProfiles.first {
-            preferences?.applyProfile(fallback)
-            DiagnosticsTrace.shared.record(.profiles, "profileActivationCompleted", fields: [
-                "source": ProfileActivationSource.deleteFallback.rawValue,
-                "profileToken": DiagnosticsTrace.shared.token(fallback.id),
-                "revision": revision,
-            ])
+        if wasRuntimeActive,
+           let fallback = candidateProfiles.first(where: {
+               $0.id == candidateRuntimeID
+           }) {
+            _ = activateRuntimeProfile(
+                fallback,
+                source: .deleteFallback,
+                previousID: previousRuntimeID
+            )
+        }
+        for assignment in removedAssignments {
+            postSpaceAssignmentChange(
+                identity: assignment.identity,
+                oldProfileID: id,
+                newProfileID: nil
+            )
         }
         return true
     }
@@ -482,14 +1051,16 @@ final class ProfileService {
         }
         return commit(
             profiles: candidateProfiles,
-            activeProfileID: activeProfileID,
             reason: reason
         )
     }
 
     private func commit(
         profiles candidateProfiles: [DockProfile],
-        activeProfileID candidateActiveProfileID: String,
+        persistedActiveProfileID candidatePersistedActiveProfileID:
+            String? = nil,
+        spaceAssignments candidateSpaceAssignments:
+            [SpaceProfileAssignment]? = nil,
         reason: String
     ) -> Bool {
         let diagnostics = DiagnosticsTrace.shared
@@ -507,10 +1078,16 @@ final class ProfileService {
             return false
         }
 
+        let resolvedPersistedActiveProfileID =
+            candidatePersistedActiveProfileID
+            ?? persistedActiveProfileID
+        let resolvedSpaceAssignments =
+            candidateSpaceAssignments ?? spaceAssignments
         let document = ProfileStoreDocument(
             revision: revision + 1,
-            activeProfileID: candidateActiveProfileID,
-            profiles: candidateProfiles
+            activeProfileID: resolvedPersistedActiveProfileID,
+            profiles: candidateProfiles,
+            spaceAssignments: resolvedSpaceAssignments
         )
 
         do {
@@ -530,14 +1107,18 @@ final class ProfileService {
         }
 
         profiles = candidateProfiles
-        activeProfileID = candidateActiveProfileID
+        persistedActiveProfileID = resolvedPersistedActiveProfileID
+        spaceAssignments = resolvedSpaceAssignments
         revision = document.revision
         lastPersistenceError = nil
 
         diagnostics.record(.profiles, "profilePersistenceScheduled", fields: [
             "reason": reason,
             "profileCount": profiles.count,
-            "activeProfileToken": diagnostics.token(activeProfileID),
+            "spaceAssignmentCount": spaceAssignments.count,
+            "activeProfileToken":
+                diagnostics.token(persistedActiveProfileID),
+            "runtimeProfileToken": diagnostics.token(activeProfileID),
             "schemaVersion": document.schemaVersion,
             "revision": revision,
         ])
@@ -611,9 +1192,70 @@ final class ProfileService {
     private var currentDocument: ProfileStoreDocument {
         ProfileStoreDocument(
             revision: revision,
-            activeProfileID: activeProfileID,
-            profiles: profiles
+            activeProfileID: persistedActiveProfileID,
+            profiles: profiles,
+            spaceAssignments: spaceAssignments
         )
+    }
+
+    private func postActivationChange(
+        source: ProfileActivationSource,
+        previousProfileID: String,
+        newProfileID: String
+    ) {
+        NotificationCenter.default.post(
+            name: .profileActivationDidChange,
+            object: ProfileActivationChange(
+                source: source,
+                previousProfileID: previousProfileID,
+                newProfileID: newProfileID
+            )
+        )
+    }
+
+    private func postSpaceAssignmentChange(
+        identity: MissionControlSpaceIdentity,
+        oldProfileID: String?,
+        newProfileID: String?
+    ) {
+        guard oldProfileID != newProfileID else { return }
+        NotificationCenter.default.post(
+            name: .profileSpaceAssignmentsDidChange,
+            object: ProfileSpaceAssignmentChange(
+                identity: identity,
+                oldProfileID: oldProfileID,
+                newProfileID: newProfileID
+            )
+        )
+    }
+
+    private func postSpaceAssignmentChanges(
+        from oldAssignments: [SpaceProfileAssignment],
+        to newAssignments: [SpaceProfileAssignment]
+    ) {
+        let oldOwners = assignmentOwners(in: oldAssignments)
+        let newOwners = assignmentOwners(in: newAssignments)
+        let identities = Set(oldOwners.keys).union(newOwners.keys)
+            .sorted { $0.storageKey < $1.storageKey }
+
+        for identity in identities {
+            postSpaceAssignmentChange(
+                identity: identity,
+                oldProfileID: oldOwners[identity],
+                newProfileID: newOwners[identity]
+            )
+        }
+    }
+
+    private func assignmentOwners(
+        in assignments: [SpaceProfileAssignment]
+    ) -> [MissionControlSpaceIdentity: String] {
+        assignments.reduce(into: [:]) { result, assignment in
+            // Valid documents contain one owner per identity. Assignment via
+            // subscript remains fail-safe if an already-loaded in-memory value
+            // is being rolled back after a persistence failure.
+            result[assignment.identity] = assignment.profileID
+        }
     }
 
     private func handlePersistenceEvent(
@@ -629,6 +1271,8 @@ final class ProfileService {
             }
             diagnostics.record(.profiles, "profilesPersisted", fields: [
                 "profileCount": document.profiles.count,
+                "spaceAssignmentCount":
+                    document.spaceAssignments.count,
                 "activeProfileToken": diagnostics.token(
                     document.activeProfileID
                 ),
@@ -642,15 +1286,43 @@ final class ProfileService {
             let durableDocument,
             let errorDescription
         ):
+            let previousRuntimeProfileID = activeProfileID
+            let previousRuntimeSource = runtimeActivationSource
+            let previousAssignments = spaceAssignments
+
             persistenceIsBlocked = true
             lastPersistenceError = errorDescription
             profiles = durableDocument.profiles
-            activeProfileID = durableDocument.activeProfileID
+            persistedActiveProfileID = durableDocument.activeProfileID
+            spaceAssignments = durableDocument.spaceAssignments
             revision = durableDocument.revision
+
+            let preservesDerivedRuntimeProfile =
+                previousRuntimeSource == .trigger
+                && profiles.contains(where: {
+                    $0.id == previousRuntimeProfileID
+                })
+            let restoredRuntimeProfileID =
+                preservesDerivedRuntimeProfile
+                ? previousRuntimeProfileID
+                : durableDocument.activeProfileID
+            activeProfileID = restoredRuntimeProfileID
+            runtimeActivationSource =
+                preservesDerivedRuntimeProfile ? .trigger : .rollback
+
             persistLegacyCompatibilitySnapshot(document: durableDocument)
-            if let durableProfile = activeProfile {
-                preferences?.applyProfile(durableProfile)
+            if let restoredProfile = activeProfile {
+                preferences?.applyProfile(restoredProfile)
             }
+            postActivationChange(
+                source: .rollback,
+                previousProfileID: previousRuntimeProfileID,
+                newProfileID: restoredRuntimeProfileID
+            )
+            postSpaceAssignmentChanges(
+                from: previousAssignments,
+                to: durableDocument.spaceAssignments
+            )
 
             diagnostics.record(.profiles, "profilesPersistFailed", fields: [
                 "attemptedProfileCount":
@@ -721,6 +1393,28 @@ final class ProfileService {
         _ document: ProfileStoreDocument
     ) throws {
         try ProfileStoreDocument.validate(document)
+        try validateDocumentPayload(document)
+    }
+
+    private nonisolated static func validateDocumentForLoad(
+        _ document: ProfileStoreDocument
+    ) throws {
+        try ProfileStoreDocument.validateForLoad(document)
+        try validateDocumentPayload(document)
+    }
+
+    private nonisolated static func validateDocumentPayload(
+        _ document: ProfileStoreDocument
+    ) throws {
+        try ProfileStoreProfileMetadataPolicy.validate(
+            document.profiles.map {
+                ProfileStoreProfileMetadata(
+                    profileID: $0.id,
+                    name: $0.name,
+                    triggerIDs: $0.triggers.map(\.id)
+                )
+            }
+        )
         for profile in document.profiles {
             try validateString(
                 profile.name,
@@ -881,6 +1575,14 @@ final class ProfileService {
             )
         case .exactSpace(let value):
             try validateString(value.id, field: "triggerID")
+            try validateString(
+                value.displayUUID,
+                field: "triggerDisplayUUID"
+            )
+            try validateString(
+                value.spaceUUID,
+                field: "triggerSpaceUUID"
+            )
         }
     }
 
@@ -964,10 +1666,73 @@ final class ProfileService {
         }
     }
 
+    /// Schema 1 embedded exact Space ownership inside each profile's generic
+    /// trigger list. Schema 2 extracts only unambiguous UUID identities into a
+    /// global table. Numeric IDs and cross-profile conflicts remain visible as
+    /// inert repair rows; they are never guessed.
+    private nonisolated static func migrateSchema1Document(
+        _ document: ProfileStoreDocument,
+        rootDisplayScopeOverride: String?
+    ) throws -> ProfileStoreDocument {
+        guard document.schemaVersion == 1 else { return document }
+        guard document.revision < UInt64.max else {
+            throw ProfileStoreValidationError.revisionExhausted
+        }
+
+        let migrationPlan =
+            LegacyExactSpaceAssignmentMigrationPolicy.makePlan(
+                profiles: document.profiles.map {
+                    LegacyExactSpaceMigrationProfileInput(
+                        profileID: $0.id,
+                        triggers: $0.triggers
+                    )
+                },
+                rootDisplayScopeOverride: rootDisplayScopeOverride
+            )
+        let mergedAssignments =
+            try ProfileStoreSchemaMigrationPolicy
+            .mergingSpaceAssignments(
+                existing: document.spaceAssignments,
+                migrated: migrationPlan.assignments
+            )
+
+        let migratedProfiles = document.profiles.map { profile in
+            var migrated = profile
+            let migratedIdentities = Set(
+                migrationPlan.migratedIdentities(for: profile.id)
+            )
+            migrated.triggers.removeAll { trigger in
+                guard case .exactSpace(let exact) = trigger,
+                      let identity =
+                          LegacyExactSpaceAssignmentMigrationPolicy
+                          .migrationIdentity(
+                              for: exact,
+                              rootDisplayScopeOverride:
+                                  rootDisplayScopeOverride
+                          )
+                else {
+                    return false
+                }
+                return migratedIdentities.contains(identity)
+            }
+            return migrated
+        }
+
+        let migrated = ProfileStoreDocument(
+            revision: document.revision + 1,
+            activeProfileID: document.activeProfileID,
+            profiles: migratedProfiles,
+            spaceAssignments: mergedAssignments
+        )
+        try validateDocument(migrated)
+        return migrated
+    }
+
     private static func makeLegacyCandidate(
         preferences: DockyPreferences,
         defaults: UserDefaults,
-        decoder: JSONDecoder
+        decoder: JSONDecoder,
+        rootDisplayScopeOverride: String?
     ) -> LegacyCandidate {
         let topLevelProfile = DockProfile(
             name: "Default",
@@ -983,6 +1748,48 @@ final class ProfileService {
             activeProfileID: topLevelProfile.id,
             profiles: [topLevelProfile]
         )
+
+        if let fullSnapshotObject = defaults.object(
+            forKey: LegacyKeys.fullDocument
+        ) {
+            guard let fullSnapshotData =
+                    fullSnapshotObject as? Data
+            else {
+                return LegacyCandidate(
+                    document: topLevelDocument,
+                    source:
+                        "topLevelPreferencesAfterFullSnapshotFailure",
+                    storedActiveWasValid: false,
+                    failure:
+                        ProfileStoreValidationError
+                        .legacySnapshotDecodeFailed([
+                            LegacyKeys.fullDocument,
+                        ])
+                )
+            }
+            do {
+                let document =
+                    try ProfileStoreRecoverySnapshotCodec.decode(
+                        fullSnapshotData,
+                        as: DockProfile.self
+                    )
+                try Self.validateDocument(document)
+                return LegacyCandidate(
+                    document: document,
+                    source: "fullDocumentSnapshot",
+                    storedActiveWasValid: true,
+                    failure: nil
+                )
+            } catch {
+                return LegacyCandidate(
+                    document: topLevelDocument,
+                    source:
+                        "topLevelPreferencesAfterFullSnapshotFailure",
+                    storedActiveWasValid: false,
+                    failure: error
+                )
+            }
+        }
 
         guard let legacyData = defaults.data(forKey: LegacyKeys.profiles) else {
             var failures = preferences.legacyProfileSnapshotDecodeFailures
@@ -1008,12 +1815,20 @@ final class ProfileService {
                         forKey: LegacyKeys.activeProfileID
                     )
                 )
-            let document = ProfileStoreDocument(
+            let legacyDocument = ProfileStoreDocument(
+                schemaVersion: 1,
                 revision: 1,
                 activeProfileID: selection.activeProfileID,
                 profiles: legacyProfiles
             )
-            try Self.validateDocument(document)
+            try Self.validateDocumentForLoad(legacyDocument)
+            // Keep UserDefaults-only recovery on the exact same fail-closed
+            // path as a schema-1 profile document: UUID identities migrate,
+            // numeric IDs and cross-profile conflicts remain inert repair rows.
+            let document = try Self.migrateSchema1Document(
+                legacyDocument,
+                rootDisplayScopeOverride: rootDisplayScopeOverride
+            )
             return LegacyCandidate(
                 document: document,
                 source: "legacyProfiles",
