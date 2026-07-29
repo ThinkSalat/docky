@@ -41,6 +41,47 @@ final class CoalescingPersistenceCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testCoalescedWriteReceivesActualDurablePredecessor() {
+        let firstWriteStarted = DispatchSemaphore(value: 0)
+        let allowFirstWrite = DispatchSemaphore(value: 0)
+        let state = LockedFixtureState()
+
+        let coordinator = CoalescingPersistenceCoordinator(
+            initialDurableValue: 0,
+            persist: { value, durablePredecessor in
+                state.appendDurableTransition(
+                    from: durablePredecessor,
+                    to: value
+                )
+                if value == 1 {
+                    firstWriteStarted.signal()
+                    _ = allowFirstWrite.wait(timeout: .now() + 2)
+                }
+                return value
+            },
+            onEvent: { _ in
+                MainActor.preconditionIsolated()
+            }
+        )
+
+        XCTAssertTrue(coordinator.submit(1))
+        XCTAssertEqual(
+            firstWriteStarted.wait(timeout: .now() + 2),
+            .success
+        )
+        XCTAssertTrue(coordinator.submit(2))
+        XCTAssertTrue(coordinator.submit(3))
+        allowFirstWrite.signal()
+
+        coordinator.flush()
+
+        XCTAssertEqual(
+            state.durableTransitions,
+            ["0->1", "1->3"]
+        )
+    }
+
+    @MainActor
     func testFailureDiscardsPendingWritesAndRejectsNewOnes() {
         let firstWriteStarted = DispatchSemaphore(value: 0)
         let allowFailure = DispatchSemaphore(value: 0)
@@ -93,6 +134,7 @@ final class CoalescingPersistenceCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.submit(1))
         coordinator.flush()
         XCTAssertEqual(state.persistedEventValues, [1])
+        XCTAssertEqual(coordinator.durableValueSnapshot, 1)
 
         // The already-scheduled MainActor delivery uses this same drain after
         // flush returns. It must observe an empty event queue.
@@ -160,13 +202,54 @@ final class CoalescingPersistenceCoordinatorTests: XCTestCase {
         ]
 
         XCTAssertTrue(integration.contains("self?.handlePersistenceEvent(event)"))
+        XCTAssertTrue(integration.contains("durablePredecessor"))
+        XCTAssertTrue(
+            integration.contains(
+                "expectedPrimary:"
+            )
+        )
+        XCTAssertTrue(
+            integration.contains(
+                ".value(durablePredecessor)"
+            )
+        )
         XCTAssertFalse(integration.contains("Task { @MainActor"))
+    }
+
+    @MainActor
+    func testProfileServiceMigrationArchivesAndComparesLoadedPrimary()
+        throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+        let sourceURL = testsDirectory
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "Docky/Services/ProfileService.swift"
+            )
+        let source = try String(contentsOf: sourceURL)
+
+        XCTAssertTrue(
+            source.contains(
+                "expectedPrimary: .value(loaded.value)"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "archiveExistingGenerations: true"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "expectedPrimary: .missing"
+            )
+        )
     }
 }
 
 private final class LockedFixtureState: @unchecked Sendable {
     private let lock = NSLock()
     private var persisted: [Int] = []
+    private var transitions: [String] = []
     private var events:
         [CoalescingPersistenceCoordinator<Int>.Event] = []
 
@@ -183,6 +266,10 @@ private final class LockedFixtureState: @unchecked Sendable {
                 return value
             }
         }
+    }
+
+    var durableTransitions: [String] {
+        lock.withFixtureLock { transitions }
     }
 
     var failedAttempt: Int? {
@@ -227,6 +314,12 @@ private final class LockedFixtureState: @unchecked Sendable {
     func appendPersisted(_ value: Int) {
         lock.withFixtureLock {
             persisted.append(value)
+        }
+    }
+
+    func appendDurableTransition(from: Int, to: Int) {
+        lock.withFixtureLock {
+            transitions.append("\(from)->\(to)")
         }
     }
 

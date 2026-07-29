@@ -8,17 +8,15 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import Darwin
 
 typealias CGSConnectionID = Int
 
 @_silgen_name("CGSMainConnectionID")
 func CGSMainConnectionID() -> CGSConnectionID
 
-// Returns the SkyLight space ID for the currently-active Mission Control
-// space on the focused display. Stable across logins (the same UUID-backed
-// id used by `com.apple.spaces`). Combined with
-// `NSWorkspace.activeSpaceDidChangeNotification` to drive profile-trigger
-// matching on space switches.
+// Returns the session-local SkyLight space ID for the currently-active
+// Mission Control Space on the focused display. This number is never persisted.
 @_silgen_name("CGSGetActiveSpace")
 func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
 
@@ -26,6 +24,91 @@ func CGSGetActiveSpace(_ connection: CGSConnectionID) -> UInt64
 // or tiled-window Space on current macOS releases.
 @_silgen_name("CGSSpaceGetType")
 private func CGSSpaceGetType(_ connection: CGSConnectionID, _ space: UInt64) -> Int32
+
+// These SLS symbols are present in SkyLight but are not linkable API. Resolve
+// them optionally at runtime; the managed-display dictionary and monotonic
+// reconciler remain fail-closed fallbacks when a release removes a symbol.
+private let spaceIdentitySkyLightHandle:
+    UnsafeMutableRawPointer? = dlopen(
+    "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
+    RTLD_LAZY | RTLD_LOCAL
+)
+
+private typealias SLSSpaceCopyNameFunction =
+    @convention(c) (CGSConnectionID, UInt64)
+        -> Unmanaged<CFString>?
+private typealias SLSManagedDisplayGetCurrentSpaceFunction =
+    @convention(c) (CGSConnectionID, CFString) -> UInt64
+private typealias SLSManagedDisplayIsAnimatingFunction =
+    @convention(c) (CGSConnectionID, CFString) -> Bool
+
+private func persistentSpaceName(
+    connection: CGSConnectionID,
+    spaceID: UInt64
+) -> String? {
+    guard let spaceIdentitySkyLightHandle,
+          let symbol = dlsym(
+              spaceIdentitySkyLightHandle,
+              "SLSSpaceCopyName"
+          )
+    else {
+        return nil
+    }
+    let function = unsafeBitCast(
+        symbol,
+        to: SLSSpaceCopyNameFunction.self
+    )
+    return function(connection, spaceID)?
+        .takeRetainedValue() as String?
+}
+
+private func managedDisplayCurrentSpace(
+    connection: CGSConnectionID,
+    displayIdentifier: String
+) -> UInt64? {
+    guard let spaceIdentitySkyLightHandle,
+          let symbol = dlsym(
+              spaceIdentitySkyLightHandle,
+              "SLSManagedDisplayGetCurrentSpace"
+          )
+    else {
+        return nil
+    }
+    let function = unsafeBitCast(
+        symbol,
+        to: SLSManagedDisplayGetCurrentSpaceFunction.self
+    )
+    let spaceID = function(
+        connection,
+        displayIdentifier as CFString
+    )
+    return spaceID == 0 ? nil : spaceID
+}
+
+private func managedDisplayIsAnimating(
+    connection: CGSConnectionID,
+    displayIdentifier: String
+) -> Bool {
+    // Mature Space managers report that this SPI stopped returning reliable
+    // animation state in macOS 14. Docky supports macOS 14 and newer, so the
+    // monotonic quiet-window reconciler is the authority on supported systems.
+    guard ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 14 else {
+        return false
+    }
+    guard let spaceIdentitySkyLightHandle,
+          let symbol = dlsym(
+              spaceIdentitySkyLightHandle,
+              "SLSManagedDisplayIsAnimating"
+          )
+    else {
+        return false
+    }
+    let function = unsafeBitCast(
+        symbol,
+        to: SLSManagedDisplayIsAnimatingFunction.self
+    )
+    return function(connection, displayIdentifier as CFString)
+}
 
 func activeSpaceSnapshot() -> ActiveSpaceSnapshot {
     let connection = CGSMainConnectionID()
@@ -49,6 +132,150 @@ func activeSpaceFullscreenState() -> Bool? {
 @_silgen_name("CGSCopyManagedDisplaySpaces")
 func CGSCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> Unmanaged<CFArray>?
 
+/// Low-latency identity read for exact profile switching.
+///
+/// This follows the same primitive used by yabai: the numeric Space ID locates
+/// the current runtime object and `SLSSpaceCopyName` supplies its persistent
+/// name. Display membership and Desktop ordinal are presentation metadata, so
+/// they do not gate an already-saved exact-name lookup. The fuller parser
+/// below remains in place for assignment authorization, catalogs, and settled
+/// generic-trigger evidence.
+func fastActiveSpaceSnapshot(
+    for screen: NSScreen?
+) -> ActiveSpaceSnapshot {
+    guard let screen,
+          let screenNumber = screen.deviceDescription[
+              NSDeviceDescriptionKey("NSScreenNumber")
+          ] as? NSNumber
+    else {
+        return .unknown
+    }
+    let displayID = CGDirectDisplayID(screenNumber.uint32Value)
+    let connection = CGSMainConnectionID()
+
+    let physicalDisplayIdentifier =
+        CGDisplayCreateUUIDFromDisplayID(displayID)
+            .map {
+                CFUUIDCreateString(
+                    nil,
+                    $0.takeRetainedValue()
+                ) as String
+            }
+    let hasSeparateSpaces =
+        NSScreen.screensHaveSeparateSpaces
+    let managedDisplayIdentifier: String
+    let identityDisplayScope: String
+    if hasSeparateSpaces {
+        guard let physicalDisplayIdentifier else {
+            return .unknown
+        }
+        managedDisplayIdentifier = physicalDisplayIdentifier
+        identityDisplayScope = physicalDisplayIdentifier
+    } else {
+        managedDisplayIdentifier = "Main"
+        identityDisplayScope =
+            MissionControlSpaceIdentity.sharedDisplayScope
+    }
+
+    // yabai's direct path: display UUID -> current volatile SID -> persistent
+    // Space name. This avoids waiting for the larger managed-display
+    // dictionary to become internally self-consistent after a transition.
+    let directDisplayIdentifiers =
+        [
+            physicalDisplayIdentifier,
+            managedDisplayIdentifier,
+        ]
+        .compactMap { $0 }
+        .reduce(into: [String]()) { identifiers, value in
+            if !identifiers.contains(value) {
+                identifiers.append(value)
+            }
+        }
+    for directDisplayIdentifier in directDisplayIdentifiers {
+        if let spaceID = managedDisplayCurrentSpace(
+            connection: connection,
+            displayIdentifier: directDisplayIdentifier
+        ),
+           let spaceName = persistentSpaceName(
+               connection: connection,
+               spaceID: spaceID
+           ) {
+            return ActiveSpaceSnapshot(
+                spaceID: spaceID,
+                identity: MissionControlSpaceIdentity(
+                    displayUUID: identityDisplayScope,
+                    spaceUUID: spaceName
+                ),
+                rawType: CGSSpaceGetType(connection, spaceID),
+                isAnimating: managedDisplayIsAnimating(
+                    connection: connection,
+                    displayIdentifier:
+                        directDisplayIdentifier
+                ),
+                displayIdentifier:
+                    managedDisplayIdentifier,
+                displayOrdinal: nil
+            )
+        }
+    }
+
+    // Optional-SPI compatibility fallback. It still persists only the
+    // SkyLight name/UUID, never the numeric ID or Desktop ordinal.
+    guard let rawDisplays = CGSCopyManagedDisplaySpaces(connection)?
+        .takeRetainedValue() as? [[String: Any]]
+    else {
+        return .unknown
+    }
+
+    guard let selection = ManagedDisplayTargetSelectionPolicy.select(
+        displayIdentifiers: rawDisplays.map {
+            $0["Display Identifier"] as? String
+        },
+        targetDisplayUUID: physicalDisplayIdentifier,
+        spacesHaveSeparateSpaces: hasSeparateSpaces
+    ) else {
+        return .unknown
+    }
+
+    let display = rawDisplays[selection.index]
+    guard let displayIdentifier =
+            display["Display Identifier"] as? String,
+          let currentSpaceDictionary =
+            display["Current Space"] as? [String: Any],
+          let currentSpace =
+            managedSpaceObservation(currentSpaceDictionary)
+    else {
+        return .unknown
+    }
+
+    // Prefer the direct persistent-name SPI. The dictionary UUID is a
+    // compatibility fallback for a macOS release where the optional symbol is
+    // unavailable, never a positional or numeric persisted identity.
+    let spaceName =
+        persistentSpaceName(
+            connection: connection,
+            spaceID: currentSpace.spaceID
+        )
+        ?? currentSpace.spaceUUID
+    return ActiveSpaceSnapshot(
+        spaceID: currentSpace.spaceID,
+        identity: MissionControlSpaceIdentity(
+            displayUUID: selection.identityDisplayScope,
+            spaceUUID: spaceName
+        ),
+        rawType: CGSSpaceGetType(
+            connection,
+            currentSpace.spaceID
+        ),
+        isAnimating: managedDisplayIsAnimating(
+            connection: connection,
+            displayIdentifier: displayIdentifier
+        ),
+        displayIdentifier: displayIdentifier,
+        displayOrdinal: nil
+    )
+}
+
 /// Returns the current Mission Control Space for the physical display backing
 /// `screen`. Unlike `CGSGetActiveSpace`, this does not accidentally report the
 /// focused display when Docky is configured for a different display.
@@ -57,12 +284,13 @@ func CGSCopyManagedDisplaySpaces(_ connection: CGSConnectionID) -> Unmanaged<CFA
 /// be mapped unambiguously. Callers should retain their geometry fallback.
 func activeSpaceSnapshot(for screen: NSScreen?) -> ActiveSpaceSnapshot {
     guard let screen,
-          let displayID = screen.deviceDescription[
+          let screenNumber = screen.deviceDescription[
               NSDeviceDescriptionKey("NSScreenNumber")
-          ] as? CGDirectDisplayID
+          ] as? NSNumber
     else {
         return .unknown
     }
+    let displayID = CGDirectDisplayID(screenNumber.uint32Value)
 
     let connection = CGSMainConnectionID()
     guard let rawDisplays = CGSCopyManagedDisplaySpaces(connection)?
@@ -71,45 +299,266 @@ func activeSpaceSnapshot(for screen: NSScreen?) -> ActiveSpaceSnapshot {
         return .unknown
     }
 
-    let records = rawDisplays.compactMap(managedDisplaySpaceRecord)
     let targetUUID = CGDisplayCreateUUIDFromDisplayID(displayID)
         .map { CFUUIDCreateString(nil, $0.takeRetainedValue()) as String }
-    guard let resolved = DisplaySpaceSnapshotResolver.resolve(
-        records: records,
+    guard let selection = ManagedDisplayTargetSelectionPolicy.select(
+        displayIdentifiers: rawDisplays.map {
+            $0["Display Identifier"] as? String
+        },
         targetDisplayUUID: targetUUID,
-        targetIsMainDisplay: displayID == CGMainDisplayID()
-    ) else {
+        spacesHaveSeparateSpaces: NSScreen.screensHaveSeparateSpaces
+    ),
+          let record = managedDisplaySpaceRecord(
+              rawDisplays[selection.index],
+              connection: connection
+          )
+    else {
         return .unknown
     }
 
-    if resolved.rawType == nil, resolved.spaceID != 0 {
+    let resolved = record.snapshot(
+        identityDisplayScope: selection.identityDisplayScope
+    )
+
+    let liveRawType = CGSSpaceGetType(connection, resolved.spaceID)
+    guard ManagedDisplaySpaceEvidencePolicy.rawTypesAgree(
+        [
+            resolved.rawType,
+            liveRawType,
+        ]
+    ) else {
+        return .unknown
+    }
+    if resolved.rawType == nil {
         return ActiveSpaceSnapshot(
             spaceID: resolved.spaceID,
-            rawType: CGSSpaceGetType(connection, resolved.spaceID)
+            identity: resolved.identity,
+            rawType: liveRawType,
+            isAnimating: resolved.isAnimating,
+            displayIdentifier: resolved.displayIdentifier,
+            displayOrdinal: resolved.displayOrdinal
         )
     }
     return resolved
 }
 
+/// Returns presentation-only metadata for every currently-listed regular
+/// Desktop on connected displays. Assignment matching never consumes this
+/// catalog; it exists solely to give saved identities honest, recognizable
+/// labels and to mark identities no longer present in the live topology.
+func missionControlSpacePresentations()
+    -> [MissionControlSpacePresentation] {
+    let connection = CGSMainConnectionID()
+    guard let rawDisplays = CGSCopyManagedDisplaySpaces(connection)?
+        .takeRetainedValue() as? [[String: Any]]
+    else {
+        return []
+    }
+
+    let hasSeparateSpaces = NSScreen.screensHaveSeparateSpaces
+    let connectedDisplayNames: [String: String] =
+        NSScreen.screens.reduce(into: [:]) {
+            result,
+            screen in
+            guard let screenNumber =
+                    screen.deviceDescription[
+                        NSDeviceDescriptionKey(
+                            "NSScreenNumber"
+                        )
+                    ] as? NSNumber,
+                  let uuid =
+                    CGDisplayCreateUUIDFromDisplayID(
+                        CGDirectDisplayID(
+                            screenNumber.uint32Value
+                        )
+                    )
+            else {
+                return
+            }
+            let identifier =
+                CFUUIDCreateString(
+                    nil,
+                    uuid.takeRetainedValue()
+                ) as String
+            result[
+                DisplaySpaceSnapshotResolver
+                    .normalizeDisplayIdentifier(identifier)
+            ] = screen.localizedName
+        }
+
+    let rawDisplayIdentifiers = rawDisplays.map {
+        $0["Display Identifier"] as? String
+    }
+    var candidates: [MissionControlSpacePresentation] = []
+    for (rawIndex, display) in rawDisplays.enumerated() {
+        guard let displayIdentifier =
+                display["Display Identifier"] as? String,
+              let selection =
+                ManagedDisplayTargetSelectionPolicy.select(
+                    displayIdentifiers: rawDisplayIdentifiers,
+                    targetDisplayUUID: displayIdentifier,
+                    spacesHaveSeparateSpaces: hasSeparateSpaces
+                ),
+              selection.index == rawIndex
+        else {
+            continue
+        }
+        let normalizedDisplay =
+            DisplaySpaceSnapshotResolver
+            .normalizeDisplayIdentifier(displayIdentifier)
+
+        let displayName: String
+        if hasSeparateSpaces {
+            guard let connectedName =
+                connectedDisplayNames[normalizedDisplay]
+            else {
+                // Ignore stale/disconnected managed-display records.
+                continue
+            }
+            displayName = connectedName
+        } else {
+            guard normalizedDisplay == "main" else {
+                continue
+            }
+            displayName = "All displays"
+        }
+
+        guard let rawListedSpaces =
+                display["Spaces"] as? [[String: Any]]
+        else {
+            continue
+        }
+        let listedSpaces =
+            rawListedSpaces.compactMap { dictionary
+                -> ManagedDisplaySpaceObservation? in
+                guard let observation =
+                    managedSpaceObservation(dictionary)
+                else {
+                    return nil
+                }
+                let copiedSpaceName = persistentSpaceName(
+                    connection: connection,
+                    spaceID: observation.spaceID
+                )
+                let liveRawType = CGSSpaceGetType(
+                    connection,
+                    observation.spaceID
+                )
+                guard ManagedDisplaySpaceEvidencePolicy
+                    .identifiersAgree(
+                        [
+                            copiedSpaceName,
+                            observation.spaceUUID,
+                        ]
+                    ),
+                      ManagedDisplaySpaceEvidencePolicy
+                        .rawTypesAgree(
+                            [
+                                observation.rawType,
+                                liveRawType,
+                            ]
+                        )
+                else {
+                    return nil
+                }
+                return ManagedDisplaySpaceObservation(
+                    spaceID: observation.spaceID,
+                    spaceUUID:
+                        copiedSpaceName ?? observation.spaceUUID,
+                    rawType:
+                        observation.rawType ?? liveRawType
+                )
+            }
+        guard listedSpaces.count == rawListedSpaces.count else {
+            // A partial catalog would relabel every following Desktop with the
+            // wrong ordinal, so omit this display until topology settles.
+            continue
+        }
+        candidates +=
+            MissionControlSpaceCatalogPolicy.presentations(
+                displayIdentifier: displayIdentifier,
+                displayName: displayName,
+                listedSpaces: listedSpaces,
+                spacesHaveSeparateSpaces: hasSeparateSpaces
+            )
+    }
+
+    // Duplicate identities indicate a partially-updated topology. Omit them
+    // rather than showing a confidently wrong display/ordinal label.
+    let grouped = Dictionary(grouping: candidates, by: \.identity)
+    return grouped.values.compactMap { values in
+        values.count == 1 ? values[0] : nil
+    }
+    .sorted {
+        if $0.displayName == $1.displayName {
+            return $0.ordinal < $1.ordinal
+        }
+        return $0.displayName.localizedStandardCompare(
+            $1.displayName
+        ) == .orderedAscending
+    }
+}
+
 private func managedDisplaySpaceRecord(
-    _ display: [String: Any]
+    _ display: [String: Any],
+    connection: CGSConnectionID
 ) -> ManagedDisplaySpaceRecord? {
-    guard let displayIdentifier = display["Display Identifier"] as? String else {
+    guard let displayIdentifier =
+            display["Display Identifier"] as? String,
+          let currentSpaceDictionary =
+            display["Current Space"] as? [String: Any],
+          let currentSpace = managedSpaceObservation(
+              currentSpaceDictionary
+          )
+    else {
         return nil
     }
-    let currentSpace = (display["Current Space"] as? [String: Any])
-        ?? (display["Collapsed Space"] as? [String: Any])
-    guard let currentSpace,
-          let spaceID = (currentSpace["id64"] as? NSNumber)?.uint64Value,
+
+    // A Collapsed Space belongs to an inactive/disconnected display and must
+    // never be promoted to active state. Current Space is also accepted only
+    // when the pure parser proves it occurs exactly once in Spaces.
+    guard let rawListedSpaces =
+            display["Spaces"] as? [[String: Any]]
+    else {
+        return nil
+    }
+    let listedSpaces = rawListedSpaces.compactMap(
+        managedSpaceObservation
+    )
+
+    // Prefer the same persistent name API used by mature Space managers.
+    // Preserve an empty returned string: it is the root Desktop's identity.
+    let copiedSpaceName = persistentSpaceName(
+        connection: connection,
+        spaceID: currentSpace.spaceID
+    )
+
+    return ManagedDisplaySpaceRecordParser.parse(
+        displayIdentifier: displayIdentifier,
+        currentSpace: currentSpace,
+        listedSpaces: listedSpaces,
+        rawListedSpaceCount: rawListedSpaces.count,
+        copiedSpaceName: copiedSpaceName,
+        isAnimating: managedDisplayIsAnimating(
+            connection: connection,
+            displayIdentifier: displayIdentifier
+        )
+    )
+}
+
+private func managedSpaceObservation(
+    _ space: [String: Any]
+) -> ManagedDisplaySpaceObservation? {
+    guard let spaceID =
+            (space["id64"] as? NSNumber)?.uint64Value,
           spaceID != 0
     else {
         return nil
     }
-    let rawType = (currentSpace["type"] as? NSNumber)?.int32Value
-    return ManagedDisplaySpaceRecord(
-        displayIdentifier: displayIdentifier,
+    return ManagedDisplaySpaceObservation(
         spaceID: spaceID,
-        rawType: rawType
+        spaceUUID: space["uuid"] as? String,
+        rawType: (space["type"] as? NSNumber)?.int32Value
     )
 }
 

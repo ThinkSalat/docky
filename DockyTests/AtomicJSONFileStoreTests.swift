@@ -29,6 +29,352 @@ final class AtomicJSONFileStoreTests: XCTestCase {
         }
     }
 
+    private struct VersionedFixture: Codable, Equatable {
+        let version: Int
+        let value: String
+    }
+
+    func testExplicitMigrationCanReplaceValidatedOlderSchema() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let primary = directory.appendingPathComponent("primary.json")
+        let backup = directory.appendingPathComponent("backup.json")
+        let store = AtomicJSONFileStore<VersionedFixture>(
+            primaryURL: primary,
+            backupURL: backup
+        )
+        let legacy = VersionedFixture(
+            version: 1,
+            value: "preserved"
+        )
+        let migrated = VersionedFixture(
+            version: 2,
+            value: "preserved"
+        )
+        try store.save(legacy) { value in
+            guard value.version == 1 else {
+                throw FixtureError.unsupportedVersion
+            }
+        }
+
+        try store.save(
+            migrated,
+            validate: { value in
+                guard value.version == 2 else {
+                    throw FixtureError.unsupportedVersion
+                }
+            },
+            validateExisting: { value in
+                guard (1...2).contains(value.version) else {
+                    throw FixtureError.unsupportedVersion
+                }
+            }
+        )
+
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                VersionedFixture.self,
+                from: Data(contentsOf: primary)
+            ),
+            migrated
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                VersionedFixture.self,
+                from: Data(contentsOf: backup)
+            ),
+            legacy
+        )
+    }
+
+    func testMigrationArchivesBothDurableGenerationsImmutably() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = AtomicJSONFileStore<VersionedFixture>(
+            primaryURL: directory.appendingPathComponent("primary.json"),
+            backupURL: directory.appendingPathComponent("backup.json")
+        )
+        let legacyBackup = VersionedFixture(
+            version: 1,
+            value: "legacy-backup"
+        )
+        let legacyPrimary = VersionedFixture(
+            version: 1,
+            value: "legacy-primary"
+        )
+        let migrated = VersionedFixture(
+            version: 2,
+            value: "migrated"
+        )
+        try store.save(legacyBackup) { value in
+            guard value.version == 1 else {
+                throw FixtureError.unsupportedVersion
+            }
+        }
+        try store.save(
+            legacyPrimary,
+            validate: { value in
+                guard value.version == 1 else {
+                    throw FixtureError.unsupportedVersion
+                }
+            },
+            expectedPrimary: .value(legacyBackup)
+        )
+
+        try store.save(
+            migrated,
+            validate: { value in
+                guard value.version == 2 else {
+                    throw FixtureError.unsupportedVersion
+                }
+            },
+            validateExisting: { value in
+                guard (1...2).contains(value.version) else {
+                    throw FixtureError.unsupportedVersion
+                }
+            },
+            expectedPrimary: .value(legacyPrimary),
+            archiveExistingGenerations: true
+        )
+
+        let archiveURLs = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter {
+            $0.lastPathComponent.contains(
+                ".atomic-json.migration-archive."
+            )
+        }
+        XCTAssertEqual(archiveURLs.count, 2)
+        let primaryArchive = try XCTUnwrap(
+            archiveURLs.first {
+                $0.lastPathComponent.contains(".primary.")
+            }
+        )
+        let backupArchive = try XCTUnwrap(
+            archiveURLs.first {
+                $0.lastPathComponent.contains(".backup.")
+            }
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                VersionedFixture.self,
+                from: Data(contentsOf: primaryArchive)
+            ),
+            legacyPrimary
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                VersionedFixture.self,
+                from: Data(contentsOf: backupArchive)
+            ),
+            legacyBackup
+        )
+        let archivedBytes = try Dictionary(
+            uniqueKeysWithValues: archiveURLs.map {
+                ($0, try Data(contentsOf: $0))
+            }
+        )
+
+        let later = VersionedFixture(version: 2, value: "later")
+        try store.save(
+            later,
+            validate: { value in
+                guard value.version == 2 else {
+                    throw FixtureError.unsupportedVersion
+                }
+            },
+            expectedPrimary: .value(migrated)
+        )
+        for (url, bytes) in archivedBytes {
+            XCTAssertEqual(try Data(contentsOf: url), bytes)
+        }
+    }
+
+    func testStaleWriterCannotOverwriteNewerPrimaryOrRotateBackups() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let firstStore = makeStore(in: directory)
+        let secondStore = makeStore(in: directory)
+        let original = Fixture(version: 1, value: "original")
+        let newer = Fixture(version: 1, value: "newer")
+        let staleReplacement = Fixture(
+            version: 1,
+            value: "stale-replacement"
+        )
+        try firstStore.save(original, validate: validate)
+        let firstLoad = try XCTUnwrap(
+            try firstStore.load(validate: validate)
+        )
+        let secondLoad = try XCTUnwrap(
+            try secondStore.load(validate: validate)
+        )
+
+        try secondStore.save(
+            newer,
+            validate: validate,
+            expectedPrimary: .value(secondLoad.value)
+        )
+        let primaryBeforeStaleWrite = try Data(
+            contentsOf: firstStore.primaryURL
+        )
+        let backupBeforeStaleWrite = try Data(
+            contentsOf: firstStore.backupURL
+        )
+
+        XCTAssertThrowsError(
+            try firstStore.save(
+                staleReplacement,
+                validate: validate,
+                expectedPrimary: .value(firstLoad.value)
+            )
+        ) { error in
+            guard case AtomicJSONFileStore<Fixture>.StoreError
+                .primaryChangedSinceLoad = error else {
+                return XCTFail(
+                    "Expected primaryChangedSinceLoad, got \(error)"
+                )
+            }
+        }
+        XCTAssertEqual(
+            try Data(contentsOf: firstStore.primaryURL),
+            primaryBeforeStaleWrite
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: firstStore.backupURL),
+            backupBeforeStaleWrite
+        )
+    }
+
+    func testFailedPrimaryPublishRetainsTwoDurablePredecessors() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let writableStore = makeStore(in: directory)
+        let oldest = Fixture(version: 1, value: "oldest")
+        let current = Fixture(version: 1, value: "current")
+        let replacement = Fixture(version: 1, value: "replacement")
+        try writableStore.save(oldest, validate: validate)
+        try writableStore.save(
+            current,
+            validate: validate,
+            expectedPrimary: .value(oldest)
+        )
+
+        let failingStore = makeStore(
+            in: directory,
+            synchronizeFileBeforeRename: { temporaryURL in
+                if temporaryURL.lastPathComponent.hasPrefix(
+                    ".profiles.json."
+                ) {
+                    throw FixtureError.durabilityFailure
+                }
+            }
+        )
+        XCTAssertThrowsError(
+            try failingStore.save(
+                replacement,
+                validate: validate,
+                expectedPrimary: .value(current)
+            )
+        )
+
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                Fixture.self,
+                from: Data(contentsOf: failingStore.primaryURL)
+            ),
+            current
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                Fixture.self,
+                from: Data(contentsOf: failingStore.backupURL)
+            ),
+            current
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                Fixture.self,
+                from: Data(contentsOf: failingStore.previousBackupURL)
+            ),
+            oldest
+        )
+    }
+
+    func testDirectoryTransactionLockSerializesIndependentDescriptors()
+        throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let firstDirectory = try SecureOwnedDirectory.openOrCreate(
+            at: directory
+        )
+        let secondDirectory = try SecureOwnedDirectory.openOrCreate(
+            at: directory
+        )
+        let firstEntered = DispatchSemaphore(value: 0)
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let secondAttempting = DispatchSemaphore(value: 0)
+        let secondEntered = DispatchSemaphore(value: 0)
+        let bothFinished = DispatchGroup()
+        let queue = DispatchQueue(
+            label: "com.docky.tests.atomic-json-lock",
+            attributes: .concurrent
+        )
+
+        bothFinished.enter()
+        queue.async {
+            defer { bothFinished.leave() }
+            do {
+                try firstDirectory.withExclusiveLock {
+                    firstEntered.signal()
+                    _ = releaseFirst.wait(timeout: .now() + 2)
+                }
+            } catch {
+                XCTFail("First lock failed: \(error)")
+            }
+        }
+        XCTAssertEqual(
+            firstEntered.wait(timeout: .now() + 2),
+            .success
+        )
+
+        bothFinished.enter()
+        queue.async {
+            defer { bothFinished.leave() }
+            secondAttempting.signal()
+            do {
+                try secondDirectory.withExclusiveLock {
+                    _ = secondEntered.signal()
+                }
+            } catch {
+                XCTFail("Second lock failed: \(error)")
+            }
+        }
+        XCTAssertEqual(
+            secondAttempting.wait(timeout: .now() + 2),
+            .success
+        )
+        XCTAssertEqual(
+            secondEntered.wait(timeout: .now() + 0.1),
+            .timedOut
+        )
+
+        releaseFirst.signal()
+        XCTAssertEqual(
+            secondEntered.wait(timeout: .now() + 2),
+            .success
+        )
+        XCTAssertEqual(
+            bothFinished.wait(timeout: .now() + 2),
+            .success
+        )
+    }
+
     func testSecondSaveKeepsPreviousCompleteDocumentAsBackup() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -81,16 +427,34 @@ final class AtomicJSONFileStoreTests: XCTestCase {
 
         try store.save(first, validate: validate)
         try store.save(second, validate: validate)
-        try Data("not-json".utf8).write(to: store.primaryURL, options: .atomic)
+        let corruptPrimary = Data("not-json".utf8)
+        try corruptPrimary.write(to: store.primaryURL, options: .atomic)
 
         let recovered = try XCTUnwrap(try store.load(validate: validate))
         XCTAssertEqual(recovered.source, .backup)
         XCTAssertTrue(recovered.recoveredPrimary)
         XCTAssertEqual(recovered.value, first)
+        let quarantineURL = try XCTUnwrap(
+            recovered.quarantinedPrimaryURL
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: quarantineURL),
+            corruptPrimary
+        )
 
         let repaired = try XCTUnwrap(try store.load(validate: validate))
         XCTAssertEqual(repaired.source, .primary)
         XCTAssertEqual(repaired.value, first)
+
+        try store.save(
+            Fixture(version: 1, value: "after-recovery"),
+            validate: validate,
+            expectedPrimary: .value(first)
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: quarantineURL),
+            corruptPrimary
+        )
     }
 
     func testPrimaryReadFailureNeverConsultsBackupOrRepairsPrimary() throws {
