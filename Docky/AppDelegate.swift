@@ -22,6 +22,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var debugStatusItem: NSStatusItem?
     private var debugSnapshotTextView: NSTextView?
     private var debugSnapshotCancellables = Set<AnyCancellable>()
+    private var isAwaitingMediaRemoteShutdown = false
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         DiagnosticsTrace.shared.start()
@@ -238,7 +239,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        let mediaPlayback = MediaPlaybackService.shared
+        guard mediaPlayback.requiresShutdown else {
+            return .terminateNow
+        }
+        guard !isAwaitingMediaRemoteShutdown else {
+            return .terminateLater
+        }
+
+        isAwaitingMediaRemoteShutdown = true
+        mediaPlayback.shutdown { [weak self, weak sender] in
+            self?.isAwaitingMediaRemoteShutdown = false
+            sender?.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ aNotification: Notification) {
+        // Normal termination is delayed in applicationShouldTerminate until
+        // this idempotent chain has reaped the helper. Calling it again here
+        // also closes the lifecycle for termination paths with no live helper.
+        MediaPlaybackService.shared.shutdown()
         DiagnosticsTrace.shared.record(.lifecycle, "willTerminate")
         ProfileService.shared.flushPersistence()
         if SystemDockVisibilityService.shared.hasSnapshot {
