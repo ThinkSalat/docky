@@ -2631,6 +2631,7 @@ private enum ResetInventory {
     ]
 
     static let behavior: Set<String> = [
+        "appFolderCreationHoverDelay",
         "appTileFrontmostClickBehavior",
         "autohideAnimationDuration",
         "autohideWindowDelay",

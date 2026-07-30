@@ -2553,6 +2553,28 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+    /// How long an internal app drag must remain over another app or app
+    /// folder before Docky switches from insertion/reordering to folder
+    /// creation.
+    var appFolderCreationHoverDelay: TimeInterval {
+        didSet {
+            let mutation = NormalizedPreferenceMutation(
+                oldValue: oldValue,
+                proposedValue: appFolderCreationHoverDelay,
+                normalize:
+                    DockAppFolderHoverPolicy.normalizedDelay
+            )
+            if appFolderCreationHoverDelay != mutation.normalizedValue {
+                appFolderCreationHoverDelay = mutation.normalizedValue
+            }
+            guard mutation.shouldPersist else { return }
+            defaults.set(
+                mutation.normalizedValue,
+                forKey: Keys.appFolderCreationHoverDelay
+            )
+        }
+    }
+
     /// Whether opened apps from an app folder should appear grouped beside that folder.
     var showsGroupedOpenedAppsInDock: Bool {
         didSet {
@@ -4626,6 +4648,8 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let hiddenAppBundleIdentifiers = "docky.hiddenAppBundleIdentifiers"
         static let showsGroupedOpenedAppsInDock = "docky.showsGroupedOpenedAppsInDock"
         static let showsGroupedOpenedAppsBackdrop = "docky.showsGroupedOpenedAppsBackdrop"
+        static let appFolderCreationHoverDelay =
+            "docky.appFolderCreationHoverDelay"
         static let enablesLaunchpadOverlay = "docky.enablesLaunchpadOverlay"
         static let enablesStartMenuOverlay = "docky.enablesStartMenuOverlay"
         static let opensStartMenuFromFinderTile = "docky.opensStartMenuFromFinderTile"
@@ -4741,6 +4765,8 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         static let hiddenAppBundleIdentifiers: [String] = []
         static let showsGroupedOpenedAppsInDock = true
         static let showsGroupedOpenedAppsBackdrop = true
+        static let appFolderCreationHoverDelay =
+            DockAppFolderHoverPolicy.defaultDelay
         static let enablesLaunchpadOverlay = true
         static let enablesStartMenuOverlay = true
         static let opensStartMenuFromFinderTile = false
@@ -4914,6 +4940,10 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         let storedHiddenAppBundleIdentifiers = defaults.stringArray(forKey: Keys.hiddenAppBundleIdentifiers)
         let storedShowsGroupedOpenedAppsInDock = defaults.object(forKey: Keys.showsGroupedOpenedAppsInDock) as? Bool
         let storedShowsGroupedOpenedAppsBackdrop = defaults.object(forKey: Keys.showsGroupedOpenedAppsBackdrop) as? Bool
+        let storedAppFolderCreationHoverDelay =
+            defaults.object(
+                forKey: Keys.appFolderCreationHoverDelay
+            ) as? Double
         let storedEnablesLaunchpadOverlay = defaults.object(forKey: Keys.enablesLaunchpadOverlay) as? Bool
         let storedEnablesStartMenuOverlay = defaults.object(forKey: Keys.enablesStartMenuOverlay) as? Bool
         let storedOpensStartMenuFromFinderTile = defaults.object(forKey: Keys.opensStartMenuFromFinderTile) as? Bool
@@ -5098,6 +5128,12 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         self.startMenuIconPaddingFraction = storedStartMenuIconPaddingFraction.map { CGFloat($0) }
             ?? DefaultValues.launchpadIconPaddingFraction
         self.hiddenAppBundleIdentifiers = Self.normalizedBundleIdentifiers(storedHiddenAppBundleIdentifiers ?? DefaultValues.hiddenAppBundleIdentifiers)
+        self.appFolderCreationHoverDelay =
+            DockAppFolderHoverPolicy.normalizedDelay(
+                storedAppFolderCreationHoverDelay
+                    ?? DefaultValues
+                        .appFolderCreationHoverDelay
+            )
         self.showsGroupedOpenedAppsInDock = storedShowsGroupedOpenedAppsInDock ?? DefaultValues.showsGroupedOpenedAppsInDock
         self.showsGroupedOpenedAppsBackdrop = storedShowsGroupedOpenedAppsBackdrop ?? DefaultValues.showsGroupedOpenedAppsBackdrop
         self.enablesLaunchpadOverlay = storedEnablesLaunchpadOverlay ?? DefaultValues.enablesLaunchpadOverlay
@@ -5681,6 +5717,8 @@ enum LaunchpadSortMode: String, CaseIterable, Codable, Identifiable {
         appTileFrontmostClickBehavior = DefaultValues.appTileFrontmostClickBehavior
 
         // App folders
+        appFolderCreationHoverDelay =
+            DefaultValues.appFolderCreationHoverDelay
         showsGroupedOpenedAppsInDock = DefaultValues.showsGroupedOpenedAppsInDock
         showsGroupedOpenedAppsBackdrop = DefaultValues.showsGroupedOpenedAppsBackdrop
 

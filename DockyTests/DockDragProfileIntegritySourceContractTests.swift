@@ -422,6 +422,133 @@ final class DockDragProfileIntegritySourceContractTests:
         )
     }
 
+    func testInternalDragRecoversWhenPreviewRemovesGestureSource()
+        throws
+    {
+        let tileContainer = try sourceFile(
+            "Docky/Views/Tiles/TileContainerView.swift"
+        )
+        let recovery = try sourceSection(
+            in: tileContainer,
+            startingWith:
+                "    private func recoverDragAfterObservedMouseUp(",
+            endingWith:
+                "    private func resolveDragCompletion("
+        )
+        XCTAssertTrue(
+            recovery.contains(
+                "DispatchQueue.main.async"
+            )
+        )
+        XCTAssertTrue(
+            recovery.contains(
+                "self.draggedTileID == sourceTileID"
+            )
+        )
+        XCTAssertTrue(
+            recovery.contains(
+                "let tile = self.draggedSourceTile"
+            )
+        )
+        XCTAssertTrue(
+            recovery.contains(
+                "completionSource: \"mouseUpFallback\""
+            )
+        )
+
+        let monitor = try sourceSection(
+            in: tileContainer,
+            startingWith:
+                "private struct TileDragInputMonitor:",
+            endingWith:
+                "\n}"
+        )
+        XCTAssertTrue(
+            monitor.contains(
+                "matching: [.keyDown, .leftMouseUp]"
+            )
+        )
+        XCTAssertTrue(
+            monitor.contains(
+                "self.leftMouseUpHandler(event)"
+            )
+        )
+    }
+
+    func testAppFolderSelectionWaitsForConfiguredHoverDwell()
+        throws
+    {
+        let tileContainer = try sourceFile(
+            "Docky/Views/Tiles/TileContainerView.swift"
+        )
+        let candidateUpdate = try sourceSection(
+            in: tileContainer,
+            startingWith:
+                "    private func updateAppFolderHoverCandidate(",
+            endingWith:
+                "    private func activateAppFolderDropTargetIfCurrent("
+        )
+        XCTAssertTrue(
+            candidateUpdate.contains(
+                "preferences.appFolderCreationHoverDelay"
+            )
+        )
+        XCTAssertTrue(
+            candidateUpdate.contains(
+                "DispatchQueue.main.asyncAfter("
+            )
+        )
+
+        let dragUpdate = try sourceSection(
+            in: tileContainer,
+            startingWith:
+                "    private func updateDrag(for tile:",
+            endingWith:
+                "    private func endDrag(for tile:"
+        )
+        XCTAssertTrue(
+            dragUpdate.contains(
+                "updateAppFolderHoverCandidate("
+            )
+        )
+        XCTAssertTrue(
+            dragUpdate.contains(
+                "draggedAppFolderTargetTileID"
+            )
+        )
+        XCTAssertFalse(
+            dragUpdate.contains(
+                "draggedAppFolderTargetTileID = "
+                    + "groupTargetTileID"
+            ),
+            "Drag updates must keep normal insertion previews active until "
+                + "the separately scheduled hover dwell activates."
+        )
+
+        let activation = try sourceSection(
+            in: tileContainer,
+            startingWith:
+                "    private func activateAppFolderDropTargetIfCurrent(",
+            endingWith:
+                "    private func bundleIdentifier(for tile:"
+        )
+        XCTAssertTrue(
+            activation.contains(
+                "draggedAppFolderHoverCandidateTileID"
+            )
+        )
+        XCTAssertTrue(
+            activation.contains(
+                "profileService.stateRevision"
+            )
+        )
+        XCTAssertTrue(
+            activation.contains(
+                "draggedAppFolderTargetTileID = candidateTileID"
+            )
+        )
+    }
+
     private func assertCredentialsCapturedBeforeAwait(
         in source: String,
         file: StaticString = #filePath,

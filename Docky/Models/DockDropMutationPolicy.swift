@@ -7,7 +7,54 @@
 //  authoritative layout transformations without launching Docky.
 //
 
+import CoreGraphics
 import Foundation
+
+nonisolated enum DockAppFolderHoverPolicy {
+    static let defaultDelay: TimeInterval = 0.2
+    static let maximumDelay: TimeInterval = 2
+
+    static func normalizedDelay(
+        _ delay: TimeInterval
+    ) -> TimeInterval {
+        min(max(0, delay), maximumDelay)
+    }
+}
+
+/// Gives app-folder targeting a wider exit region than entry region.
+///
+/// Reorder previews move neighboring tiles while the pointer is stationary.
+/// Without hysteresis, that layout motion can repeatedly move a target's
+/// narrow acquisition region out from under the pointer, alternating between
+/// folder creation and insertion previews.
+nonisolated enum DockAppFolderTargetGeometryPolicy {
+    static let acquisitionInsetFraction: CGFloat = 0.18
+
+    static func shouldAcquire(
+        location: CGPoint,
+        frame: CGRect
+    ) -> Bool {
+        acquisitionRegion(for: frame).contains(location)
+    }
+
+    static func shouldRetain(
+        location: CGPoint,
+        acquisitionFrame: CGRect?,
+        currentFrame: CGRect
+    ) -> Bool {
+        currentFrame.contains(location)
+            || acquisitionFrame?.contains(location) == true
+    }
+
+    static func acquisitionRegion(
+        for frame: CGRect
+    ) -> CGRect {
+        frame.insetBy(
+            dx: frame.width * acquisitionInsetFraction,
+            dy: frame.height * acquisitionInsetFraction
+        )
+    }
+}
 
 /// Reconciles a reordered visible subset with its authoritative collection.
 ///

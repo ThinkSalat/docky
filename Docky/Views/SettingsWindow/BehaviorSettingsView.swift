@@ -724,6 +724,53 @@ struct BehaviorSettingsView: View {
     private var appFoldersSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Folder Selection Delay")
+                        .font(.headline)
+
+                    Spacer()
+
+                    Slider(
+                        value:
+                            $preferences
+                                .appFolderCreationHoverDelay,
+                        in:
+                            0
+                                ... DockAppFolderHoverPolicy
+                                .maximumDelay,
+                        step: 0.05
+                    )
+                    .frame(width: 180)
+
+                    Text(
+                        preferences
+                            .appFolderCreationHoverDelay
+                            == 0
+                        ? "Instant"
+                        : String(
+                            format: "%.0f ms",
+                            preferences
+                                .appFolderCreationHoverDelay
+                                * 1_000
+                        )
+                    )
+                    .monospacedDigit()
+                    .frame(
+                        width: 64,
+                        alignment: .trailing
+                    )
+                }
+
+                Text("Icons keep shuffling normally until you hold the dragged app over another app or app folder for this long.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(
+                        horizontal: false,
+                        vertical: true
+                    )
+            }
+            .padding(.vertical, 4)
+
+            VStack(alignment: .leading, spacing: 8) {
                 Toggle("Shows Grouped Opened Apps In Dock", isOn: $preferences.showsGroupedOpenedAppsInDock)
                     .font(.headline)
 

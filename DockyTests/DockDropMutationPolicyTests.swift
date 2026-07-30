@@ -1,9 +1,85 @@
+import CoreGraphics
+import Foundation
 import XCTest
 
 final class DockDropMutationPolicyTests: XCTestCase {
     private struct Item: Equatable {
         let id: String
         let payload: String
+    }
+
+    func testAppFolderHoverDefaultsToTwoHundredMilliseconds() {
+        XCTAssertEqual(
+            DockAppFolderHoverPolicy.defaultDelay,
+            0.2,
+            accuracy: 0.000_1
+        )
+    }
+
+    func testAppFolderHoverDelayStaysWithinConfigurableRange() {
+        XCTAssertEqual(
+            DockAppFolderHoverPolicy.normalizedDelay(-1),
+            0
+        )
+        XCTAssertEqual(
+            DockAppFolderHoverPolicy.normalizedDelay(0.35),
+            0.35
+        )
+        XCTAssertEqual(
+            DockAppFolderHoverPolicy.normalizedDelay(9),
+            2
+        )
+    }
+
+    func testAppFolderTargetRequiresCentralAcquisitionRegion() {
+        let frame = CGRect(x: 100, y: 20, width: 80, height: 80)
+
+        XCTAssertFalse(
+            DockAppFolderTargetGeometryPolicy.shouldAcquire(
+                location: CGPoint(x: 102, y: 60),
+                frame: frame
+            )
+        )
+        XCTAssertTrue(
+            DockAppFolderTargetGeometryPolicy.shouldAcquire(
+                location: CGPoint(x: 140, y: 60),
+                frame: frame
+            )
+        )
+    }
+
+    func testAppFolderTargetRetainsPointerOutsideAcquisitionRegion() {
+        let frame = CGRect(x: 100, y: 20, width: 80, height: 80)
+
+        XCTAssertTrue(
+            DockAppFolderTargetGeometryPolicy.shouldRetain(
+                location: CGPoint(x: 102, y: 60),
+                acquisitionFrame: frame,
+                currentFrame: frame
+            )
+        )
+    }
+
+    func testAppFolderTargetRetainsAcrossPreviewLayoutShift() {
+        let acquisitionFrame =
+            CGRect(x: 100, y: 20, width: 80, height: 80)
+        let shiftedFrame =
+            CGRect(x: 180, y: 20, width: 80, height: 80)
+
+        XCTAssertTrue(
+            DockAppFolderTargetGeometryPolicy.shouldRetain(
+                location: CGPoint(x: 140, y: 60),
+                acquisitionFrame: acquisitionFrame,
+                currentFrame: shiftedFrame
+            )
+        )
+        XCTAssertFalse(
+            DockAppFolderTargetGeometryPolicy.shouldRetain(
+                location: CGPoint(x: 90, y: 60),
+                acquisitionFrame: acquisitionFrame,
+                currentFrame: shiftedFrame
+            )
+        )
     }
 
     func testRequestedVisibleOrderPreservesInvisibleAuthoritativeSlots() {
