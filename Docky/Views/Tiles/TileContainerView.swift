@@ -37,9 +37,20 @@ struct TileContainerView: View {
     @State private var draggedProfileID: String?
     @State private var draggedProfileRevision: UInt64?
     @State private var draggedSpaceGeneration: UInt64?
+    @State private var draggedSourceTile: Tile?
     @State private var draggedTileOffset: CGFloat = 0
     @State private var draggedTileInitialFrame: CGRect?
+    @State private var draggedTileLastTranslation: CGSize = .zero
+    @State private var draggedTileLastLocation: CGPoint?
     @State private var draggedAppFolderTargetTileID: String?
+    @State private var draggedAppFolderTargetAcquisitionFrame:
+        CGRect?
+    @State private var draggedAppFolderHoverCandidateTileID:
+        String?
+    @State private var draggedAppFolderHoverCandidateAcquisitionFrame:
+        CGRect?
+    @State private var draggedAppFolderHoverWorkItem:
+        DispatchWorkItem?
     @State private var draggedTrashTargetTileID: String?
     @State private var draggedPickupCandidateTileID: String?
     @State private var tileFrames: [String: CGRect] = [:]
@@ -153,7 +164,13 @@ struct TileContainerView: View {
 
             draggedTileOverlay
         }
-        .background(TileDragKeyMonitor(keyDownHandler: handleDragKeyDown))
+        .background(
+            TileDragInputMonitor(
+                keyDownHandler: handleDragKeyDown,
+                leftMouseUpHandler:
+                    recoverDragAfterObservedMouseUp
+            )
+        )
     }
 
     @ViewBuilder
@@ -1402,7 +1419,11 @@ struct TileContainerView: View {
                 profileService.stateRevision
             draggedSpaceGeneration =
                 spaceInteractionEpoch.generation
+            draggedSourceTile = tile
             draggedTileInitialFrame = tileFrames[tile.id]
+            draggedTileLastTranslation = value.translation
+            draggedTileLastLocation = value.location
+            draggedAppFolderTargetAcquisitionFrame = nil
             // Drag wins over hover/widget previews — they'd block the cursor
             // and confuse the reorder animation otherwise.
             WindowPreviewWindowController.shared.dismissCurrent()
@@ -1435,20 +1456,27 @@ struct TileContainerView: View {
         }
 
         draggedTileOffset = projected(size: value.translation)
+        draggedTileLastTranslation = value.translation
+        draggedTileLastLocation = value.location
         draggedPickupCandidateTileID = dragPickupCandidateTileID(at: value.location)
 
-        if draggedBundleIdentifier != nil,
-           let groupTargetTileID = appFolderDropTargetTileID(
+        let appFolderHoverCandidateTileID =
+            draggedBundleIdentifier == nil
+            ? nil
+            : appFolderDropTargetTileID(
                 at: value.location,
                 selectedTileIDs: draggedSelectionTileIDs,
                 selectedBundleIdentifiers: draggedSelectionBundleIdentifiers
-             ) {
-            if draggedAppFolderTargetTileID != groupTargetTileID {
-                Self.logger.debug(
-                    "Drag folder target tile=\(tileLogDescription(tile), privacy: .public) targetTileID=\(groupTargetTileID, privacy: .public) selectionCount=\(draggedSelectionBundleIdentifiers.count, privacy: .public)"
-                )
-            }
-            draggedAppFolderTargetTileID = groupTargetTileID
+            )
+        updateAppFolderHoverCandidate(
+            appFolderHoverCandidateTileID,
+            sourceTile: tile
+        )
+
+        if let groupTargetTileID =
+                draggedAppFolderTargetTileID,
+           groupTargetTileID
+                == appFolderHoverCandidateTileID {
             draggedTrashTargetTileID = nil
             presentation.setInternalDragDestinations(
                 pinned: nil,
@@ -1465,7 +1493,7 @@ struct TileContainerView: View {
                 )
             }
             draggedTrashTargetTileID = trashTargetTileID
-            draggedAppFolderTargetTileID = nil
+            clearAppFolderDropTarget()
             presentation.setInternalDragDestinations(
                 pinned: nil,
                 trailing: nil
@@ -1475,11 +1503,15 @@ struct TileContainerView: View {
         }
 
         if hasCollectedAdditionalAppsDuringDrag {
-            clearDragPreviewDestinations()
+            draggedTrashTargetTileID = nil
+            presentation.setInternalDragDestinations(
+                pinned: nil,
+                trailing: nil
+            )
+            editMode.paletteDropDestination = nil
             return
         }
 
-        draggedAppFolderTargetTileID = nil
         draggedTrashTargetTileID = nil
         let projectedLocation =
             projected(point: value.location)
@@ -1534,9 +1566,74 @@ struct TileContainerView: View {
     }
 
     private func endDrag(for tile: Tile, value: DragGesture.Value) {
-        let translationMagnitude = sqrt(value.translation.width * value.translation.width + value.translation.height * value.translation.height)
+        resolveDragCompletion(
+            for: tile,
+            translation: value.translation,
+            completionSource: "gesture",
+            mouseUpEventNumber: nil,
+            finalUpdate: {
+                updateDrag(for: tile, value: value)
+            }
+        )
+    }
+
+    private func recoverDragAfterObservedMouseUp(
+        _ event: NSEvent
+    ) {
+        guard let sourceTileID = draggedTileID else {
+            return
+        }
+        let eventNumber = event.eventNumber
+
+        // A local event monitor runs before SwiftUI finishes dispatching the
+        // mouse-up. Give DragGesture.onEnded the first chance to commit, then
+        // recover only if the source view was removed during preview layout
+        // changes and the drag is still latched.
+        DispatchQueue.main.async {
+            guard self.draggedTileID == sourceTileID,
+                  let tile = self.draggedSourceTile,
+                  tile.id == sourceTileID else {
+                return
+            }
+            let diagnostics = DiagnosticsTrace.shared
+            diagnostics.record(
+                .input,
+                "tileReorderDragRecovered",
+                fields: [
+                    "reason":
+                        "sourceViewLifecycleEndedBeforeMouseUp",
+                    "tileToken":
+                        diagnostics.token(sourceTileID),
+                    "mouseUpEventNumber": eventNumber,
+                ]
+            )
+            Self.logger.error(
+                "Recovering drag after source view ended before mouse-up tile=\(self.tileLogDescription(tile), privacy: .public) eventNumber=\(eventNumber, privacy: .public)"
+            )
+            self.resolveDragCompletion(
+                for: tile,
+                translation:
+                    self.draggedTileLastTranslation,
+                completionSource: "mouseUpFallback",
+                mouseUpEventNumber: eventNumber,
+                finalUpdate: nil
+            )
+        }
+    }
+
+    private func resolveDragCompletion(
+        for tile: Tile,
+        translation: CGSize,
+        completionSource: String,
+        mouseUpEventNumber: Int?,
+        finalUpdate: (() -> Void)?
+    ) {
+        let translationMagnitude = sqrt(
+            translation.width * translation.width
+                + translation.height * translation.height
+        )
         Self.logger.info(
-            "endDrag tile=\(tileLogDescription(tile), privacy: .public) translation=(\(value.translation.width, privacy: .public),\(value.translation.height, privacy: .public)) magnitude=\(translationMagnitude, privacy: .public) draggedTileID=\(self.draggedTileID ?? "nil", privacy: .public)"
+            "endDrag tile=\(tileLogDescription(tile), privacy: .public) translation=(\(translation.width, privacy: .public),\(translation.height, privacy: .public)) magnitude=\(translationMagnitude, privacy: .public) draggedTileID=\(self.draggedTileID ?? "nil", privacy: .public) completionSource=\(completionSource, privacy: .public)"
         )
         let diagnostics = DiagnosticsTrace.shared
         diagnostics.record(.input, "tileReorderDragEnded", fields: [
@@ -1544,9 +1641,11 @@ struct TileContainerView: View {
             "draggedTileToken": diagnostics.token(draggedTileID),
             "sourceProfileToken": diagnostics.token(draggedProfileID),
             "activeProfileToken": diagnostics.token(profileService.activeProfileID),
-            "translationX": value.translation.width,
-            "translationY": value.translation.height,
+            "translationX": translation.width,
+            "translationY": translation.height,
             "translationMagnitude": translationMagnitude,
+            "completionSource": completionSource,
+            "mouseUpEventNumber": mouseUpEventNumber ?? -1,
         ])
 
         guard let sourceProfileID = draggedProfileID,
@@ -1593,7 +1692,7 @@ struct TileContainerView: View {
             return
         }
 
-        updateDrag(for: tile, value: value)
+        finalUpdate?()
 
         guard draggedTileID == tile.id else {
             Self.logger.info(
@@ -1797,6 +1896,7 @@ struct TileContainerView: View {
             "profileToken": diagnostics.token(sourceProfileID),
             "sourceRevision": sourceProfileRevision,
             "activeRevision": profileService.stateRevision,
+            "completionSource": completionSource,
         ])
         withAnimation(tileMutationAnimation) {
             clearDragState()
@@ -1838,7 +1938,7 @@ struct TileContainerView: View {
     }
 
     private func clearDragPreviewDestinations() {
-        draggedAppFolderTargetTileID = nil
+        clearAppFolderDropTarget()
         draggedTrashTargetTileID = nil
         presentation.setInternalDragDestinations(
             pinned: nil,
@@ -2245,11 +2345,152 @@ struct TileContainerView: View {
         draggedProfileID = nil
         draggedProfileRevision = nil
         draggedSpaceGeneration = nil
+        draggedSourceTile = nil
         draggedTileOffset = 0
         draggedTileInitialFrame = nil
-        draggedAppFolderTargetTileID = nil
+        draggedTileLastTranslation = .zero
+        draggedTileLastLocation = nil
+        clearAppFolderDropTarget()
         draggedTrashTargetTileID = nil
         draggedPickupCandidateTileID = nil
+    }
+
+    private func clearAppFolderDropTarget() {
+        draggedAppFolderHoverWorkItem?.cancel()
+        draggedAppFolderHoverWorkItem = nil
+        draggedAppFolderHoverCandidateTileID = nil
+        draggedAppFolderHoverCandidateAcquisitionFrame =
+            nil
+        draggedAppFolderTargetTileID = nil
+        draggedAppFolderTargetAcquisitionFrame = nil
+    }
+
+    private func updateAppFolderHoverCandidate(
+        _ candidateTileID: String?,
+        sourceTile: Tile
+    ) {
+        if let targetTileID =
+                draggedAppFolderTargetTileID,
+           targetTileID == candidateTileID {
+            return
+        }
+        if let hoverCandidateTileID =
+                draggedAppFolderHoverCandidateTileID,
+           hoverCandidateTileID == candidateTileID {
+            return
+        }
+
+        clearAppFolderDropTarget()
+        guard let candidateTileID,
+              let sourceTileID = draggedTileID,
+              sourceTileID == sourceTile.id,
+              let sourceProfileID = draggedProfileID,
+              let sourceProfileRevision =
+                draggedProfileRevision,
+              let sourceSpaceGeneration =
+                draggedSpaceGeneration else {
+            return
+        }
+
+        let acquisitionFrame = tileFrames[candidateTileID]
+        draggedAppFolderHoverCandidateTileID =
+            candidateTileID
+        draggedAppFolderHoverCandidateAcquisitionFrame =
+            acquisitionFrame
+
+        let delay =
+            preferences.appFolderCreationHoverDelay
+        let activate = {
+            activateAppFolderDropTargetIfCurrent(
+                candidateTileID,
+                acquisitionFrame: acquisitionFrame,
+                sourceTileID: sourceTileID,
+                sourceProfileID: sourceProfileID,
+                sourceProfileRevision:
+                    sourceProfileRevision,
+                sourceSpaceGeneration:
+                    sourceSpaceGeneration
+            )
+        }
+        if delay == 0 {
+            activate()
+            return
+        }
+
+        let workItem = DispatchWorkItem(
+            block: activate
+        )
+        draggedAppFolderHoverWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + delay,
+            execute: workItem
+        )
+    }
+
+    private func activateAppFolderDropTargetIfCurrent(
+        _ candidateTileID: String,
+        acquisitionFrame: CGRect?,
+        sourceTileID: String,
+        sourceProfileID: String,
+        sourceProfileRevision: UInt64,
+        sourceSpaceGeneration: UInt64
+    ) {
+        guard draggedTileID == sourceTileID,
+              draggedProfileID == sourceProfileID,
+              draggedProfileRevision
+                == sourceProfileRevision,
+              draggedSpaceGeneration
+                == sourceSpaceGeneration,
+              profileService.activeProfileID
+                == sourceProfileID,
+              profileService.stateRevision
+                == sourceProfileRevision,
+              spaceInteractionEpoch.generation
+                == sourceSpaceGeneration,
+              draggedAppFolderHoverCandidateTileID
+                == candidateTileID,
+              let location = draggedTileLastLocation,
+              appFolderDropTargetTileID(
+                  at: location,
+                  selectedTileIDs:
+                      draggedSelectionTileIDs,
+                  selectedBundleIdentifiers:
+                      draggedSelectionBundleIdentifiers
+              ) == candidateTileID else {
+            clearAppFolderDropTarget()
+            return
+        }
+
+        draggedAppFolderHoverWorkItem = nil
+        draggedAppFolderHoverCandidateTileID = nil
+        draggedAppFolderHoverCandidateAcquisitionFrame =
+            nil
+        draggedAppFolderTargetTileID = candidateTileID
+        draggedAppFolderTargetAcquisitionFrame =
+            acquisitionFrame
+        draggedTrashTargetTileID = nil
+        presentation.setInternalDragDestinations(
+            pinned: nil,
+            trailing: nil
+        )
+        editMode.paletteDropDestination = nil
+        Self.logger.debug(
+            "Drag folder target activated sourceTileID=\(sourceTileID, privacy: .public) targetTileID=\(candidateTileID, privacy: .public) hoverDelay=\(preferences.appFolderCreationHoverDelay, privacy: .public)"
+        )
+        let diagnostics = DiagnosticsTrace.shared
+        diagnostics.record(
+            .input,
+            "appFolderHoverActivated",
+            fields: [
+                "sourceTileToken":
+                    diagnostics.token(sourceTileID),
+                "targetTileToken":
+                    diagnostics.token(candidateTileID),
+                "delaySeconds":
+                    preferences
+                        .appFolderCreationHoverDelay,
+            ]
+        )
     }
 
     private func bundleIdentifier(for tile: Tile) -> String? {
@@ -2323,57 +2564,100 @@ struct TileContainerView: View {
         selectedBundleIdentifiers: [String]
     ) -> String? {
         let selectedBundleIdentifierSet = Set(selectedBundleIdentifiers)
+        let candidates =
+            surfaceOrderedDisplayTiles.filter {
+                isEligibleAppFolderDropTarget(
+                    $0,
+                    selectedTileIDs: selectedTileIDs,
+                    selectedBundleIdentifiers:
+                        selectedBundleIdentifierSet
+                )
+            }
+
+        // Once acquired, keep the target until the pointer leaves both its
+        // acquisition-time frame and its current frame. Switching to folder
+        // intent removes the reorder placeholder, which moves neighboring
+        // tiles; using the narrow entry inset on every update would let that
+        // layout motion toggle folder and insertion modes indefinitely.
+        let retainedTargetTileID =
+            draggedAppFolderTargetTileID
+                ?? draggedAppFolderHoverCandidateTileID
+        let retainedTargetAcquisitionFrame =
+            draggedAppFolderTargetTileID != nil
+            ? draggedAppFolderTargetAcquisitionFrame
+            : draggedAppFolderHoverCandidateAcquisitionFrame
+        if let retainedTargetTileID,
+           candidates.contains(where: {
+               $0.id == retainedTargetTileID
+           }),
+           let currentFrame =
+                tileFrames[retainedTargetTileID],
+           DockAppFolderTargetGeometryPolicy
+                .shouldRetain(
+                    location: location,
+                    acquisitionFrame:
+                        retainedTargetAcquisitionFrame,
+                    currentFrame: currentFrame
+                ) {
+            return retainedTargetTileID
+        }
 
         // Folder intent is resolved from what the user can actually see, not
         // only from the persistent pinned preview. A new/empty profile often
         // contains exclusively `running:*` app tiles; those are valid targets
         // and the commit atomically promotes both apps into a pinned folder.
-        for tile in surfaceOrderedDisplayTiles.reversed()
-        where !selectedTileIDs.contains(tile.id) {
-            switch tile.content {
-            case .app(let app):
-                guard tile.id
-                        != DockBadgeService.handoffTileID,
-                      !tile.id.hasPrefix(
-                          "folder-running:"
-                      ),
-                      !app.bundleIdentifier.isEmpty,
-                      app.bundleIdentifier
-                        != "com.apple.finder",
-                      !selectedBundleIdentifierSet
-                        .contains(
-                            app.bundleIdentifier
-                        )
-                else {
-                    continue
-                }
-            case .minimizedWindow:
-                continue
-            case .appFolder(let folder):
-                guard isPinnedReorderable(
-                    tileID: tile.id
-                ),
-                folder.bundleIdentifiers.allSatisfy({
-                    !selectedBundleIdentifierSet
-                        .contains($0)
-                }) else {
-                    continue
-                }
-            case .launchpad, .startMenu, .widget, .smartStack, .folder, .spacer, .flexibleSpacer, .divider, .trash:
-                continue
-            }
-
+        for tile in candidates.reversed() {
             guard let frame = tileFrames[tile.id] else {
                 continue
             }
 
-            let targetFrame = frame.insetBy(dx: frame.width * 0.18, dy: frame.height * 0.18)
-            if targetFrame.contains(location) {
+            if DockAppFolderTargetGeometryPolicy
+                .shouldAcquire(
+                    location: location,
+                    frame: frame
+                ) {
                 return tile.id
             }
         }
 
         return nil
+    }
+
+    private func isEligibleAppFolderDropTarget(
+        _ tile: Tile,
+        selectedTileIDs: Set<String>,
+        selectedBundleIdentifiers: Set<String>
+    ) -> Bool {
+        guard !selectedTileIDs.contains(tile.id) else {
+            return false
+        }
+
+        switch tile.content {
+        case .app(let app):
+            return tile.id
+                    != DockBadgeService.handoffTileID
+                && !tile.id.hasPrefix(
+                    "folder-running:"
+                )
+                && !app.bundleIdentifier.isEmpty
+                && app.bundleIdentifier
+                    != "com.apple.finder"
+                && !selectedBundleIdentifiers
+                    .contains(app.bundleIdentifier)
+        case .appFolder(let folder):
+            return isPinnedReorderable(
+                tileID: tile.id
+            )
+                && folder.bundleIdentifiers
+                    .allSatisfy {
+                        !selectedBundleIdentifiers
+                            .contains($0)
+                    }
+        case .minimizedWindow, .launchpad, .startMenu,
+             .widget, .smartStack, .folder, .spacer,
+             .flexibleSpacer, .divider, .trash:
+            return false
+        }
     }
 
     private func trashDropTargetTileID(at location: CGPoint, sourceTileID: String) -> String? {
@@ -2679,11 +2963,15 @@ private struct TileFramePreferenceKey: PreferenceKey {
     }
 }
 
-private struct TileDragKeyMonitor: NSViewRepresentable {
+private struct TileDragInputMonitor: NSViewRepresentable {
     let keyDownHandler: (NSEvent) -> Bool
+    let leftMouseUpHandler: (NSEvent) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(keyDownHandler: keyDownHandler)
+        Coordinator(
+            keyDownHandler: keyDownHandler,
+            leftMouseUpHandler: leftMouseUpHandler
+        )
     }
 
     func makeNSView(context: Context) -> NSView {
@@ -2694,6 +2982,8 @@ private struct TileDragKeyMonitor: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.keyDownHandler = keyDownHandler
+        context.coordinator.leftMouseUpHandler =
+            leftMouseUpHandler
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -2702,17 +2992,31 @@ private struct TileDragKeyMonitor: NSViewRepresentable {
 
     final class Coordinator {
         var keyDownHandler: (NSEvent) -> Bool
+        var leftMouseUpHandler: (NSEvent) -> Void
         private var eventMonitor: Any?
 
-        init(keyDownHandler: @escaping (NSEvent) -> Bool) {
+        init(
+            keyDownHandler: @escaping (NSEvent) -> Bool,
+            leftMouseUpHandler:
+                @escaping (NSEvent) -> Void
+        ) {
             self.keyDownHandler = keyDownHandler
+            self.leftMouseUpHandler = leftMouseUpHandler
         }
 
         func start() {
             guard eventMonitor == nil else { return }
-            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            eventMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.keyDown, .leftMouseUp]
+            ) { [weak self] event in
                 guard let self else { return event }
-                return self.keyDownHandler(event) ? nil : event
+                if event.type == .leftMouseUp {
+                    self.leftMouseUpHandler(event)
+                    return event
+                }
+                return self.keyDownHandler(event)
+                    ? nil
+                    : event
             }
         }
 

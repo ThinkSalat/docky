@@ -66,6 +66,7 @@ final class NormalizedPreferenceMutationTests: XCTestCase {
         throws {
         let source = try dockyPreferencesSource()
         let scalarProperties = [
+            "appFolderCreationHoverDelay",
             "autohideWindowDelay",
             "autohideAnimationDuration",
             "fullscreenRevealDelay",
